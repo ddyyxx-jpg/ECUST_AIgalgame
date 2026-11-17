@@ -19,6 +19,13 @@ export interface AppDeps {
   createRoom(mode: "solo" | "coop", userId?: string): Promise<{ roomId: string; actorId: string }>;
   /** 开发期账号：没有登录态时用 GALGAME_DEV_USER 兜底（上线接登录中间件后删掉） */
   devUser?: string;
+  /** 世界层永久记忆（P3）：只在管理员端点里被调用 */
+  canonize?: {
+    retireRoom(roomId: string): Promise<{ written: string[]; candidates: number }>;
+    tombstone(memoryId: string, reason: string): Promise<boolean>;
+  };
+  /** 管理员令牌；canonize 端点用它鉴权（地图端点由 MapService 自己校验） */
+  adminToken?: string;
   version: string;
 }
 
@@ -167,6 +174,29 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       reply.raw.end();
     }
     return reply;
+  });
+
+  // ---------------------------------------------------------------- 世界层永久记忆（docs/08 §9.3，管理员）
+  app.post("/api/v1/admin/canonize/run", async (req, reply) => {
+    if (!deps.canonize) return reply.code(404).send({ ok: false, code: "E_FORBIDDEN", message: "canonize 未启用" });
+    if (!adminTokenOf(req.headers) || adminTokenOf(req.headers) !== (deps.adminToken ?? "")) {
+      return reply.code(403).send({ ok: false, code: "E_FORBIDDEN", message: "需要管理员令牌" });
+    }
+    const body = (req.body ?? {}) as { roomId?: string };
+    if (!body.roomId) return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "roomId 必填" });
+    const report = await safe(reply, () => deps.canonize!.retireRoom(body.roomId!));
+    return { ok: true, report };
+  });
+
+  app.post("/api/v1/admin/canonize/tombstone", async (req, reply) => {
+    if (!deps.canonize) return reply.code(404).send({ ok: false, code: "E_FORBIDDEN", message: "canonize 未启用" });
+    if (!adminTokenOf(req.headers) || adminTokenOf(req.headers) !== (deps.adminToken ?? "")) {
+      return reply.code(403).send({ ok: false, code: "E_FORBIDDEN", message: "需要管理员令牌" });
+    }
+    const body = (req.body ?? {}) as { memoryId?: string; reason?: string };
+    if (!body.memoryId) return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "memoryId 必填" });
+    const done = await deps.canonize.tombstone(body.memoryId, body.reason ?? "管理员撤回");
+    return done ? { ok: true } : { ok: false, code: "E_MEMORY_IMMUTABLE", message: "撤回失败（条目不存在或不可变）" };
   });
 
   // ---------------------------------------------------------------- 地图（docs/06 §4）

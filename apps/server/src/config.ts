@@ -15,6 +15,13 @@ export interface ServerConfig {
    * 测试 fixture 不必伪造审核器字段。
    */
   audit?: { baseUrl: string; model: string; apiKey: string; timeoutMs: number };
+  /**
+   * 世界层永久记忆的自动审核（canonize，docs/08 §7）：必须与叙事/内容审核模型不同家族。
+   * 可选：不配 = `DenyAllJudge`（拒绝所有候选，fail-closed）。
+   */
+  canonize?: { enabled: boolean; baseUrl: string; model: string; apiKey: string; timeoutMs: number; dailyCap: number; sampleRate: number };
+  /** 世界印象的 TTL（天）；过期未投递直接丢弃 */
+  impressionTtlDays?: number;
 }
 
 function env(k: string, d: string): string {
@@ -41,6 +48,17 @@ export function loadConfig(): ServerConfig {
       apiKey: env("GALGAME_LLM_API_KEY", ""),
       timeoutMs: Number(env("GALGAME_LLM_TIMEOUT_MS", "20000")),
     },
+    canonize: {
+      enabled: env("GALGAME_CANONIZE_ENABLED", "false") === "true",
+      // 与叙事/审核模型分开配置：世界层写错一次所有玩家都受影响，不能同一家模型自己判自己
+      baseUrl: env("GALGAME_CANONIZE_BASE_URL", ""),
+      model: env("GALGAME_CANONIZE_MODEL", ""),
+      apiKey: env("GALGAME_CANONIZE_API_KEY", ""),
+      timeoutMs: Number(env("GALGAME_CANONIZE_TIMEOUT_MS", "20000")),
+      dailyCap: Number(env("GALGAME_CANONIZE_DAILY_CAP", "200")),
+      sampleRate: Number(env("GALGAME_CANONIZE_SAMPLE_RATE", "0.05")),
+    },
+    impressionTtlDays: Number(env("GALGAME_IMPRESSION_TTL_DAYS", "30")),
     audit: {
       // 审核器必须独立配置：不继承主模型端点/key（否则等于同一家模型自己审自己），
       // 也不写死模型名（代码里不许出现具体模型）。三项齐全才算配好，缺一 → 放行态 + 启动告警。
@@ -60,4 +78,10 @@ export function hasLlm(cfg: ServerConfig): boolean {
 export function hasAudit(cfg: ServerConfig): boolean {
   const a = cfg.audit;
   return !!a && a.baseUrl !== "" && a.apiKey !== "" && a.model !== "";
+}
+
+/** 只有"启用 + 三项齐全"才算配好；未配好一律 DenyAllJudge（没有"默认放行"这条路） */
+export function hasCanonize(cfg: ServerConfig): boolean {
+  const c = cfg.canonize;
+  return !!c && c.enabled && c.baseUrl !== "" && c.apiKey !== "" && c.model !== "";
 }

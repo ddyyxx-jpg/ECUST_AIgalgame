@@ -2,7 +2,7 @@
  * 装配层：把 content/ 里的数据、packages/ 里的引擎、免费的 ecust/超算 API 接起来。
  * 这里是唯一知道"世界长什么样"的地方；引擎本身不认识任何具体名字。
  */
-import { readFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { DialogueDirector, Entity, Envelope, Proposal, Registry } from "../../../packages/shared/src/index.ts";
@@ -22,8 +22,10 @@ import {
   resolveRealityPolicy,
 } from "../../../packages/engine/src/index.ts";
 import { MockLlm, OpenAiCompatClient } from "../../../packages/llm/src/index.ts";
+import { CanonizeJob, worldRoomId } from "../../../packages/engine/src/index.ts";
 import type { ServerConfig } from "./config.ts";
-import { hasAudit, hasLlm } from "./config.ts";
+import { hasAudit, hasCanonize, hasLlm } from "./config.ts";
+import { DenyAllJudge, LlmCanonizeJudge } from "./canonize.ts";
 import { LlmAudit } from "./audit.ts";
 import { MapService } from "./map.ts";
 import { loadSceneDescs, offlineNarrative } from "./offline-narrator.ts";
@@ -63,7 +65,13 @@ async function loadDirectors(dir: string): Promise<DialogueDirector[]> {
 }
 
 /** 装配结果 = HTTP 层需要的 deps，另外把引擎内部件给测试/运维用（arbiter 不对外暴露成端点） */
-export type App = AppDeps & { arbiter: DefaultArbiter } & { memory: EventSourcedMemory };
+export type App = AppDeps & {
+  arbiter: DefaultArbiter;
+  memory: EventSourcedMemory;
+  /** 世界层永久记忆的发布器（server 只做调度，闸门在引擎里） */
+  canonize: CanonizeJob;
+  worldRoom: string;
+};
 
 export async function createApp(cfg: ServerConfig): Promise<App> {
   const contentDir = path.resolve(cfg.contentDir);
@@ -184,6 +192,47 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
 
   const turn = new DefaultTurn({ store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality });
 
+  // ---------------------------------------------------------------- 世界层永久记忆（docs/08 §7）
+  // 世界房间 room_world_<worldId>：无成员、不可进入，只存 permanent。
+  // 审核器未配置 = DenyAllJudge（fail-closed）：宁可一条都写不进去，也不把没审过的"常识"发给所有人。
+  const worldId = canon.worldId;
+  const worldRoom = worldRoomId(worldId);
+  const canonizeCfg = cfg.canonize;
+  const judge =
+    canonizeCfg && hasCanonize(cfg)
+      ? new LlmCanonizeJudge(
+          new OpenAiCompatClient({
+            baseUrl: canonizeCfg.baseUrl,
+            model: canonizeCfg.model,
+            apiKey: canonizeCfg.apiKey,
+            timeoutMs: canonizeCfg.timeoutMs,
+          }),
+        )
+      : new DenyAllJudge();
+  if (canonizeCfg?.enabled && !hasCanonize(cfg)) {
+    console.warn("[canonize] 已启用但缺少独立审核器（GALGAME_CANONIZE_BASE_URL/MODEL/API_KEY），所有候选将被拒绝（fail-closed）");
+  }
+  const versionFile = path.join(path.resolve(cfg.dataDir), "worlds", worldId, "mem.version");
+  const canonize = new CanonizeJob({
+    store,
+    arbiter,
+    worldRoom,
+    worldId,
+    memory,
+    judge,
+    limits: {
+      enabled: canonizeCfg?.enabled ?? false,
+      dailyCap: canonizeCfg?.dailyCap ?? 200,
+      minWitness: 2,
+      perSourceCap: 2,
+    },
+    onVersionBump: async (_worldId, next) => {
+      await mkdir(path.dirname(versionFile), { recursive: true });
+      await writeFile(versionFile, JSON.stringify({ worldId, version: next, updatedAt: now() }), "utf8");
+    },
+    now,
+  });
+
   const map = new MapService({
     store,
     turn,
@@ -201,6 +250,9 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     store,
     arbiter,
     memory,
+    canonize,
+    worldRoom,
+    adminToken: cfg.adminToken,
     turn,
     map,
     settings,
