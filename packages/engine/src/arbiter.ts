@@ -4,6 +4,11 @@
  * 一次 apply = 逐条校验 → 在状态副本上试算 → 整批通过才追加事件。
  * 拦下的提案进 rejected[]（02 §4：坏条目丢弃、不阻断其余条目），
  * 唯一的例外是 op 名不在 12 个原语闭集内：那是代码写错了，整批回滚。
+ *
+ * 回合预算：`xWritesPerTurn` / `maxDeltaPerTurn` 是**整回合**限额，不是单次 apply 的限额。
+ * 同一回合拆成多次 apply 时，Turn 用 createTurnBudget() 建一个预算对象并在每次 apply 传同一个
+ * `turnBudget`（ArbiterApplyOptions），计数因此跨批累计；不传时按 cause.causedBy（回退 cause.id）
+ * 隐式归集，与旧行为一致。
  */
 
 import type {
@@ -61,7 +66,11 @@ export interface ArbiterOptions {
   memories?: MemoryReader;
 }
 
-interface TurnBudget {
+/**
+ * 整回合预算（引擎内部契约，不在跨包类型里）：同一次 Turn 内多次 apply 共享同一份计数。
+ * 由 createTurnBudget() 创建；Turn 负责在回合结束时 endTurn(turnKey)。
+ */
+export interface TurnBudget {
   /** `entityId|key` → 本回合累计变化量（限额是按回合累计，不是按单条） */
   delta: Map<string, number>;
   /** 本回合 x. 区已写入条数（多次 apply 共享） */
@@ -69,6 +78,13 @@ interface TurnBudget {
   /** 本回合已写记忆条数：memory id 的序号，保证同回合同 owner 不撞 id */
   memSeq: number;
 }
+
+export function createTurnBudget(): TurnBudget {
+  return { delta: new Map(), xWrites: 0, memSeq: 0 };
+}
+
+/** apply 可选参数：在 03 §2.3 的 ApplyOptions 之上加引擎内部的回合预算 */
+export type ArbiterApplyOptions = ApplyOptions & { turnBudget?: TurnBudget };
 
 export class DefaultArbiter {
   private readonly store: EventLog;
@@ -98,16 +114,31 @@ export class DefaultArbiter {
     return run;
   }
 
-  private budgetFor(turnKey: string): TurnBudget {
-    let b = this.budgets.get(turnKey);
-    if (b) return b;
-    if (this.budgets.size >= this.maxTrackedTurns) {
+  /** 登记一份预算到回合键（超出 maxTrackedTurns 按插入顺序淘汰最旧的一档） */
+  private trackBudget(turnKey: string, budget: TurnBudget): void {
+    if (!this.budgets.has(turnKey) && this.budgets.size >= this.maxTrackedTurns) {
       const oldest = this.budgets.keys().next();
       if (!oldest.done) this.budgets.delete(oldest.value);
     }
-    b = { delta: new Map(), xWrites: 0, memSeq: 0 };
-    this.budgets.set(turnKey, b);
-    return b;
+    this.budgets.set(turnKey, budget);
+  }
+
+  private budgetFor(turnKey: string): TurnBudget {
+    const existing = this.budgets.get(turnKey);
+    if (existing) return existing;
+    const budget = createTurnBudget();
+    this.trackBudget(turnKey, budget);
+    return budget;
+  }
+
+  /**
+   * 显式预算优先；传了就登记到回合键——这样同回合内没传预算的入口
+   * （如 Turn 走审核处置的 audit.punish）也会共享同一份计数，而不是另开一档。
+   */
+  private budgetOf(turnKey: string, explicit?: TurnBudget): TurnBudget {
+    if (!explicit) return this.budgetFor(turnKey);
+    this.trackBudget(turnKey, explicit);
+    return explicit;
   }
 
   /** 回合结束由编排层调用（Turn 在 commit 后调用），避免预算表无限增长 */
@@ -119,15 +150,16 @@ export class DefaultArbiter {
   async dryRun(roomId: RoomId, ops: Proposal[]): Promise<ValidationResult> {
     const seq = await this.store.load(roomId); // 先载入：文件实现未载入时 seq 是 0
     const state = await this.store.snapshot(roomId);
-    const sim = this.simulate(seq, state, ops, this.pseudoCause(roomId, seq), "atomic", { delta: new Map(), xWrites: 0, memSeq: 0 });
+    const sim = this.simulate(seq, state, ops, this.pseudoCause(roomId, seq), "atomic", createTurnBudget());
     return { ok: !sim.fatal && sim.rejected.length === 0, rejected: sim.rejected };
   }
 
   /**
    * 裁决 + 提交。默认 atomic：**任何一条被拒 → 整批不落库**（03 §2.3 / 02 §4）。
    * partial 只在明确需要"坏条目丢弃、其余照做"的场景显式指定。
+   * 传 `turnBudget` 时跨多次 apply 共享整回合计数；不传则按 cause.causedBy（回退 cause.id）归集。
    */
-  async apply(roomId: RoomId, ops: Proposal[], cause: Envelope, opts: ApplyOptions = {}): Promise<ApplyResult> {
+  async apply(roomId: RoomId, ops: Proposal[], cause: Envelope, opts: ArbiterApplyOptions = {}): Promise<ApplyResult> {
     return this.exclusive(roomId, async () => {
       const mode: ApplyMode = opts.mode ?? "atomic";
       // 必须先载入再读 seq：FileStore 懒加载，重启后未载入时 seq 是 0（MAJOR-1）
@@ -143,7 +175,7 @@ export class DefaultArbiter {
 
       const state = await this.store.snapshot(roomId);
       const turnKey = cause.causedBy ?? cause.id;
-      const budget = this.budgetFor(turnKey);
+      const budget = this.budgetOf(turnKey, opts.turnBudget);
       // 失败回滚时预算也要回滚，否则一条被拒的提案会白吃掉本回合额度
       const deltaBackup = new Map(budget.delta);
       const xBackup = budget.xWrites;
@@ -244,7 +276,7 @@ export class DefaultArbiter {
         // 只有真正通过的写入才消耗额度：被拒的条目不占额度（否则 partial 模式会"越错越紧"）
         budget.xWrites += 1;
         if (budget.xWrites > this.limits.xWritesPerTurn) {
-          rejected.push({ proposal, code: "E_X_LIMIT", detail: `x. 区每批最多写 ${this.limits.xWritesPerTurn} 条` });
+          rejected.push({ proposal, code: "E_X_LIMIT", detail: `x. 区每回合最多写 ${this.limits.xWritesPerTurn} 条` });
           continue;
         }
       }

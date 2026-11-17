@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { AttrDef, Envelope, Proposal } from "../../shared/src/contract/types.ts";
-import { DefaultArbiter } from "./arbiter.ts";
+import { createTurnBudget, DefaultArbiter } from "./arbiter.ts";
 import { JsonRegistry } from "./registry.ts";
 import { EventSourcedStore } from "./store.ts";
 
@@ -23,7 +23,7 @@ function cause(id = "evt_turn_1", type = "turn.accepted"): Envelope {
   return { v: 1, id, roomId: ROOM, seq: 0, ts: 1000, actorId: PLR, type, payload: {} };
 }
 
-function setup(money = 2) {
+function setup(money = 2, limits?: ConstructorParameters<typeof DefaultArbiter>[0]["limits"]) {
   const store = new EventSourcedStore({ worldId: "world_test", locId: SHOP });
   const mk = (seq: number, type: string, payload: unknown): Envelope => ({
     v: 1, id: `evt_seed_${seq}`, roomId: ROOM, seq, ts: seq, actorId: "system", type, payload,
@@ -36,7 +36,7 @@ function setup(money = 2) {
     mk(2, "entity.created", { entity: ent(PLR, "plr", "我", { money, stamina: 60 }) }),
   ]);
   const registry = new JsonRegistry({ attrs: ATTRS, events: [], intents: [], tools: [], ops: [] });
-  const arbiter = new DefaultArbiter({ store, registry, now: () => 1000 });
+  const arbiter = new DefaultArbiter({ store, registry, limits, now: () => 1000 });
   return { store, registry, arbiter };
 }
 
@@ -129,6 +129,58 @@ describe("回合限额（整回合累计，不能拆批绕过）", () => {
     await arbiter.apply(ROOM, [{ op: "attr.delta", args: { entityId: PLR, key: "stamina", delta: -20 }, by: "llm" }], turnCause);
     await arbiter.apply(ROOM, [{ op: "attr.delta", args: { entityId: PLR, key: "stamina", delta: -20 }, by: "llm" }], turnCause);
     expect(store.state(ROOM).entities[PLR]?.attrs.stamina).toBe(before - 25);
+  });
+
+  it("显式 turnBudget：同回合两次 apply 共享 x. 写计数，超限的第二批整批回滚", async () => {
+    const { store, arbiter } = setup(2, { xWritesPerTurn: 1 });
+    const budget = createTurnBudget();
+    const xSet = (i: number): Proposal => ({ op: "attr.set", args: { entityId: PLR, key: `x.k${i}`, value: i }, by: "llm" });
+
+    const first = await arbiter.apply(ROOM, [xSet(0)], cause("evt_t1"), { turnBudget: budget });
+    expect(first.ok).toBe(true);
+    expect(budget.xWrites).toBe(1);
+
+    const seqBefore = store.seq(ROOM);
+    const second = await arbiter.apply(ROOM, [xSet(1)], cause("evt_t1b"), { turnBudget: budget });
+    expect(second.ok).toBe(false);
+    expect(second.rejected[0]?.code).toBe("E_X_LIMIT");
+    expect(second.events).toHaveLength(0);
+    expect(store.seq(ROOM)).toBe(seqBefore);
+    // 被拒的批不吃额度
+    expect(budget.xWrites).toBe(1);
+  });
+
+  it("显式 turnBudget：同属性 attr.delta 跨两批累计超 maxDeltaPerTurn → 第二批被拒且整批回滚", async () => {
+    const { store, arbiter } = setup(2);
+    const budget = createTurnBudget();
+    const spend = (): Proposal => ({ op: "attr.delta", args: { entityId: PLR, key: "stamina", delta: -20, mustKeep: true }, by: "llm" });
+
+    const first = await arbiter.apply(ROOM, [spend()], cause("evt_t2"), { turnBudget: budget });
+    expect(first.ok).toBe(true);
+    const staminaAfterFirst = store.state(ROOM).entities[PLR]?.attrs.stamina as number;
+    const seqBefore = store.seq(ROOM);
+
+    const second = await arbiter.apply(ROOM, [spend()], cause("evt_t2b"), { turnBudget: budget });
+    expect(second.ok).toBe(false);
+    expect(second.rejected[0]?.code).toBe("E_PRECONDITION");
+    expect(second.events).toHaveLength(0);
+    expect(store.seq(ROOM)).toBe(seqBefore);
+    expect(store.state(ROOM).entities[PLR]?.attrs.stamina).toBe(staminaAfterFirst);
+  });
+
+  it("显式预算登记到回合键：同回合未显式传预算的入口（审核处置）共享计数", async () => {
+    const { store, arbiter } = setup(2, { xWritesPerTurn: 1 });
+    const budget = createTurnBudget();
+    const turnCause = { ...cause("evt_audit"), causedBy: "turn_shared" } as Envelope;
+    await arbiter.apply(ROOM, [{ op: "attr.set", args: { entityId: PLR, key: "x.a", value: 1 }, by: "engine.turn" }], turnCause, { turnBudget: budget });
+
+    const seqBefore = store.seq(ROOM);
+    // 审核处置只拿得到 cause（causedBy=本回合），不传 turnBudget
+    const punished = await arbiter.apply(ROOM, [{ op: "attr.set", args: { entityId: PLR, key: "x.b", value: 2 }, by: "engine.audit" }], turnCause);
+    expect(punished.ok).toBe(false);
+    expect(punished.rejected[0]?.code).toBe("E_X_LIMIT");
+    expect(store.seq(ROOM)).toBe(seqBefore);
+    expect(budget.xWrites).toBe(1);
   });
 
   it("被拒的整批不吃额度：失败后重试仍可用满 25", async () => {
