@@ -480,3 +480,14 @@ dl { margin:0; } .row { display:flex; justify-content:space-between; font-size:1
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; }
 }
+
+/* 「我的存档」（issue #7）：标题页里的房间列表 */
+.save-list { display:flex; flex-direction:column; gap:10px; margin-top:18px; }
+.save-row {
+  display:flex; justify-content:space-between; gap:14px; align-items:flex-start;
+  padding:12px 14px; border:1px solid var(--line); border-radius:12px; background:#131722;
+}
+.save-main { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.save-main strong { font-size:15px; }
+.save-main .muted { font-size:12px; }
+.save-room { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; opacity:.7; }

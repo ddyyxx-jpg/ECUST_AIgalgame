@@ -7,6 +7,9 @@ import type { Memory, MemoryRecord, Registry, Store, Turn, TurnEvent } from "../
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
 import type { LlmSettings } from "./settings.ts";
+import type { SaveIndex } from "./saves.ts";
+import type { TurnHistory } from "./turn-history.ts";
+import { registerResumeRoutes } from "./resume.routes.ts";
 
 export interface AppDeps {
   store: Store;
@@ -36,6 +39,10 @@ export interface AppDeps {
   adminToken?: string;
   /** 世界印象（用户投影）：/me 只读，投递在 Turn 里 */
   impressions?: { pending(userId: string, roomId: string, limit: number): Promise<unknown[]>; count?(userId: string): Promise<number> };
+  /** 回合历史（issue #7）：只记已提交回合，用于续玩重放 */
+  history?: TurnHistory;
+  /** 存档索引（issue #7）：账号 → 房间游标 */
+  saves?: SaveIndex;
   version: string;
 }
 
@@ -57,7 +64,7 @@ function schemaError(message: string): GameError {
  * 账号维度：优先 `X-User-Id` 头（联机/生产由登录态中间件注入），其次请求体，最后开发期默认值。
  * 只在服务端用；绝不把 userId 当权限凭据（它是"哪份记忆档案"的键，不是 token）。
  */
-function userIdOf(req: FastifyRequest, deps: AppDeps, body?: { userId?: string }): string | undefined {
+export function userIdOf(req: FastifyRequest, deps: AppDeps, body?: { userId?: string }): string | undefined {
   const raw = req.headers["x-user-id"];
   const header = deps.trustUserHeader === false ? undefined : Array.isArray(raw) ? raw[0] : raw;
   const fromBody = body?.userId;
@@ -71,7 +78,7 @@ const WORLD_ROOM_PREFIX = "room_world_";
  * 世界层房间（room_world_<worldId>）是永久记忆的存储房间，**没有成员、不能进**。
  * 不拦住的话，客户端可以 GET 它的完整事件流，把"这个世界知道的事"连同 sourceRefs/隐私扫描细节全读走（审阅 P1）。
  */
-function isWorldRoom(roomId: string): boolean {
+export function isWorldRoom(roomId: string): boolean {
   return roomId.startsWith(WORLD_ROOM_PREFIX);
 }
 
@@ -149,9 +156,30 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   });
 
   app.post("/api/v1/rooms", async (req) => {
-    const body = (req.body ?? {}) as { mode?: "solo" | "coop"; userId?: string };
+    const body = (req.body ?? {}) as { mode?: "solo" | "coop"; userId?: string; scenarioId?: string };
     const userId = userIdOf(req, deps, body);
     const room = await deps.createRoom(body.mode === "coop" ? "coop" : "solo", userId);
+    // 建房即登记存档索引（issue #7）：lastCommittedSeq 从建房种子事件之后算起。
+    // 登记失败不回滚房间——房间本体是权威的，索引只是"我玩过哪些"的投影。
+    if (userId && deps.saves) {
+      const ts = Date.now();
+      const scenarioId = typeof body.scenarioId === "string" && body.scenarioId.trim() ? body.scenarioId.trim().slice(0, 64) : "default";
+      // Store 契约没有 seq()（FileStore 的快捷方式是内部实现）：用事件尾序号登记游标
+      const seeded = await deps.store.events(room.roomId, 0, 500).catch(() => []);
+      try {
+        await deps.saves.upsert(userId, {
+          roomId: room.roomId,
+          scenarioId,
+          createdAt: ts,
+          updatedAt: ts,
+          lastTurnId: "",
+          lastCommittedSeq: seeded.length ? seeded[seeded.length - 1]!.seq : 0,
+          formatVersion: 1,
+        });
+      } catch (e) {
+        console.warn("[saves] 建房登记失败（房间已创建）:", e);
+      }
+    }
     return { ...room, ...(userId ? { userId } : {}) };
   });
 
@@ -170,6 +198,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     }
     return { ok: true, userId, profile, impressionCount, pendingImpressions };
   });
+
+  // 续玩/存档（issue #7）：独立区块，见 resume.routes.ts
+  registerResumeRoutes(app, deps, { userIdOf, isWorldRoom });
 
   app.get("/api/v1/rooms/:roomId/state", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };

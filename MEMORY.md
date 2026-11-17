@@ -152,6 +152,10 @@
 - 2026-11-17 ｜ main ｜ `CHANGELOG.md` ｜ docs ｜ 新增根目录更新日志（M0 / 引擎 3.0.0 / 审核与锚定 / 地图 v0.2，按日期分段） ｜ GitHub 上需要可读的更新日志；协议版本以 CONTRACT_VERSION 为准 ｜ tsc 0；14 文件/117 用例；8 项契约 ｜ 无
 - 2026-11-17 ｜ main ｜ `CHANGELOG.md`（二次） ｜ docs ｜ 小节标题对齐 tag（v0.1.0/v0.1.1/v0.1.2/v0.2.0），拆出引擎与审核/锚定两段 ｜ 让 CHANGELOG 与 GitHub Releases 一一对应 ｜ tsc 0；14 文件/117 用例；8 项契约 ｜ 无
 
+### feat/save-session
+
+- 2026-11-17 ｜ `feat/save-session` ｜ 本提交 ｜ feat ｜ issue #7「续玩/会话恢复」MVP：`data/rooms/<roomId>.history.jsonl` 记已提交回合（`withTurnRecording` 包在 Turn 外层，含 map.travel；只在 turn.commit 后写、turnId 去重）、`data/users/<userId>/saves.json` 存档索引（建房登记 / turn.commit 推进游标 / 只删索引，tmp+rename 原子写）、3 个端点（`GET /rooms/:id/history`、`GET/DELETE /me/saves`，docs/03 §5.2.5）、web 本地身份 `ecust.playerId` + 标题页「我的存档」+ 进房重放历史不重播序章、新增 `docs/09-存档与会话恢复方案.md` ｜ 权威仍是事件日志，历史和索引都只是投影：写失败只告警不回滚已提交回合；恢复不产生新回合；不 bump CONTRACT_VERSION、不改引擎、不新增 op；本地 UUID 仅开发期身份（可伪造） ｜ tsc 0；29 文件/201 用例全过（新增 history 9 / saves 5 / e2e 2）；check:contract 8 项全过；build:web 275.17 kB / gzip 87.96 kB ｜ 已知限制：speakers 恒空、历史最多一次 200 行、本地身份清空即丢索引（房间仍可进）、历史写失败只告警；恢复后前端不重拉历史（仅本回合流式追加 + 重拉 state）
+
 ### feat/memory-module
 
 - 2026-11-17 ｜ `feat/memory-module` ｜ `<P0>` ｜ docs ｜ 记忆模块 P0 契约：`CONTRACT_VERSION 3.1.0`、`PROMPT_VERSION 2026-11-17.1`、新增 `MemoryTier/MemoryStatus/MemoryProfile/ImpressionNotice`、`Memory.recall/profile`、`TurnRequest.userId`、`RoomMember.userId`、`memory.write` 只增字段、新事件 `memory.tombstoned`/`memory.impression.queued`、33 错误码、`memory.*/canonize.*/impression.*` 配置键、新建 `docs/prompts/04-memory-writer.md`、`00-world-system.md` 加 S1.5 世界记忆占位 ｜ 文档先于代码（§10.10 记录版本影响）；依据 `docs/08` §2；12 op 与 `apiVersion` 不变 → 3.1.0 为 minor（只增字段/类型/事件） ｜ tsc 0；17 文件/134 用例；check:contract 8 项（3.1.0） ｜ 下一步 P1：事件溯源 `memory.ts` + `memory.gate.ts` + 两阶段裁决

@@ -27,6 +27,8 @@ import type { ServerConfig } from "./config.ts";
 import { hasAudit, hasCanonize, hasLlm } from "./config.ts";
 import { DenyAllJudge, LlmCanonizeJudge } from "./canonize.ts";
 import { FileImpressions } from "./impressions.ts";
+import { SaveIndex } from "./saves.ts";
+import { TurnHistory, withTurnRecording } from "./turn-history.ts";
 import { LlmAudit } from "./audit.ts";
 import { MapService } from "./map.ts";
 import { loadSceneDescs, offlineNarrative } from "./offline-narrator.ts";
@@ -72,6 +74,10 @@ export type App = AppDeps & {
   /** 世界层永久记忆的发布器（server 只做调度，闸门在引擎里） */
   canonize: CanonizeJob;
   worldRoom: string;
+  /** 续玩（issue #7）：已提交回合的对话历史（旁路文件，不是权威状态） */
+  history: TurnHistory;
+  /** 续玩（issue #7）：账号维度的存档索引 */
+  saves: SaveIndex;
 };
 
 export async function createApp(cfg: ServerConfig): Promise<App> {
@@ -198,7 +204,13 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     now,
   });
 
-  const turn = new DefaultTurn({ store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions });
+  // 续玩（issue #7）：历史和存档索引都是"投影"，写失败不影响已提交的回合。
+  // 历史挂在 Turn 外层（而不是 HTTP 路由里），这样 map.travel 这类内部回合也能被记录。
+  const dataRoot = path.resolve(cfg.dataDir);
+  const history = new TurnHistory(path.join(dataRoot, "rooms"));
+  const saves = new SaveIndex(path.join(dataRoot, "users"));
+  const rawTurn = new DefaultTurn({ store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions });
+  const turn = withTurnRecording(rawTurn, { history, saves, store, now });
 
   // ---------------------------------------------------------------- 世界层永久记忆（docs/08 §7）
   // 世界房间 room_world_<worldId>：无成员、不可进入，只存 permanent。
@@ -300,6 +312,8 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     impressions,
     worldRoom,
     adminToken: cfg.adminToken,
+    history,
+    saves,
     turn,
     map,
     settings,
