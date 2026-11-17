@@ -304,6 +304,8 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     map,
     settings,
     trustUserHeader: cfg.trustUserHeader,
+    devUser: cfg.devUser,
+    canonizeJudge: hasCanonize(cfg) ? "llm" : "deny_all",
     version: CONTRACT_VERSION,
     async createRoom(_mode, userId) {
       const roomId = `room_${now().toString(36)}${Math.floor(Math.random() * 1e3).toString(36)}`;

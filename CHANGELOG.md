@@ -13,6 +13,13 @@
 - 世界层永久记忆：canonize 八道闸门 + 独立 judge（未配 = 全拒）、`room_world_<worldId>` 房间、`admin/canonize/{run,tombstone}`、`worlds/<id>/mem.version`。
 - 世界印象：canonize 成功后给相关玩家投递 `【世界印象】…记住了你：…`（用户投影，TTL 30 天）。
 
+### 修复（PR #4 二轮复审收尾）
+
+- **世界印象链路接通**：`turn.ts` 调 `attachAboutUserIds`，闸门重建草稿保留 `aboutUserIds`；新增 `apps/server/src/impressions.e2e.test.ts`（回合 → canonize → impressions.json → 下回合 facts）。
+- 私忆 id 的回合序号改用 `cause.seq`（时钟不推进也不撞 id）。
+- G6 超限定版：不建次日队列（候选为记忆的纯函数，跨日重新聚合），docs/08 §7.3⑥ + §13 同步。
+- `/health` 暴露 `canonize.{enabled,judge}`；`GALGAME_DEV_USER` 接线；tombstone 存在性改查记忆索引。
+
 ### 修复（PR #4 复审打回项）
 
 - `store.events` 默认 `limit=Infinity`（原 200 会让记忆在 ~30 回合后静默冻结）。

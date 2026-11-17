@@ -193,6 +193,8 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
     written += 1;
     const draft: MemoryDraft = { ownerId: input.ownerId, content, tags, salience, about, visibility, tier };
     if (input.userId) draft.userId = input.userId;
+    // aboutUserIds 是 canonize → 印象的反查键（审阅 P1-A）：闸门重建草稿时必须带过去，否则整条链断
+    if (raw.aboutUserIds && raw.aboutUserIds.length > 0) draft.aboutUserIds = raw.aboutUserIds;
     // contentHash 只属于永久层（世界层幂等键）；回合内只写 short/long，id 由回合序号派生。
     // 按内容哈希给私忆生成 id 会让"同一句话被两个玩家/两个房间记住"撞 id 并静默丢条（审阅 P1）。
     accepted.push(draft);

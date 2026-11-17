@@ -92,4 +92,44 @@ describe("用户维度（P2）", () => {
     expect(body.profile).not.toBeNull();
     await app.close();
   });
+
+  it("世界房间（room_world_*）对外的 state/events/turns 一律 404（审阅 P2-④）", async () => {
+    const deps = await createApp(testConfig());
+    const { roomId } = await deps.createRoom("solo", "u_a");
+    const app = Fastify();
+    registerRoutes(app, deps);
+    for (const url of [
+      `/api/v1/rooms/${deps.worldRoom}/state`,
+      `/api/v1/rooms/${deps.worldRoom}/events`,
+    ]) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.statusCode).toBe(404);
+    }
+    const turn = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${deps.worldRoom}/turns`,
+      payload: { input: "试着往世界层写点东西", clientTurnId: "w1" },
+    });
+    expect(turn.statusCode).toBe(404);
+    // 普通房间不受影响
+    const ok = await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/state` });
+    expect(ok.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("GALGAME_TRUST_USER_HEADER=0 时忽略 X-User-Id（只认前置鉴权注入）", async () => {
+    const cfg = { ...testConfig(), trustUserHeader: false };
+    const deps = await createApp(cfg);
+    const { roomId } = await deps.createRoom("solo", undefined);
+    const app = Fastify();
+    registerRoutes(app, deps);
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/me?roomId=${roomId}&actorId=npc_lin`,
+      headers: { "x-user-id": "u_attacker" },
+    });
+    // 头被忽略、又没配 GALGAME_DEV_USER → 视作未登录
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
 });

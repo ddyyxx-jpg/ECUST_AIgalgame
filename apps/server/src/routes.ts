@@ -15,10 +15,12 @@ export interface AppDeps {
   /** 运行时模型接入（玩家自备 key）：/api/v1/settings/llm */
   settings: LlmSettings;
   /** 读取账号维度的私忆档案（GET /api/v1/me）；记忆是日志投影，这里只读 */
-  memory: Memory & { all(roomId: string): MemoryRecord[] };
+  memory: Memory & { all(roomId: string): MemoryRecord[]; get?(memoryId: string): MemoryRecord | undefined };
   createRoom(mode: "solo" | "coop", userId?: string): Promise<{ roomId: string; actorId: string }>;
   /** 开发期账号：没有登录态时用 GALGAME_DEV_USER 兜底（上线接登录中间件后删掉） */
   devUser?: string;
+  /** 审核器种类：llm = 真模型审核；deny_all = 未配置（fail-closed，永不发布世界层） */
+  canonizeJudge?: "llm" | "deny_all";
   /** 是否信任 X-User-Id 头；默认 true（本机开发）。生产置 GALGAME_TRUST_USER_HEADER=0 */
   trustUserHeader?: boolean;
   /** 世界层永久记忆（P3）：只在管理员端点里被调用 */
@@ -99,7 +101,12 @@ async function safe(reply: FastifyReply, fn: () => Promise<unknown>): Promise<un
 }
 
 export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
-  app.get("/api/v1/health", async () => ({ ok: true, contract: deps.version }));
+  app.get("/api/v1/health", async () => ({
+    ok: true,
+    contract: deps.version,
+    // fail-closed 要能被看见：没配 judge 时 canonize 仍启用，但永远不会写出世界层（审阅 P2-⑥）
+    canonize: { enabled: deps.canonize !== undefined, judge: deps.canonizeJudge ?? "none" },
+  }));
 
   // ---------------------------------------------------------------- 模型接入（docs/03 §5.2.2，仅本机）
   app.get("/api/v1/settings/llm", async (req) => {
@@ -223,7 +230,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const done = await deps.canonize.tombstone(body.memoryId, body.reason ?? "管理员撤回");
     if (done) return { ok: true };
     // 撤回失败的真实原因从世界层记忆状态推：不存在 = 404 语义，已撤回 = 不可变
-    const hit = deps.canonize.sample(200).find((r) => r.id === body.memoryId);
+    // 存在性用记忆索引判（sample(200) 在世界层 >200 条时会误判 404，审阅 P2-⑤）
+    const hit = deps.memory.get?.(body.memoryId);
     if (!hit) return reply.code(404).send({ ok: false, code: "E_REF_NOT_FOUND", message: `世界记忆 ${body.memoryId} 不存在` });
     return reply.code(409).send({ ok: false, code: "E_MEMORY_IMMUTABLE", message: `世界记忆 ${body.memoryId} 已撤回或不可变` });
   });

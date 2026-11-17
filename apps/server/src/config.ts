@@ -8,6 +8,8 @@ export interface ServerConfig {
   contentDir: string;
   /** 地图草案审核/发布/生成的管理员令牌；未配置时生成本次进程的临时令牌 */
   adminToken: string;
+  /** 开发期兜底账号（GALGAME_DEV_USER）；上线接登录中间件后删掉 */
+  devUser?: string;
   /**
    * 是否信任 `X-User-Id` 头（默认 true，**只适合本机/内网开发**）。
    * 生产必须置 GALGAME_TRUST_USER_HEADER=0，由前置登录中间件注入 userId（query/body），
@@ -48,6 +50,7 @@ export function loadConfig(): ServerConfig {
     dataDir: env("GALGAME_DATA_DIR", "data"),
     contentDir: env("GALGAME_CONTENT_DIR", "content"),
     adminToken,
+    devUser: env("GALGAME_DEV_USER", "") || undefined,
     trustUserHeader: env("GALGAME_TRUST_USER_HEADER", "1") !== "0",
     llm: {
       baseUrl: env("GALGAME_LLM_BASE_URL", ""),

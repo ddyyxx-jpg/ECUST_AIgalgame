@@ -157,7 +157,6 @@ describe("canonize 八道闸门（P3）", () => {
     const f = await fixture({ records });
     const j = await job(f);
     const first = await j.retireRoom(ROOM);
-    expect(first.written).toHaveLength(1);
     const second = await j.retireRoom(ROOM);
     expect(second.written).toHaveLength(0);
     expect(second.skipped.some((s) => s.reason === "duplicate")).toBe(true);
@@ -236,5 +235,34 @@ describe("canonize 八道闸门（P3）", () => {
     expect(again.skipped[0]?.reason).toBe("circuit_open");
     expect(j.sample(10)).toEqual([]);
   });
-});
 
+  it("体量：当日超 dailyCap 的候选不落库，跨日后重新聚合再发布（P1-B 定版：不建次日队列）", async () => {
+    const lost = "食堂门口贴了一张失物招领";
+    const bench = "操场旁边多了一排长椅";
+    const f = await fixture({
+      records: [record("mem_l1", A, lost), record("mem_l2", B, lost), record("mem_b1", A, bench), record("mem_b2", B, bench)],
+    });
+    let day = "2026-11-17";
+    const j = new CanonizeJob({
+      store: f.store,
+      arbiter: f.arbiter,
+      worldRoom: WORLD_ROOM,
+      worldId: WORLD,
+      memory: f.memory,
+      judge: { review: async () => ({ allow: true }) },
+      limits: { enabled: true, dailyCap: 1, minWitness: 2, perSourceCap: 2 },
+      today: () => day,
+      onVersionBump: async (worldId, version) => {
+        f.bump.push({ worldId, version });
+      },
+    });
+    const first = await j.retireRoom(ROOM);
+    expect(first.skipped.some((x) => x.reason === "daily_cap")).toBe(true);
+
+    // 跨日：候选不会被"队列"记住，但可以从房间记忆重新聚合出来
+    day = "2026-11-18";
+    const second = await j.retireRoom(ROOM);
+    expect(second.written).toHaveLength(1);
+    expect(j.stats().version).toBe(2);
+  });
+});

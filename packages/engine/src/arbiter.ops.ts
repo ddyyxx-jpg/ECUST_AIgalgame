@@ -357,8 +357,9 @@ export function validateOp(
         return { fail: fail("E_FORBIDDEN", "secret 记忆只能由引擎/导演骨架写") };
       }
       const seq = ctx.nextMemorySeq ? ctx.nextMemorySeq() : tags.length;
-      // 私忆 id 只由回合序号派生：同内容不同 owner/房间必须各存一条（审阅 P1 撞 id）
-      const memoryId = `mem_${ctx.cause.roomId}_${at}_${seq}`;
+      // 私忆 id 只由回合序号派生：同内容不同 owner/房间必须各存一条（审阅 P1 撞 id）。
+      // 用 cause.seq（回合信封序号）而不是 tick：时钟不推进的两个回合也必须拿到不同 id。
+      const memoryId = `mem_${ctx.cause.roomId}_${ctx.cause.seq}_${seq}`;
       if (status === "tombstoned") {
         const target = isStr(a.supersedes) ? a.supersedes : "";
         if (!target) return { fail: fail("E_SCHEMA_INVALID", "撤回记忆必须带 supersedes") };

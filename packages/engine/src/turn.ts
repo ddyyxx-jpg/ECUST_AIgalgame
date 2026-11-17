@@ -35,7 +35,7 @@ import type { DefaultArbiter } from "./arbiter.ts";
 import type { EventSourcedMemory } from "./memory.ts";
 import type { MemoryDraft } from "../../shared/src/index.ts";
 import type { MemoryContext } from "./turn.memory.ts";
-import { readMemoryContext, seedDrafts, toMemoryProposals } from "./turn.memory.ts";
+import { attachAboutUserIds, readMemoryContext, seedDrafts, toMemoryProposals } from "./turn.memory.ts";
 import { applyMemoryGates } from "./memory.gate.ts";
 import type { Impressions } from "./impressions.ts";
 import { impressionFact } from "./impressions.ts";
@@ -168,7 +168,8 @@ export class DefaultTurn implements Turn {
             actorId: req.actorId,
             ownerId: mem.ownerId,
             ...(mem.userId ? { userId: mem.userId } : {}),
-            drafts: [...seedDrafts(mem, state, req), ...first.memory],
+            // about → aboutUserIds：canonize/印象靠它反查"这件事该告诉哪个账号"
+            drafts: attachAboutUserIds([...seedDrafts(mem, state, req), ...first.memory], state),
             recent: mem.recent,
             ownedCount: mem.ownedCount,
           });
