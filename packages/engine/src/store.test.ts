@@ -1,5 +1,5 @@
 /** Store 的契约：日志是唯一真相，snapshot 只是缓存的投影。 */
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -121,5 +121,43 @@ describe("FileStore（jsonl 一房间一文件）", () => {
   it("replay 用的是同一套 applyEvent（与内存版逐字段相等）", () => {
     const state = applyEvent(createInitialState(ROOM), env(1, "entity.created", { entity: npc }));
     expect(state.entities.npc_lin?.status).toBe("active");
+  });
+});
+
+describe("FileStore 读档失败不污染已载入标记（issue #7）", () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+
+  async function tempDir(): Promise<string> {
+    const d = await mkdtemp(path.join(tmpdir(), "galgame-store-load-"));
+    dirs.push(d);
+    return d;
+  }
+
+  it("readFile 第一次失败 → 未标记已载入；故障恢复后第二次 load 能读到真实日志", async () => {
+    const dir = await tempDir();
+    const file = path.join(dir, `${ROOM}.jsonl`);
+    // 用同名目录占位：existsSync 为真、readFile 稳定抛 EISDIR。
+    // 不依赖 root/权限，也不 mock fs —— 模拟的是"文件在、但这次读失败"（网络盘/占用/权限等）。
+    await mkdir(file);
+
+    const store = new FileStore(dir);
+    await expect(store.load(ROOM)).rejects.toThrow(/EISDIR/);
+    // 失败不能留下"已载入"幻觉：否则后续 append 会按 seq 0 续写，把真实日志覆盖掉
+    expect(store.seq(ROOM)).toBe(0);
+
+    // 故障恢复：占位目录换成合法日志，第二次 load 必须真正重读并恢复数据
+    await rm(file, { recursive: true, force: true });
+    const lines = [
+      env(1, "entity.created", { entity: npc }),
+      env(2, "attr.changed", { entityId: "npc_lin", key: "stamina", from: 80, to: 40, clamped: false }),
+    ];
+    await writeFile(file, lines.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+
+    expect(await store.load(ROOM)).toBe(2);
+    expect(store.seq(ROOM)).toBe(2);
+    expect((await store.snapshot(ROOM)).entities.npc_lin?.attrs.stamina).toBe(40);
   });
 });

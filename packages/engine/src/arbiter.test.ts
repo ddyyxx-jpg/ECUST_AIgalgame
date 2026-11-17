@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { AttrDef, Envelope, Proposal } from "../../shared/src/contract/types.ts";
-import { DefaultArbiter } from "./arbiter.ts";
+import { createTurnBudget, DefaultArbiter } from "./arbiter.ts";
 import { JsonRegistry } from "./registry.ts";
 import { EventSourcedStore } from "./store.ts";
 
@@ -94,7 +94,7 @@ describe("Arbiter · attr", () => {
     expect(r.rejected[0]).toMatchObject({ code: "E_ATTR_UNKNOWN" });
   });
 
-  it("x. 区属性无需注册，但每批最多 8 条", async () => {
+  it("x. 区属性无需注册，但每回合最多 8 条（整回合累计）", async () => {
     const { arbiter } = setup();
     const ops: Proposal[] = Array.from({ length: 9 }, (_, i) => ({
       op: "attr.set",
@@ -228,5 +228,24 @@ describe("Arbiter · 原子性与幂等", () => {
     const r = await arbiter.dryRun(ROOM, [delta(PLR, "stamina", 5)]);
     expect(r.ok).toBe(true);
     expect(store.seq(ROOM)).toBe(before);
+  });
+
+  it("dryRun 用独立预算：不消耗正式回合预算，也不受已用额度影响", async () => {
+    const { arbiter } = setup({ xWritesPerTurn: 1 });
+    const budget = createTurnBudget();
+    const xSet = (i: number): Proposal => ({ op: "attr.set", args: { entityId: NPC, key: `x.k${i}`, value: i }, by: "engine.turn" });
+
+    const first = await arbiter.apply(ROOM, [xSet(0)], cause(), { turnBudget: budget });
+    expect(first.ok).toBe(true);
+    expect(budget.xWrites).toBe(1);
+
+    // 正式预算已用满，但预览走独立预算，能过；且不消耗正式预算
+    const preview = await arbiter.dryRun(ROOM, [xSet(1)]);
+    expect(preview.ok).toBe(true);
+    expect(budget.xWrites).toBe(1);
+
+    const blocked = await arbiter.apply(ROOM, [xSet(1)], cause("evt_turn_2"), { turnBudget: budget });
+    expect(blocked.ok).toBe(false);
+    expect(blocked.rejected[0]?.code).toBe("E_X_LIMIT");
   });
 });

@@ -31,7 +31,7 @@ import type { RealityKind, RealityPolicy } from "./reality.ts";
 import { DEFAULT_REALITY, detectReality, filterProposals, realityFraming } from "./reality.ts";
 import type { TurnJson } from "./turn.parse.ts";
 import { AuditGate } from "./audit.gate.ts";
-import type { DefaultArbiter } from "./arbiter.ts";
+import { createTurnBudget, type DefaultArbiter } from "./arbiter.ts";
 import type { EventSourcedMemory } from "./memory.ts";
 import type { MemoryDraft } from "../../shared/src/index.ts";
 import type { MemoryContext } from "./turn.memory.ts";
@@ -131,6 +131,9 @@ export class DefaultTurn implements Turn {
     const kind = detectReality(this.reality, req.input);
     const cause = this.cause(req, seqNow);
     const causeForBudget = { ...cause, causedBy: turnId };
+    // 整回合预算：同一回合的三次 apply（主批 / 去记忆重提 / 修复重提）共享同一份计数，
+    // 并把审核处置（gate.punish 内部 apply）也纳入本回合——它只拿到 causeForBudget，靠登记者共享
+    const turnBudget = createTurnBudget();
     let usage: Usage | undefined;
     const moduleProposals: Proposal[] = [];
     const llmProposals: Proposal[] = [];
@@ -184,6 +187,7 @@ export class DefaultTurn implements Turn {
       // ① 裁决：默认 atomic —— 任何一条被拒，整批不落库
       let applied = await this.deps.arbiter.apply(req.roomId, [...moduleProposals, ...llmProposals, ...memoryProposals], causeForBudget, {
         expectedSeq: seqNow,
+        turnBudget,
       });
 
       // 两阶段裁决：记忆写坏了不该毁掉整回合（玩家行动本身是合法的）
@@ -193,6 +197,7 @@ export class DefaultTurn implements Turn {
           memoryRejected = true;
           applied = await this.deps.arbiter.apply(req.roomId, [...moduleProposals, ...llmProposals], causeForBudget, {
             expectedSeq: seqNow,
+            turnBudget,
           });
         }
       }
@@ -223,6 +228,7 @@ export class DefaultTurn implements Turn {
             if (gate.kind === "ok") llmProposals.push(...repaired.proposals);
             applied = await this.deps.arbiter.apply(req.roomId, [...moduleProposals, ...llmProposals], causeForBudget, {
               expectedSeq: this.deps.store.seq(req.roomId),
+              turnBudget,
             });
           }
         }
