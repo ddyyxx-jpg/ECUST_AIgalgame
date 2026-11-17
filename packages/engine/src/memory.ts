@@ -34,6 +34,7 @@ export class InMemoryMemory implements Memory {
         salience: Math.min(5, Math.max(0, d.salience ?? 1)),
         about: d.about ?? [],
         visibility: d.visibility ?? "private",
+        tier: d.tier ?? "short",
         turn: 0,
         createdAt: Date.now(),
       });
@@ -73,6 +74,11 @@ export class InMemoryMemory implements Memory {
     const take = Math.floor(mine.length / 3);
     for (const m of mine.slice(0, take)) m.archived = true;
     return { impressions: mine.length, archived: take };
+  }
+
+  /** 3.1.0 骨架：P2 才真正实现（纯派生，不写状态） */
+  async profile(): Promise<null> {
+    return null;
   }
 
   /** 测试用 */

@@ -89,6 +89,8 @@ export interface RoomMember {
   role: "player" | "npc" | "spectator";
   joinedSeq: number;
   online?: boolean;
+  /** 3.1.0：账号维度（私忆隔离的依据）；单人房间可空 */
+  userId?: Id;
 }
 
 export interface RoomState {
@@ -369,6 +371,8 @@ export interface TurnRequest {
   input: string;
   /** 幂等 id：重复提交返回同一回合 */
   clientTurnId: string;
+  /** 3.1.0：账号维度；不传则从房间成员兜底（单机模式） */
+  userId?: Id;
   options?: TurnOptions;
 }
 
@@ -562,6 +566,9 @@ export interface DialogueDirector {
 }
 
 // ---------------------------------------------------------------- 记忆
+export type MemoryTier = "short" | "long" | "permanent";
+export type MemoryStatus = "current" | "historical" | "tombstoned";
+
 export interface MemoryDraft {
   ownerId: ActorId;
   content: string;
@@ -571,17 +578,43 @@ export interface MemoryDraft {
   visibility?: "public" | "private" | "secret";
   /** 视角化写入：这版记忆里"不知道"的部分 */
   doesntKnow?: string[];
+  /** 3.1.0：分档；turn 只产 short/long，permanent 只由 canonize 产 */
+  tier?: MemoryTier;
+  /** 3.1.0：账号维度（私忆隔离）；缺省由引擎按房间成员推 */
+  userId?: Id;
+  /** 永久层必填（≤8 个已提交 evt_* / canon id） */
+  sourceRefs?: Id[];
+  /** 永久层幂等键（sha256 前 64 位十六进制） */
+  contentHash?: string;
+  status?: MemoryStatus;
+  /** tombstone / 替换旧条目时必填：被撤回或替换的旧记忆 id */
+  supersedes?: Id;
+  /** 反查印象用 */
+  aboutUserIds?: Id[];
 }
 
 export interface MemoryRecord {
   id: Id;
+  /** 世界层用 room_world_<worldId> */
   roomId: RoomId;
+  /** permanent 必填 */
+  worldId?: Id;
+  /** 账号维度；世界层历史条目可为空 */
+  userId?: Id;
+  /** permanent 固定 "mem_world"（不是实体） */
   ownerId: ActorId;
   content: string;
   tags: string[];
+  /** 1~5（与 zod 对齐，历史数据 0~100 读时按 /20 收敛到 1~5） */
   salience: number;
   about: ActorId[];
+  aboutUserIds?: Id[];
   visibility: "public" | "private" | "secret";
+  tier: MemoryTier;
+  sourceRefs?: Id[];
+  contentHash?: string;
+  /** permanent 必填，其余可省（缺省视为 current） */
+  status?: MemoryStatus;
   turn: number;
   createdAt: number;
   archived?: boolean;
@@ -595,17 +628,55 @@ export interface MemoryHit {
 }
 
 export interface MemoryQuery {
+  /** scope="world" 时传 room_world_<worldId> */
   roomId: RoomId;
+  /** 给了就按账号过滤（私忆隔离：A 的 private 记忆 B 查不到） */
+  userId?: Id;
   ownerId: ActorId;
+  tiers?: MemoryTier[];
+  scope?: "room" | "world";
+  worldId?: Id;
   about?: ActorId[];
   tags?: string[];
   budgetTokens: number;
   nowTurn: number;
 }
 
+export interface MemoryProfile {
+  userId: Id;
+  roomId: RoomId;
+  ownerId: ActorId;
+  firstMetTurn?: number;
+  /** 0~1，派生：short 条数 + 互相 remembered 的权重 */
+  familiarity: number;
+  /** 该 owner 记住的 permanent 条目 */
+  impressionIds: Id[];
+  /** 账号级世界印象计数（跨房间） */
+  impressions: number;
+  lastTopics: string[];
+  /** 已投递印象（由 server 投影注入） */
+  seenImpressionIds: Id[];
+}
+
+/** 世界印象：canonize 通过后排队、下回合用 facts 投递给玩家（不调模型） */
+export interface ImpressionNotice {
+  id: Id;
+  memoryId: Id;
+  userId: Id;
+  worldId: Id;
+  /** ≤40 字，去掉私密细节 */
+  subjectText: string;
+  npcId?: Id;
+  createdAt: number;
+  deliveredAt?: number;
+}
+
 export interface Memory {
+  /** 测试用，不参与正式写路径（正式路径：Proposal → Arbiter.apply → 事件 → ingest） */
   write(roomId: RoomId, drafts: MemoryDraft[]): Promise<void>;
   recall(q: MemoryQuery): Promise<MemoryHit[]>;
+  /** 纯派生：不创建实体、不产事件；无记录返回 null */
+  profile(userId: Id, ownerId: ActorId, roomId: RoomId): Promise<MemoryProfile | null>;
   compact(roomId: RoomId, ownerId: ActorId): Promise<{ impressions: number; archived: number }>;
 }
 

@@ -778,7 +778,7 @@
     },
     {
       "title": "memory.write — 写视角化记忆",
-      "description": "03 §3 op 11：写一条视角化记忆，产出 memory.written；只能经由 Turn/导演骨架，模块提 → E_FORBIDDEN；secret 记忆只有引擎/导演骨架能写。",
+      "description": "03 §3 op 11：写一条视角化记忆，产出 memory.written / memory.tombstoned；只能经由 Turn/导演骨架/canonize，模块提 → E_FORBIDDEN；permanent 只允许 mem_world + public + cause.type=canonize + 世界房间。",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -838,6 +838,49 @@
                 "$ref": "#/$defs/actorId"
               },
               "description": "这条记忆是关于谁的。"
+            },
+            "tier": {
+              "type": "string",
+              "enum": [
+                "short",
+                "long",
+                "permanent"
+              ],
+              "description": "分档：turn 只允许 short/long；permanent 只由 canonize 产生（ownerId=mem_world、visibility=public、世界房间）。"
+            },
+            "sourceRefs": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "$ref": "#/$defs/id"
+              },
+              "description": "永久层来源：已提交的 evt_* 或 canon id。"
+            },
+            "contentHash": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "永久层幂等键（世界层唯一）。"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "current",
+                "historical",
+                "tombstoned"
+              ],
+              "description": "永久层状态；tombstoned 必须带 supersedes，且只能撤回同世界层已有条目。"
+            },
+            "supersedes": {
+              "$ref": "#/$defs/id",
+              "description": "被撤回/替换的旧记忆 id。"
+            },
+            "aboutUserIds": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "$ref": "#/$defs/id"
+              },
+              "description": "反查印象用的账号 id。"
             }
           }
         },
