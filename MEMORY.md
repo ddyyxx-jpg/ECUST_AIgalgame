@@ -152,6 +152,10 @@
 - 2026-11-17 ｜ main ｜ `CHANGELOG.md` ｜ docs ｜ 新增根目录更新日志（M0 / 引擎 3.0.0 / 审核与锚定 / 地图 v0.2，按日期分段） ｜ GitHub 上需要可读的更新日志；协议版本以 CONTRACT_VERSION 为准 ｜ tsc 0；14 文件/117 用例；8 项契约 ｜ 无
 - 2026-11-17 ｜ main ｜ `CHANGELOG.md`（二次） ｜ docs ｜ 小节标题对齐 tag（v0.1.0/v0.1.1/v0.1.2/v0.2.0），拆出引擎与审核/锚定两段 ｜ 让 CHANGELOG 与 GitHub Releases 一一对应 ｜ tsc 0；14 文件/117 用例；8 项契约 ｜ 无
 
+### fix/docs-responsibility（PR 待审，issue #8）
+
+- 2026-11-17 ｜ `fix/docs-responsibility` ｜ 本提交（sha 见 git log） ｜ docs ｜ 按 issue #8 收口文档职责：README 重写为入口（目标 / 现在能玩什么 / 启动 / 数据位置 / 限制与约定 / 导航），删除与 `AGENTS.md`、本文件重复且已漂移的架构不变量、目录树、扩展配方、权限表；版本号与测试数改为单一来源引用（快照看本文件 §0，版本真源 `docs/03` §0.4 + `packages/shared/src/contract/version.ts`），README 不再手抄具体 3.x 版本与用例数；存储描述由 SQLite 更正为 FileStore/JSONL，SQLite/WAL 与 SQL 投影表明确标「规划中」；「闭盒：只有我能改」改为角色约定「引擎改动需项目所有者批准」；`AGENTS.md` 只改 :5 阶段/版本引用与 §1 必读清单（补 `docs/06`、`07`、`08`）；`docs/07` 状态行由「方案稿 v2，未落地」更正为「P0–P4 已随 3.1.0 进 main」 ｜ 分工定为 README=入口、AGENTS=AI 执行约束、`docs/03`=唯一名字来源、MEMORY=分支决策/审阅/遗留；不删重要约定、不改引擎权限、不动契约 ｜ grep 四条旧事实（`CONTRACT_VERSION 3.0.0`、`184 个测试`、`SQLite（事件日志`、`只有我能改`）在 README 中 0 命中；`npm run check:contract` → 8 项全过（3.1.0）；typecheck/test 未跑（纯文档变更） ｜ 合并后需在 `### main` 补 merge 条目；issue #8 关闭前确认 README 导航与 `docs/02` §6 SQL 设计稿的措辞已一致
+
 ### feat/memory-module
 
 - 2026-11-17 ｜ `feat/memory-module` ｜ `<P0>` ｜ docs ｜ 记忆模块 P0 契约：`CONTRACT_VERSION 3.1.0`、`PROMPT_VERSION 2026-11-17.1`、新增 `MemoryTier/MemoryStatus/MemoryProfile/ImpressionNotice`、`Memory.recall/profile`、`TurnRequest.userId`、`RoomMember.userId`、`memory.write` 只增字段、新事件 `memory.tombstoned`/`memory.impression.queued`、33 错误码、`memory.*/canonize.*/impression.*` 配置键、新建 `docs/prompts/04-memory-writer.md`、`00-world-system.md` 加 S1.5 世界记忆占位 ｜ 文档先于代码（§10.10 记录版本影响）；依据 `docs/08` §2；12 op 与 `apiVersion` 不变 → 3.1.0 为 minor（只增字段/类型/事件） ｜ tsc 0；17 文件/134 用例；check:contract 8 项（3.1.0） ｜ 下一步 P1：事件溯源 `memory.ts` + `memory.gate.ts` + 两阶段裁决
