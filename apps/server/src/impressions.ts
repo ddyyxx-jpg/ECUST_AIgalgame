@@ -4,6 +4,7 @@
  * 为什么不是世界状态：印象是"给某个玩家看的提示"，同一个世界层事件对不同玩家投递结果不同，
  * 放进世界状态会让回放依赖"谁在线"。所以它是**用户投影**（可重建、可丢、坏了不影响存档）。
  */
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Id, ImpressionNotice } from "../../../packages/shared/src/index.ts";
@@ -22,10 +23,14 @@ export class FileImpressions implements Impressions {
     private readonly opts: { ttlDays: number; now?: () => number } = { ttlDays: 30 },
   ) {}
 
+  /**
+   * 目录名必须与 userId **单射**：直接按字符替换会让 `a/b` 与 `a_b` 落到同一份文件（审阅 P1）。
+   * 用 sha256 前 24 位 + 可读前缀：既能防穿越，又能让人一眼看出是谁的目录。
+   */
   private file(userId: Id): string {
-    // userId 只允许安全字符（来自 X-User-Id，已截断 64）：防路径穿越
-    const safe = userId.replace(/[^A-Za-z0-9_-]/g, "_");
-    return path.join(this.root, safe, "impressions.json");
+    const readable = userId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 24) || "u";
+    const digest = createHash("sha256").update(userId, "utf8").digest("hex").slice(0, 24);
+    return path.join(this.root, `${readable}-${digest}`, "impressions.json");
   }
 
   private async read(userId: Id): Promise<UserFile> {
@@ -56,7 +61,9 @@ export class FileImpressions implements Impressions {
 
   async pending(userId: Id, _roomId: Id, limit: number): Promise<ImpressionNotice[]> {
     const file = await this.read(userId);
-    return pendingNotices(file.notices, {
+    // 文件里可能残留别的 userId 的通知（历史数据/攻击写入）：投递前必须再校验一遍归属
+    const mine = file.notices.filter((n) => n.userId === userId);
+    return pendingNotices(mine, {
       ttlDays: this.opts.ttlDays,
       now: this.opts.now ? this.opts.now() : Date.now(),
       limit,
@@ -87,6 +94,6 @@ export class FileImpressions implements Impressions {
 
   async count(userId: Id): Promise<number> {
     const file = await this.read(userId);
-    return file.notices.filter((n) => !n.deliveredAt).length;
+    return file.notices.filter((n) => n.userId === userId && !n.deliveredAt).length;
   }
 }

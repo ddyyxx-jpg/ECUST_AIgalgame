@@ -193,7 +193,8 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
     written += 1;
     const draft: MemoryDraft = { ownerId: input.ownerId, content, tags, salience, about, visibility, tier };
     if (input.userId) draft.userId = input.userId;
-    draft.contentHash = contentHashOf(content);
+    // contentHash 只属于永久层（世界层幂等键）；回合内只写 short/long，id 由回合序号派生。
+    // 按内容哈希给私忆生成 id 会让"同一句话被两个玩家/两个房间记住"撞 id 并静默丢条（审阅 P1）。
     accepted.push(draft);
   }
 
@@ -213,5 +214,6 @@ export function memoryDraftArgs(d: MemoryDraft): Record<string, unknown> {
   };
   if (d.userId) args.userId = d.userId;
   if (d.contentHash) args.contentHash = d.contentHash;
+  if (d.aboutUserIds && d.aboutUserIds.length > 0) args.aboutUserIds = d.aboutUserIds;
   return args;
 }

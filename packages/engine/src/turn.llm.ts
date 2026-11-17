@@ -2,7 +2,7 @@
  * 模型这一步：问一次 → 解析 → 过滤（现实锚定）→ 必要时带拒绝原因再问一次。
  * 从 Turn 里拆出来，是为了让"怎么问模型"和"模型说完之后引擎怎么裁决"互不干扰。
  */
-import type { ActorId, LlmPort, MemoryDraft, Proposal, TurnRequest, Usage, WorldState } from "../../shared/src/index.ts";
+import type { ActorId, LlmPort, MemoryDraft, Proposal, Registry, TurnRequest, Usage, WorldState } from "../../shared/src/index.ts";
 import type { RealityKind, RealityPolicy } from "./reality.ts";
 import { filterProposals, realityFraming } from "./reality.ts";
 import { errMessage, parseTurn } from "./turn.parse.ts";
@@ -13,7 +13,10 @@ import { coerceMemoryDrafts } from "./memory.gate.ts";
 export interface TurnLlmDeps {
   llm: LlmPort;
   reality: RealityPolicy;
-  buildPrompt?: (state: WorldState, actorId: ActorId, input: string) => string;
+  /** 属性注册表：S6 数值段只渲染 public 属性 */
+  registry?: Registry;
+  /** 自定义提示词；**必须**用上第 4 个参数 mem，否则记忆注入会被静默丢掉（docs/08 §5.2） */
+  buildPrompt?: (state: WorldState, actorId: ActorId, input: string, mem?: MemoryContext) => string | Promise<string>;
 }
 
 export interface LlmProduct {
@@ -41,7 +44,7 @@ export class TurnLlm {
     const res = await this.deps.llm.chat({
       json: true,
       messages: [
-        { role: "system", content: this.prompt(state, req.actorId, req.input, kind, mem) },
+        { role: "system", content: await this.prompt(state, req.actorId, req.input, kind, mem) },
         { role: "user", content: req.input },
       ],
       maxTokens: 900,
@@ -63,7 +66,7 @@ export class TurnLlm {
       const res = await this.deps.llm.chat({
         json: true,
         messages: [
-          { role: "system", content: this.prompt(state, req.actorId, req.input, kind, mem) },
+          { role: "system", content: await this.prompt(state, req.actorId, req.input, kind, mem) },
           { role: "user", content: req.input },
           {
             role: "user",
@@ -106,8 +109,12 @@ export class TurnLlm {
     };
   }
 
-  private prompt(state: WorldState, actorId: ActorId, input: string, kind: RealityKind | null, mem?: MemoryContext): string {
-    if (this.deps.buildPrompt) return this.deps.buildPrompt(state, actorId, input);
-    return buildTurnPrompt(state, actorId, input, { framing: realityFraming(this.deps.reality, kind), ...(mem ? { mem } : {}) });
+  private async prompt(state: WorldState, actorId: ActorId, input: string, kind: RealityKind | null, mem?: MemoryContext): Promise<string> {
+    if (this.deps.buildPrompt) return await this.deps.buildPrompt(state, actorId, input, mem);
+    return buildTurnPrompt(state, actorId, input, {
+      framing: realityFraming(this.deps.reality, kind),
+      ...(mem ? { mem } : {}),
+      ...(this.deps.registry ? { registry: this.deps.registry } : {}),
+    });
   }
 }

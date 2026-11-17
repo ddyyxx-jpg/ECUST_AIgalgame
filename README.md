@@ -42,7 +42,7 @@
 
 ```bash
 npm install                      # 唯一一次
-npm test                         # 171 个测试（引擎/记忆/审核/地图/网关/交易联调），不联网不花钱
+npm test                         # 180 个测试（引擎/记忆/审核/地图/网关/交易联调），不联网不花钱
 npm run typecheck                # tsc --noEmit，全仓 0 错误
 npm run check:contract           # 文档↔代码一致性（版本、12 op、33 错误码、6 份 schema）
 

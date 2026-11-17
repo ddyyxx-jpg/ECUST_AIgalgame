@@ -153,6 +153,8 @@ export const MemoryWriteArgsSchema = z
       .optional()
       .describe("可见性；secret 走强制注入通道，只有引擎/导演骨架能写"),
     about: z.array(ActorIdSchema).max(8).optional().describe("关于谁的记忆"),
+    userId: IdSchema.optional().describe("账号维度（私忆隔离用）"),
+    worldId: IdSchema.optional().describe("世界层所属世界（permanent 必填）"),
     tier: z
       .enum(["short", "long", "permanent"])
       .optional()
@@ -180,6 +182,8 @@ export const LlmMemoryDraftSchema = z
     tags: z.array(z.string().max(32)).max(4).optional().describe("检索标签，1~4 个"),
     salience: z.number().min(1).max(5).optional().describe("重要度 1~5"),
     about: z.array(ActorIdSchema).max(8).optional().describe("关于谁的记忆"),
+    userId: IdSchema.optional().describe("账号维度（私忆隔离用）"),
+    worldId: IdSchema.optional().describe("世界层所属世界（permanent 必填）"),
     visibility: z.enum(["public", "private", "secret"]).optional().describe("secret 只有引擎/导演能写"),
     tier: z.enum(["short", "long"]).optional().describe("短期/长期；permanent 只由 canonize 产生"),
   })

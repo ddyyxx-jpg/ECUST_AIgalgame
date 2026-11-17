@@ -19,6 +19,8 @@ export interface AppDeps {
   createRoom(mode: "solo" | "coop", userId?: string): Promise<{ roomId: string; actorId: string }>;
   /** 开发期账号：没有登录态时用 GALGAME_DEV_USER 兜底（上线接登录中间件后删掉） */
   devUser?: string;
+  /** 是否信任 X-User-Id 头；默认 true（本机开发）。生产置 GALGAME_TRUST_USER_HEADER=0 */
+  trustUserHeader?: boolean;
   /** 世界层永久记忆（P3）：只在管理员端点里被调用 */
   canonize?: {
     retireRoom(roomId: string): Promise<{ written: string[]; candidates: number }>;
@@ -53,10 +55,20 @@ function schemaError(message: string): GameError {
  */
 function userIdOf(req: FastifyRequest, deps: AppDeps, body?: { userId?: string }): string | undefined {
   const raw = req.headers["x-user-id"];
-  const header = Array.isArray(raw) ? raw[0] : raw;
+  const header = deps.trustUserHeader === false ? undefined : Array.isArray(raw) ? raw[0] : raw;
   const fromBody = body?.userId;
   const id = (header ?? fromBody ?? deps.devUser ?? "").trim();
   return id === "" ? undefined : id.slice(0, 64);
+}
+
+const WORLD_ROOM_PREFIX = "room_world_";
+
+/**
+ * 世界层房间（room_world_<worldId>）是永久记忆的存储房间，**没有成员、不能进**。
+ * 不拦住的话，客户端可以 GET 它的完整事件流，把"这个世界知道的事"连同 sourceRefs/隐私扫描细节全读走（审阅 P1）。
+ */
+function isWorldRoom(roomId: string): boolean {
+  return roomId.startsWith(WORLD_ROOM_PREFIX);
 }
 
 /** 管理员令牌统一从 x-admin-token 头取；校验在 MapService/草案引擎里做 */
@@ -135,6 +147,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
 
   app.get("/api/v1/rooms/:roomId/state", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (isWorldRoom(roomId)) return reply.code(404).send({ error: "E_ROOM_NOT_FOUND" });
     try {
       return await deps.store.snapshot(roomId);
     } catch {
@@ -142,8 +155,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     }
   });
 
-  app.get("/api/v1/rooms/:roomId/events", async (req) => {
+  app.get("/api/v1/rooms/:roomId/events", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (isWorldRoom(roomId)) return reply.code(404).send({ error: "E_ROOM_NOT_FOUND" });
     const q = req.query as { fromSeq?: string; limit?: string };
     const from = Number(q.fromSeq ?? 0);
     const limit = Math.min(Number(q.limit ?? 200), 200);
@@ -154,6 +168,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */
   app.post("/api/v1/rooms/:roomId/turns", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (isWorldRoom(roomId)) return reply.code(404).send({ code: "E_ROOM_NOT_FOUND", message: "世界层房间不接受回合" });
     const body = (req.body ?? {}) as { actorId?: string; input?: string; clientTurnId?: string; userId?: string; options?: Record<string, unknown> };
     if (!body.actorId || !body.input || !body.clientTurnId) {
       return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "actorId/input/clientTurnId 必填" });
@@ -206,7 +221,11 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const body = (req.body ?? {}) as { memoryId?: string; reason?: string };
     if (!body.memoryId) return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "memoryId 必填" });
     const done = await deps.canonize.tombstone(body.memoryId, body.reason ?? "管理员撤回");
-    return done ? { ok: true } : { ok: false, code: "E_MEMORY_IMMUTABLE", message: "撤回失败（条目不存在或不可变）" };
+    if (done) return { ok: true };
+    // 撤回失败的真实原因从世界层记忆状态推：不存在 = 404 语义，已撤回 = 不可变
+    const hit = deps.canonize.sample(200).find((r) => r.id === body.memoryId);
+    if (!hit) return reply.code(404).send({ ok: false, code: "E_REF_NOT_FOUND", message: `世界记忆 ${body.memoryId} 不存在` });
+    return reply.code(409).send({ ok: false, code: "E_MEMORY_IMMUTABLE", message: `世界记忆 ${body.memoryId} 已撤回或不可变` });
   });
 
   /** 观测（P4）：只读指标 + 人工抽样复审用的永久记忆清单 */

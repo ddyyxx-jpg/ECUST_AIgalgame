@@ -53,7 +53,13 @@ async function fixture(opts: { records: MemoryRecord[]; judge?: CanonizeJudge; e
   // 把记忆直接投影进内存索引（等价于它们由 memory.written 事件重放得到）
   for (const r of opts.records) {
     memory.ingest({
-      ...env(100 + opts.records.indexOf(r), "memory.written", { ...memPayload(r.id, r.ownerId, r.content), contentHash: contentHashOf(r.content), tags: r.tags, about: r.about }),
+      ...env(100 + opts.records.indexOf(r), "memory.written", {
+        ...memPayload(r.id, r.ownerId, r.content),
+        contentHash: contentHashOf(r.content),
+        tags: r.tags,
+        about: r.about,
+        ...(r.aboutUserIds ? { aboutUserIds: r.aboutUserIds } : {}),
+      }),
     });
   }
   const bump: Array<{ worldId: string; version: number }> = [];
@@ -176,11 +182,45 @@ describe("canonize 八道闸门（P3）", () => {
     const j = await job(f);
     const report = await j.retireRoom(ROOM);
     const memoryId = report.written[0]!;
+    // 撤回之前必须真的能召回：否则这条断言是空过（审阅 P0-5）
+    const before = await f.memory.recall({ roomId: WORLD_ROOM, ownerId: "mem_world", scope: "world", tiers: ["permanent"], budgetTokens: 500, nowTurn: 5 });
+    expect(before.map((h) => h.record.id)).toContain(memoryId);
     expect(await j.tombstone(memoryId, "记错了")).toBe(true);
     expect(f.bump.at(-1)).toEqual({ worldId: WORLD, version: 2 });
-    const hits = await f.memory.recall({ roomId: WORLD_ROOM, ownerId: "mem_world", scope: "world", budgetTokens: 500, nowTurn: 5 });
+    const hits = await f.memory.recall({ roomId: WORLD_ROOM, ownerId: "mem_world", scope: "world", tiers: ["permanent"], budgetTokens: 500, nowTurn: 5 });
     expect(hits.map((h) => h.record.id)).not.toContain(memoryId);
     expect(hits.every((h) => h.record.status !== "tombstoned")).toBe(true);
+  });
+
+
+  it("印象：发布成功后给 aboutUserIds 里每个玩家入队一条 notice（只一次）", async () => {
+    const records = [
+      { ...record("mem_i1", A, "林月在图书馆帮学弟找回了丢失的校园卡"), aboutUserIds: ["user_alpha"] },
+      { ...record("mem_i2", B, "林月在图书馆帮学弟找回了丢失的校园卡"), aboutUserIds: ["user_alpha"] },
+    ];
+    const f = await fixture({ records });
+    const notices: Array<{ userId: string; memoryId: string }> = [];
+    const j = new CanonizeJob({
+      store: f.store,
+      arbiter: f.arbiter,
+      worldRoom: WORLD_ROOM,
+      worldId: WORLD,
+      memory: f.memory,
+      judge: { review: async () => ({ allow: true }) },
+      onImpression: async (n) => {
+        notices.push({ userId: n.userId, memoryId: n.memoryId });
+      },
+    });
+    await j.retireRoom(ROOM);
+    expect(notices.length).toBeGreaterThanOrEqual(1);
+    expect(notices[0]?.userId).toBe("user_alpha");
+    expect(await j.tombstone(notices[0]!.memoryId, "撤销")).toBe(true);
+  });
+
+  it("撤回未知 memoryId 返回 false（不静默放行）", async () => {
+    const f = await fixture({ records: [record("mem_a", A, "操场旁边多了一排水龙头"), record("mem_b", B, "操场旁边多了一排水龙头")] });
+    const j = await job(f);
+    expect(await j.tombstone("mem_does_not_exist", "乱填")).toBe(false);
   });
 
   it("熔断：judge 连续失败到阈值后当天不再尝试，stats() 报 circuitOpen", async () => {

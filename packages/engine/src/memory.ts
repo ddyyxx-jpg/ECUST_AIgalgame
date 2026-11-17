@@ -75,6 +75,18 @@ export class EventSourcedMemory implements Memory {
   private readonly syncedSeq = new Map<RoomId, number>();
   private testSeq = 0;
 
+  /**
+   * 重建：清空该房间索引后重放整条日志（重启后由 server 调用；也用于测试"回放一致"）。
+   * 只清 roomId 自己的记录，不碰别的房间（世界层与房间层互不影响）。
+   */
+  rebuild(roomId: RoomId, envs: readonly Envelope[]): void {
+    const list = this.byRoom.get(roomId) ?? [];
+    for (const rec of list) this.byId.delete(rec.id);
+    this.byRoom.set(roomId, []);
+    this.syncedSeq.delete(roomId);
+    this.sync(roomId, envs);
+  }
+
   /** 从事件日志增量同步（重启后第一次召回前调用；重复调用无副作用） */
   sync(roomId: RoomId, envs: readonly Envelope[]): void {
     const last = this.syncedSeq.get(roomId) ?? 0;
@@ -173,8 +185,9 @@ export class EventSourcedMemory implements Memory {
       if (!tiers.includes(rec.tier)) return false;
       if (rec.status === "tombstoned") return false;
       if (rec.archived) return false;
-      // 账号隔离：给了 userId 时，别人的私忆永远不可见（世界层公开条目没有 userId，照常可见）
-      if (q.userId && rec.userId && rec.userId !== q.userId) return false;
+      // 账号隔离：给了 userId 时，别人的**私忆**不可见；世界层公开条目跨账号可读（否则"这个世界记得你"对别人失效）
+      const isWorldScope = q.scope === "world";
+      if (!isWorldScope && q.userId && rec.userId && rec.userId !== q.userId) return false;
       if (q.scope === "world" && q.worldId && rec.worldId && rec.worldId !== q.worldId) return false;
       return true;
     });
@@ -192,8 +205,13 @@ export class EventSourcedMemory implements Memory {
     const out: MemoryHit[] = [];
     let used = 0;
     for (const h of hits) {
+      // forced（secret 强制注入）不占预算、不因预算被截断（docs/03 §2.6）
+      if (h.forced) {
+        out.push(h);
+        continue;
+      }
       const cost = estimateTokens(h.record.content) + 8;
-      if (used + cost > q.budgetTokens && !h.forced) break;
+      if (used + cost > q.budgetTokens) break;
       used += cost;
       out.push(h);
     }

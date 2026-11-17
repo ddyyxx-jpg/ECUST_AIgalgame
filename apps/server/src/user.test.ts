@@ -17,6 +17,7 @@ function testConfig(): ServerConfig {
     dataDir: tempDir("galgame-user-test-"),
     contentDir: "content",
     adminToken: "dev-admin",
+    trustUserHeader: true,
     llm: { baseUrl: "", model: "mock", apiKey: "", timeoutMs: 1000 },
     audit: { baseUrl: "", model: "", apiKey: "", timeoutMs: 1000 },
   };

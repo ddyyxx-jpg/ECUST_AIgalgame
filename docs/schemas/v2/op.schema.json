@@ -881,6 +881,14 @@
                 "$ref": "#/$defs/id"
               },
               "description": "反查印象用的账号 id。"
+            },
+            "userId": {
+              "$ref": "#/$defs/id",
+              "description": "账号维度（私忆隔离用）；世界层历史条目可省。"
+            },
+            "worldId": {
+              "$ref": "#/$defs/id",
+              "description": "世界层所属世界（permanent 必填）。"
             }
           }
         },

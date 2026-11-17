@@ -18,6 +18,7 @@ function testConfig(): ServerConfig {
     dataDir: tempDir("galgame-bootstrap-test-"),
     contentDir: "content",
     adminToken: "dev-admin",
+    trustUserHeader: true,
     llm: { baseUrl: "", model: "mock", apiKey: "", timeoutMs: 1000 },
     // 审核器不配置 = NoopAudit（放行态），测试不联网
     audit: { baseUrl: "", model: "", apiKey: "", timeoutMs: 1000 },

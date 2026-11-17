@@ -64,8 +64,8 @@ export interface TurnDeps {
    * 不注入 = 不投递；投递不调模型、不占叙事文本。
    */
   impressions?: Impressions;
-  /** 组装提示词；默认实现见 turn.prompt */
-  buildPrompt?: (state: WorldState, actorId: ActorId, input: string) => string;
+  /** 组装提示词；默认实现见 turn.prompt。**必须**接收并使用第 4 个参数 mem（记忆注入） */
+  buildPrompt?: (state: WorldState, actorId: ActorId, input: string, mem?: MemoryContext) => string | Promise<string>;
 }
 
 export class DefaultTurn implements Turn {
@@ -79,7 +79,12 @@ export class DefaultTurn implements Turn {
   constructor(deps: TurnDeps) {
     this.deps = deps;
     this.reality = deps.reality ?? DEFAULT_REALITY;
-    this.llmStep = new TurnLlm({ llm: deps.llm, reality: this.reality, ...(deps.buildPrompt ? { buildPrompt: deps.buildPrompt } : {}) });
+    this.llmStep = new TurnLlm({
+      llm: deps.llm,
+      reality: this.reality,
+      registry: deps.registry,
+      ...(deps.buildPrompt ? { buildPrompt: deps.buildPrompt } : {}),
+    });
     this.gate = new AuditGate({
       arbiter: deps.arbiter,
       store: deps.store,

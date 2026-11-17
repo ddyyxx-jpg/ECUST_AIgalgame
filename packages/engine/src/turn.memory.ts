@@ -93,6 +93,9 @@ export async function readMemoryContext(
   const worldRoom = worldRoomId(worldId);
   const userId = resolveUserId(state, req);
   const nowTurn = state.clock.day * 100 + state.clock.tick;
+  // 场景标签：地点名（提示词缓存无关，只影响召回打分）
+  const loc = state.entities[state.room.scene.locId];
+  const sceneTags = loc?.name ? [loc.name] : [];
   const base = { worldId, worldRoom, ownerId, ownedCount: 0, recent: [] as MemoryRecord[] } as MemoryContext;
   if (npcId) base.npcId = npcId;
   if (userId) base.userId = userId;
@@ -116,6 +119,7 @@ export async function readMemoryContext(
       budgetTokens: LONG_BUDGET,
       nowTurn,
       ...(userId ? { userId } : {}),
+      ...(sceneTags.length > 0 ? { tags: sceneTags } : {}),
       about: [req.actorId],
     });
     const short = await memory.recall({
@@ -125,6 +129,7 @@ export async function readMemoryContext(
       budgetTokens: SHORT_BUDGET,
       nowTurn,
       ...(userId ? { userId } : {}),
+      ...(sceneTags.length > 0 ? { tags: sceneTags } : {}),
       about: [req.actorId],
     });
     const owned = memory.all(req.roomId).filter((r) => r.ownerId === ownerId && r.status !== "tombstoned");
@@ -158,7 +163,9 @@ export async function readMemoryContext(
 /** 首轮种子：NPC 第一次见到玩家时，总要"记得"这件事，否则第一句话就穿帮 */
 export function seedDrafts(mem: MemoryContext, state: WorldState, req: TurnRequest): MemoryDraft[] {
   if (!mem.available || !mem.npcId) return [];
-  if (mem.profile !== null || mem.permanent.length + mem.long.length + mem.short.length > 0) return [];
+  // 只看**这个 NPC 自己**记得什么：世界层有 permanent（"换档后世界记得你"）不代表 NPC 认识玩家，
+  // 否则世界层一有内容，新 NPC 就永远不会种"第一次见到"（审阅 P1）
+  if (mem.profile !== null || mem.long.length + mem.short.length > 0) return [];
   const me = state.entities[req.actorId];
   const here = state.entities[state.room.scene.locId];
   const draft: MemoryDraft = {
@@ -172,6 +179,20 @@ export function seedDrafts(mem: MemoryContext, state: WorldState, req: TurnReque
   };
   if (mem.userId) draft.userId = mem.userId;
   return [draft];
+}
+
+/**
+ * 印象的反查键：把 about 里的实体映射到成员的账号（canonize 发布后按它投递"世界印象"）。
+ * 没有 userId 的成员（未登录/单机）就留空 —— 宁可少投递，不要投错人。
+ */
+export function attachAboutUserIds(drafts: readonly MemoryDraft[], state: WorldState): MemoryDraft[] {
+  return drafts.map((d) => {
+    const ids = (d.about ?? [])
+      .map((actorId) => state.room.members.find((m) => m.actorId === actorId)?.userId)
+      .filter((v): v is Id => typeof v === "string" && v.length > 0);
+    if (ids.length === 0) return d;
+    return { ...d, aboutUserIds: [...new Set(ids)].slice(0, 8) };
+  });
 }
 
 /** 写侧：草稿 → 12 原语里的 memory.write（只提议，落库仍归 Arbiter） */

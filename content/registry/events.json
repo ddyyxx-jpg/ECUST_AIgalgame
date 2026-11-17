@@ -1,11 +1,50 @@
 {
   "schemaVersion": 2,
   "events": [
-    { "type": "attr.changed", "when": "attr.delta / attr.set 应用成功后", "broadcast": true },
-    { "type": "actor.moved", "when": "move.to 通过邻接校验并落库后", "broadcast": true },
-    { "type": "clock.advanced", "when": "time.advance 推进时段后", "broadcast": true },
-    { "type": "link.created", "when": "link.create 落库后", "broadcast": true },
-    { "type": "plot.upserted", "when": "plot.upsert 落库后", "broadcast": false },
-    { "type": "npc.spoke", "when": "对话导演产出 utterances 后", "broadcast": true }
+    {
+      "type": "attr.changed",
+      "when": "attr.delta / attr.set 应用成功后",
+      "broadcast": true
+    },
+    {
+      "type": "actor.moved",
+      "when": "move.to 通过邻接校验并落库后",
+      "broadcast": true
+    },
+    {
+      "type": "clock.advanced",
+      "when": "time.advance 推进时段后",
+      "broadcast": true
+    },
+    {
+      "type": "link.created",
+      "when": "link.create 落库后",
+      "broadcast": true
+    },
+    {
+      "type": "plot.upserted",
+      "when": "plot.upsert 落库后",
+      "broadcast": false
+    },
+    {
+      "type": "npc.spoke",
+      "when": "对话导演产出 utterances 后",
+      "broadcast": true
+    },
+    {
+      "type": "memory.written",
+      "when": "memory.write 通过 Arbiter 落库后（私忆/世界层共用）",
+      "broadcast": false
+    },
+    {
+      "type": "memory.tombstoned",
+      "when": "撤回一条记忆（status=tombstoned 或 supersedes）后",
+      "broadcast": false
+    },
+    {
+      "type": "memory.impression.queued",
+      "when": "canonize 发布世界层记忆并生成世界印象后（P4 保留：用户投影走 onImpression，事件暂不发射）",
+      "broadcast": false
+    }
   ]
 }

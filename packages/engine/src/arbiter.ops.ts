@@ -312,6 +312,8 @@ export function validateOp(
           const target = isStr(a.supersedes) ? a.supersedes : "";
           if (!target) return { fail: fail("E_SCHEMA_INVALID", "撤回世界记忆必须带 supersedes") };
           const old = ctx.memories?.get(target);
+          // 有索引却查不到 = 撤回一个不存在的条目：必须拒绝，不能静默"成功"（审阅 P1）
+          if (ctx.memories && !old) return { fail: fail("E_REF_NOT_FOUND", `世界记忆 ${target} 不存在`) };
           if (old && (old.tier !== "permanent" || (old.worldId !== undefined && old.worldId !== worldId))) {
             return { fail: fail("E_MEMORY_WORLD_MISMATCH", `只能撤回同一世界的 permanent 条目：${target}`) };
           }
@@ -355,10 +357,15 @@ export function validateOp(
         return { fail: fail("E_FORBIDDEN", "secret 记忆只能由引擎/导演骨架写") };
       }
       const seq = ctx.nextMemorySeq ? ctx.nextMemorySeq() : tags.length;
-      const memoryId = contentHash ? `mem_${contentHash.slice(0, 12)}` : `mem_${ctx.cause.roomId}_${at}_${seq}`;
+      // 私忆 id 只由回合序号派生：同内容不同 owner/房间必须各存一条（审阅 P1 撞 id）
+      const memoryId = `mem_${ctx.cause.roomId}_${at}_${seq}`;
       if (status === "tombstoned") {
         const target = isStr(a.supersedes) ? a.supersedes : "";
         if (!target) return { fail: fail("E_SCHEMA_INVALID", "撤回记忆必须带 supersedes") };
+        const old = ctx.memories?.get(target);
+        if (!old) return { fail: fail("E_REF_NOT_FOUND", `要撤回的记忆 ${target} 不存在`) };
+        if (old.ownerId !== owner.id) return { fail: fail("E_FORBIDDEN", "只能撤回自己 owner 的记忆") };
+        if (old.status === "tombstoned") return { fail: fail("E_MEMORY_IMMUTABLE", `记忆 ${target} 已撤回`) };
         return { event: { type: "memory.tombstoned", payload: { memoryId: target, supersedes: target, userId, reason: content, at } } };
       }
       return {
@@ -367,7 +374,7 @@ export function validateOp(
           payload: {
             memoryId, ownerId: owner.id, content, tags, salience, visibility, about, tier, at, turn: ctx.state.clock.day,
             ...(userId ? { userId } : {}),
-            ...(contentHash ? { contentHash } : {}),
+            ...(isStr(a.worldId) ? { worldId: a.worldId } : {}),
             ...(aboutUserIds.length > 0 ? { aboutUserIds } : {}),
           },
         },

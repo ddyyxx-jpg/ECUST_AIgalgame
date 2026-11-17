@@ -4,6 +4,28 @@
 
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2。
 
+## 未发布（PR #4 `feat/memory-module`，待复审）— 2026-11-17 记忆子系统 3.1.0（P0–P4）
+
+### 新增
+
+- 记忆三层（short/long/permanent）接通：`EventSourcedMemory` 从事件日志投影、六道写入闸门、1100 tok 注入硬顶、两阶段裁决（记忆坏了不拖垮回合）、首轮"第一次见到"种子。
+- 账号维度：`RoomMember.userId`、`TurnRequest.userId`、`GET /api/v1/me`（档案只读视图）；solo = 1 个成员。
+- 世界层永久记忆：canonize 八道闸门 + 独立 judge（未配 = 全拒）、`room_world_<worldId>` 房间、`admin/canonize/{run,tombstone}`、`worlds/<id>/mem.version`。
+- 世界印象：canonize 成功后给相关玩家投递 `【世界印象】…记住了你：…`（用户投影，TTL 30 天）。
+
+### 修复（PR #4 复审打回项）
+
+- `store.events` 默认 `limit=Infinity`（原 200 会让记忆在 ~30 回合后静默冻结）。
+- 启动重建记忆索引（房间 + 世界层）；世界层版本从 `mem.version` 读回，重启不回退。
+- canonize 发布后 `ingest` 世界事件（此前"写进去没人读"，S1.5 恒空）、`retireRoom` 不再丢事件。
+- 私忆 `memoryId` 不再由内容哈希派生（同内容不同 owner 各存一条）。
+- `room_world_` 房间禁止 `state/events/turns`；`X-User-Id` 可用 `GALGAME_TRUST_USER_HEADER=0` 关闭；`FileImpressions` 目录名单射。
+- 提示词按 docs/08 顺序重排（S1→S1.5→S4→S5→S6→S7→S8→S9），静态协议在前保住缓存前缀。
+
+### 验证
+
+`tsc` 0 错；**24 文件 / 180 用例全过**（含 4 条端到端：canonize→S1.5 非空、重启重建版本与召回一致、同内容不同 owner 两条都在）；`check:contract` 8 项（3.1.0）。
+
 ## 未发布（已合入 main `45ea4d4`，tag 待打）— 2026-11-17 前端体验与运行时模型接入
 
 ### 新增

@@ -100,6 +100,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   });
 
   // 记忆与裁决器共享同一份事件日志：记忆是"日志的投影"，不是第二个数据库
+  if (!cfg.trustUserHeader) console.warn("[config] GALGAME_TRUST_USER_HEADER=0：忽略 X-User-Id，只接受前置鉴权注入的 userId");
   const memory = new EventSourcedMemory();
   const arbiter = new DefaultArbiter({ store, registry, memories: memory });
   const modules = new ModuleHost({ dir: path.join(contentDir, "modules") });
@@ -220,6 +221,14 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     console.warn("[canonize] 已启用但缺少独立审核器（GALGAME_CANONIZE_BASE_URL/MODEL/API_KEY），所有候选将被拒绝（fail-closed）");
   }
   const versionFile = path.join(path.resolve(cfg.dataDir), "worlds", worldId, "mem.version");
+  // 版本号只写不读会让重启后退回 0：启动时读回（审阅 P0-3）
+  let startVersion = 0;
+  try {
+    const raw = JSON.parse(await readFile(versionFile, "utf8")) as { version?: unknown };
+    if (typeof raw.version === "number" && Number.isFinite(raw.version)) startVersion = Math.max(0, Math.floor(raw.version));
+  } catch {
+    // 首次启动/文件损坏：从 0 开始，不影响正确性（只是版本号会重新涨上来）
+  }
   const canonize = new CanonizeJob({
     store,
     arbiter,
@@ -227,6 +236,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     worldId,
     memory,
     judge,
+    startVersion,
     limits: {
       enabled: canonizeCfg?.enabled ?? false,
       dailyCap: canonizeCfg?.dailyCap ?? 200,
@@ -240,6 +250,34 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     },
     now,
   });
+
+  // 定时补扫（可选）：把已加载房间的公共长期记忆陆续提成世界层候选。
+  // 不阻塞请求、不 unref 就会吊住进程，所以显式 unref；失败只打日志（下一轮再试）。
+  const scanMinutes = canonizeCfg?.scanMinutes ?? 0;
+  if (canonizeCfg?.enabled !== false && scanMinutes > 0) {
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          for (const roomId of await store.listRooms()) {
+            if (roomId === worldRoom) continue;
+            await canonize.retireRoom(roomId);
+          }
+        } catch (e) {
+          console.warn("[canonize] 定时补扫失败：", e instanceof Error ? e.message : e);
+        }
+      })();
+    }, Math.max(1, scanMinutes) * 60_000);
+    timer.unref?.();
+  }
+
+  // ---------------------------------------------------------------- 启动重建记忆索引
+  // 事件日志是唯一真源，Memory 只是投影：不重建的话，重启后所有召回为 0（审阅 P0-1/P0-3）。
+  // 房间与世界层都要重建；世界层必须单独 rebuild，因为 Turn 只 sync 自己那个房间。
+  for (const roomId of await store.listRooms()) {
+    memory.rebuild(roomId, await store.events(roomId, 0));
+  }
+  await store.load(worldRoom);
+  memory.rebuild(worldRoom, await store.events(worldRoom, 0));
 
   const map = new MapService({
     store,
@@ -265,6 +303,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     turn,
     map,
     settings,
+    trustUserHeader: cfg.trustUserHeader,
     version: CONTRACT_VERSION,
     async createRoom(_mode, userId) {
       const roomId = `room_${now().toString(36)}${Math.floor(Math.random() * 1e3).toString(36)}`;

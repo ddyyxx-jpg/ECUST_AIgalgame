@@ -12,6 +12,9 @@ import {
 } from "./memory.ts";
 import { applyMemoryGates, contentHashOf, trigramSimilarity } from "./memory.gate.ts";
 import { createInitialState } from "./projection.ts";
+import { EventSourcedStore } from "./store.ts";
+import { DefaultArbiter } from "./arbiter.ts";
+import { emptyRegistry } from "./registry.ts";
 
 const ROOM = "room_m";
 const PLR = "plr_self";
@@ -134,6 +137,49 @@ describe("EventSourcedMemory", () => {
     expect(p?.familiarity).toBeGreaterThan(0);
     expect(p?.firstMetTurn).toBe(3);
     expect(p?.lastTopics).toContain("书");
+  });
+
+
+  it("forced(secret) 不占预算、不被截断（docs/03 §2.6）", async () => {
+    const mem = new EventSourcedMemory();
+    const filler = "甲".repeat(300); // 300 tok：一条就把预算吃满
+    mem.ingest(memEvent(1, { memoryId: "mem_pub", ownerId: NPC, content: filler, tags: ["书"], salience: 5, about: [PLR], tier: "long", turn: 1, at: 1 }));
+    mem.ingest(memEvent(2, { memoryId: "mem_secret", ownerId: NPC, content: "他其实在替王五传话", tags: ["书"], salience: 3, about: [PLR], visibility: "secret", tier: "short", turn: 1, at: 1 }));
+    const hits = await mem.recall({ roomId: ROOM, ownerId: NPC, about: [PLR], tags: ["书"], budgetTokens: 100, nowTurn: 2 });
+    const ids = hits.map((h) => h.record.id);
+    expect(ids).toContain("mem_secret");
+    expect(hits.find((h) => h.record.id === "mem_secret")?.forced).toBe(true);
+  });
+
+  it("tombstone 未知 id：世界层撤回必须报 E_REF_NOT_FOUND（不静默成功）", async () => {
+    const store = new EventSourcedStore({ worldId: "w1", locId: "loc_gate" });
+    store.append(ROOM, [
+      { v: 1, id: "evt_1", roomId: ROOM, seq: 1, ts: 1, actorId: "system", type: "entity.created", payload: { entity: { id: "loc_gate", kind: "loc", name: "校门", attrs: {}, tags: [], origin: "seed", canon: true, status: "active", createdAt: 0, updatedAt: 0 } } },
+    ]);
+    const mem = new EventSourcedMemory();
+    const arbiter = new DefaultArbiter({ store, registry: emptyRegistry(), memories: mem });
+    const worldRoom = worldRoomId("w1");
+    const r = await arbiter.apply(worldRoom, [
+      { op: "memory.write", args: { ownerId: "mem_world", content: "撤回理由", tier: "permanent", status: "tombstoned", supersedes: "mem_nope", visibility: "public", worldId: "w1" }, reason: "撤回", by: "canonize" },
+    ], { v: 1, id: "evt_canonize_x", roomId: worldRoom, seq: 1, ts: 1, actorId: "mem_world", type: "canonize", payload: {}, causedBy: "c1" } as Envelope);
+    expect(r.ok).toBe(false);
+    expect(r.rejected[0]?.code).toBe("E_REF_NOT_FOUND");
+  });
+
+  it("世界层写入必须带 sourceRefs：没有就是 E_MEMORY_TAINT", async () => {
+    const store = new EventSourcedStore({ worldId: "w1", locId: "loc_gate" });
+    store.append(ROOM, [
+      { v: 1, id: "evt_1", roomId: ROOM, seq: 1, ts: 1, actorId: "system", type: "entity.created", payload: { entity: { id: "loc_gate", kind: "loc", name: "校门", attrs: {}, tags: [], origin: "seed", canon: true, status: "active", createdAt: 0, updatedAt: 0 } } },
+    ]);
+    const mem = new EventSourcedMemory();
+    const arbiter = new DefaultArbiter({ store, registry: emptyRegistry(), memories: mem });
+    const worldRoom = worldRoomId("w1");
+    const args = { ownerId: "mem_world", content: "校门口那棵树倒了", tier: "permanent", visibility: "public", worldId: "w1", contentHash: "a".repeat(32) };
+    const cause = { v: 1, id: "evt_canonize_y", roomId: worldRoom, seq: 1, ts: 1, actorId: "mem_world", type: "canonize", payload: {}, causedBy: "c2" } as Envelope;
+    const noRef = await arbiter.apply(worldRoom, [{ op: "memory.write", args, reason: "写", by: "canonize" }], cause);
+    expect(noRef.rejected[0]?.code).toBe("E_MEMORY_TAINT");
+    const badRef = await arbiter.apply(worldRoom, [{ op: "memory.write", args: { ...args, sourceRefs: ["hacker_1"] }, reason: "写", by: "canonize" }], { ...cause, seq: 2, id: "evt_canonize_z" } as Envelope);
+    expect(badRef.rejected[0]?.code).toBe("E_MEMORY_TAINT");
   });
 
   it("sync 增量且幂等：重复同步不会产生重复记录", () => {

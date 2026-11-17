@@ -278,6 +278,16 @@ export interface MemoryWriteArgs {
   /** 只有引擎/导演骨架能写，模块不可用 */
   visibility?: "public" | "private" | "secret";
   about?: ActorId[];
+  /** 账号维度（docs/03 §2.6）；私忆按它隔离，世界层历史条目可省 */
+  userId?: Id;
+  /** 世界层所属世界（permanent 必填；私忆可省） */
+  worldId?: Id;
+  tier?: "short" | "long" | "permanent";
+  sourceRefs?: string[];
+  contentHash?: string;
+  status?: "current" | "historical" | "tombstoned";
+  supersedes?: Id;
+  aboutUserIds?: Id[];
 }
 export interface PlotUpsertArgs {
   id?: Id;

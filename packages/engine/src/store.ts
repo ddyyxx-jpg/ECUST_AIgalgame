@@ -12,7 +12,7 @@
  *     不要拿它做 expectedSeq 校验（重启后第一回合会假报 E_SEQ_GAP）。
  */
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Envelope, RoomId, Store, WorldState } from "../../shared/src/contract/types.ts";
@@ -77,7 +77,12 @@ export class EventSourcedStore implements EventLog {
     return structuredClone(this.state(roomId));
   }
 
-  async events(roomId: RoomId, fromSeq: number, limit = 200): Promise<Envelope[]> {
+  /** 已知房间列表（启动重建记忆索引时用；文件实现扫目录） */
+  async listRooms(): Promise<RoomId[]> {
+    return [...this.logs.keys()];
+  }
+
+  async events(roomId: RoomId, fromSeq: number, limit = Number.POSITIVE_INFINITY): Promise<Envelope[]> {
     const log = this.logs.get(roomId) ?? [];
     return log.filter((e) => e.seq >= fromSeq).slice(0, limit);
   }
@@ -243,6 +248,16 @@ export class FileStore extends EventSourcedStore {
   override async snapshot(roomId: RoomId): Promise<WorldState> {
     await this.ensure(roomId);
     return super.snapshot(roomId);
+  }
+
+  /** 扫描 data/rooms/*.jsonl：重启后要把这些房间的记忆索引一起重建（审阅 P0-1/P0-3） */
+  override async listRooms(): Promise<RoomId[]> {
+    if (!existsSync(this.dir)) return [];
+    const names = await readdir(this.dir);
+    return names
+      .filter((n) => n.endsWith(".jsonl"))
+      .map((n) => n.slice(0, -".jsonl".length))
+      .sort();
   }
 
   override async events(roomId: RoomId, fromSeq: number, limit?: number): Promise<Envelope[]> {
