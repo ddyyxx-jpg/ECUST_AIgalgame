@@ -11,6 +11,7 @@ import type {
   Envelope,
   Link,
   Plot,
+  RoomMember,
   RoomState,
   SceneState,
   GameClock,
@@ -183,6 +184,18 @@ export function applyEvent(state: WorldState, env: Envelope): WorldState {
       const e = p<PlotPayload>(env);
       const rest = state.plots.filter((x) => x.id !== e.plot.id);
       return { ...state, plots: [...rest, e.plot] };
+    }
+    case "room.member.joined": {
+      // 成员变化也要可回放：联机房间靠它恢复"谁还在房里"
+      const m = p<{ member?: RoomMember }>(env).member;
+      if (!m || !m.actorId) return state;
+      const rest = state.room.members.filter((x) => x.actorId !== m.actorId);
+      return { ...state, room: { ...state.room, members: [...rest, m] } };
+    }
+    case "room.member.left": {
+      const actorId = p<{ actorId?: string }>(env).actorId;
+      if (!actorId) return state;
+      return { ...state, room: { ...state.room, members: state.room.members.filter((x) => x.actorId !== actorId) } };
     }
     case "memory.written":
       // 记忆不落在 WorldState（它由 Memory 服务从同一日志投影），这里保持无副作用，

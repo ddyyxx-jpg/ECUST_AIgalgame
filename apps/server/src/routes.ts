@@ -3,7 +3,7 @@
  * 不含业务规则；游戏层拒绝一律 HTTP 200 + {ok:false,code,message}，500 只表示未预期异常。
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { Store, Turn, TurnEvent } from "../../../packages/shared/src/contract/types.ts";
+import type { Memory, Store, Turn, TurnEvent } from "../../../packages/shared/src/contract/types.ts";
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
 import type { LlmSettings } from "./settings.ts";
@@ -14,7 +14,11 @@ export interface AppDeps {
   map: MapService;
   /** 运行时模型接入（玩家自备 key）：/api/v1/settings/llm */
   settings: LlmSettings;
-  createRoom(mode: "solo" | "coop"): Promise<{ roomId: string; actorId: string }>;
+  /** 读取账号维度的私忆档案（GET /api/v1/me）；记忆是日志投影，这里只读 */
+  memory: Memory;
+  createRoom(mode: "solo" | "coop", userId?: string): Promise<{ roomId: string; actorId: string }>;
+  /** 开发期账号：没有登录态时用 GALGAME_DEV_USER 兜底（上线接登录中间件后删掉） */
+  devUser?: string;
   version: string;
 }
 
@@ -30,6 +34,18 @@ function sseWrite(raw: NodeJS.WritableStream, event: string, data: unknown): voi
 
 function schemaError(message: string): GameError {
   return { ok: false, code: "E_SCHEMA_INVALID", message };
+}
+
+/**
+ * 账号维度：优先 `X-User-Id` 头（联机/生产由登录态中间件注入），其次请求体，最后开发期默认值。
+ * 只在服务端用；绝不把 userId 当权限凭据（它是"哪份记忆档案"的键，不是 token）。
+ */
+function userIdOf(req: FastifyRequest, deps: AppDeps, body?: { userId?: string }): string | undefined {
+  const raw = req.headers["x-user-id"];
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  const fromBody = body?.userId;
+  const id = (header ?? fromBody ?? deps.devUser ?? "").trim();
+  return id === "" ? undefined : id.slice(0, 64);
 }
 
 /** 管理员令牌统一从 x-admin-token 头取；校验在 MapService/草案引擎里做 */
@@ -84,8 +100,20 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   });
 
   app.post("/api/v1/rooms", async (req) => {
-    const body = (req.body ?? {}) as { mode?: "solo" | "coop" };
-    return deps.createRoom(body.mode === "coop" ? "coop" : "solo");
+    const body = (req.body ?? {}) as { mode?: "solo" | "coop"; userId?: string };
+    const userId = userIdOf(req, deps, body);
+    const room = await deps.createRoom(body.mode === "coop" ? "coop" : "solo", userId);
+    return { ...room, ...(userId ? { userId } : {}) };
+  });
+
+  /** 玩家档案（记忆的派生视图，不写状态）：私忆只按 userId+ownerId 过滤后返回 */
+  app.get("/api/v1/me", async (req, reply) => {
+    const q = req.query as { roomId?: string; actorId?: string };
+    const userId = userIdOf(req, deps);
+    if (!q.roomId || !q.actorId) return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "roomId/actorId 必填" });
+    if (!userId) return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "缺少 X-User-Id（或 GALGAME_DEV_USER）" });
+    const profile = await deps.memory.profile(userId, q.actorId, q.roomId);
+    return { ok: true, userId, profile };
   });
 
   app.get("/api/v1/rooms/:roomId/state", async (req, reply) => {
@@ -109,7 +137,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */
   app.post("/api/v1/rooms/:roomId/turns", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
-    const body = (req.body ?? {}) as { actorId?: string; input?: string; clientTurnId?: string; options?: Record<string, unknown> };
+    const body = (req.body ?? {}) as { actorId?: string; input?: string; clientTurnId?: string; userId?: string; options?: Record<string, unknown> };
     if (!body.actorId || !body.input || !body.clientTurnId) {
       return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "actorId/input/clientTurnId 必填" });
     }
@@ -120,7 +148,15 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       "x-accel-buffering": "no",
     });
     try {
-      const it = deps.turn.run({ roomId, actorId: body.actorId, input: body.input, clientTurnId: body.clientTurnId, options: body.options as never });
+      const userId = userIdOf(req, deps, body as { userId?: string });
+    const it = deps.turn.run({
+      roomId,
+      actorId: body.actorId,
+      input: body.input,
+      clientTurnId: body.clientTurnId,
+      options: body.options as never,
+      ...(userId ? { userId } : {}),
+    });
       for await (const ev of it as AsyncIterable<TurnEvent>) {
         sseWrite(reply.raw, ev.type, ev);
         if (ev.type === "turn.commit" || ev.type === "turn.error") break;

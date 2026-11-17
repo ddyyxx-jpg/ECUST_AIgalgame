@@ -5,7 +5,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { DialogueDirector, Entity, Proposal, Registry } from "../../../packages/shared/src/index.ts";
+import type { DialogueDirector, Entity, Envelope, Proposal, Registry } from "../../../packages/shared/src/index.ts";
 import { CONTRACT_VERSION } from "../../../packages/shared/src/index.ts";
 import {
   DefaultArbiter,
@@ -62,7 +62,10 @@ async function loadDirectors(dir: string): Promise<DialogueDirector[]> {
   return directors;
 }
 
-export async function createApp(cfg: ServerConfig): Promise<AppDeps> {
+/** 装配结果 = HTTP 层需要的 deps，另外把引擎内部件给测试/运维用（arbiter 不对外暴露成端点） */
+export type App = AppDeps & { arbiter: DefaultArbiter } & { memory: EventSourcedMemory };
+
+export async function createApp(cfg: ServerConfig): Promise<App> {
   const contentDir = path.resolve(cfg.contentDir);
   const canon = JSON.parse(await readFile(path.join(contentDir, "canon", "world.json"), "utf8")) as CanonWorld;
   // canon 允许不写 startLocId：此时取 locs[0]。必须在建 store 前算出来，
@@ -196,11 +199,13 @@ export async function createApp(cfg: ServerConfig): Promise<AppDeps> {
 
   return {
     store,
+    arbiter,
+    memory,
     turn,
     map,
     settings,
     version: CONTRACT_VERSION,
-    async createRoom(_mode) {
+    async createRoom(_mode, userId) {
       const roomId = `room_${now().toString(36)}${Math.floor(Math.random() * 1e3).toString(36)}`;
       const actorId = "plr_self";
       const ts = now();
@@ -242,19 +247,29 @@ export async function createApp(cfg: ServerConfig): Promise<AppDeps> {
       for (const f of canon.facts ?? []) addSeed(f.id, "fact", f.text, true);
       addSeed(actorId, "plr", "你", false);
 
-      await store.append(
+      const seedEvents: Envelope[] = seeded.map((entity, i) => ({
+        v: 1 as const,
+        id: `evt_seed_${roomId}_${i}`,
         roomId,
-        seeded.map((entity, i) => ({
-          v: 1 as const,
-          id: `evt_seed_${roomId}_${i}`,
-          roomId,
-          seq: i + 1,
-          ts,
-          actorId: "system",
-          type: "entity.created",
-          payload: { entity },
-        })),
-      );
+        seq: i + 1,
+        ts,
+        actorId: "system",
+        type: "entity.created",
+        payload: { entity },
+      }));
+      // 成员表是账号维度的落点：私忆隔离（同一世界里 A 的 private 记忆 B 看不到）靠它。
+      // solo 不是特例——就是只有 1 个成员的合作房（docs/04 §2）。
+      seedEvents.push({
+        v: 1 as const,
+        id: `evt_join_${roomId}`,
+        roomId,
+        seq: seeded.length + 1,
+        ts,
+        actorId: "system",
+        type: "room.member.joined",
+        payload: { member: { actorId, role: "player", joinedSeq: seeded.length + 1, online: true, ...(userId ? { userId } : {}) } },
+      });
+      await store.append(roomId, seedEvents);
 
       // ② 其余用普通提案（通路、出生点、在场），一样过 Arbiter 校验
       const ops: Proposal[] = [];
