@@ -37,6 +37,8 @@ import type { MemoryDraft } from "../../shared/src/index.ts";
 import type { MemoryContext } from "./turn.memory.ts";
 import { readMemoryContext, seedDrafts, toMemoryProposals } from "./turn.memory.ts";
 import { applyMemoryGates } from "./memory.gate.ts";
+import type { Impressions } from "./impressions.ts";
+import { impressionFact } from "./impressions.ts";
 
 export interface TurnDeps {
   store: EventLog;
@@ -57,6 +59,11 @@ export interface TurnDeps {
    * 数据在 content/registry/reality.json；不注入时只带基础世界规则、不做类型判定。
    */
   reality?: RealityPolicy;
+  /**
+   * 世界印象端口：canonize 把这个玩家的事迹写进世界层后，下一回合在 facts 里告诉他"被记住了"。
+   * 不注入 = 不投递；投递不调模型、不占叙事文本。
+   */
+  impressions?: Impressions;
   /** 组装提示词；默认实现见 turn.prompt */
   buildPrompt?: (state: WorldState, actorId: ActorId, input: string) => string;
 }
@@ -247,6 +254,20 @@ export class DefaultTurn implements Turn {
       if (!mem.available) facts.push("记忆暂不可用：本回合按第一次见面处理。");
       if (memoryDropped > 0) facts.push(`记忆校准：${memoryDropped} 条未被采信。`);
       if (memoryRejected) facts.push("记忆写入被拒，本次行动照常生效。");
+      // 世界印象：只读端口 + 投递后置标记；失败不影响本回合（印象是锦上添花）
+      let deliveredNotices: import("../../shared/src/index.ts").ImpressionNotice[] = [];
+      if (this.deps.impressions && req.userId) {
+        try {
+          const notices = await this.deps.impressions.pending(req.userId, req.roomId, 2);
+          for (const notice of notices) {
+            const npcName = notice.npcId ? state.entities[notice.npcId]?.name : undefined;
+            facts.push(impressionFact(notice, npcName));
+            deliveredNotices.push(notice);
+          }
+        } catch {
+          deliveredNotices = [];
+        }
+      }
       if (facts.length > 0) yield emit({ type: "turn.facts", facts });
       if (modOut.ui) yield emit({ type: "turn.ui", view: modOut.ui });
 
@@ -269,6 +290,15 @@ export class DefaultTurn implements Turn {
       const seq = this.deps.store.seq(req.roomId);
       yield emit({ type: "turn.commit", turnId, seq, usage });
       this.seen.set(req.clientTurnId, events);
+
+      // 印象只在回合真正提交后标记已投递（否则崩在中途会"说过又没说过"）
+      if (deliveredNotices.length > 0 && this.deps.impressions) {
+        try {
+          await this.deps.impressions.markDelivered(deliveredNotices);
+        } catch {
+          // 印象是锦上添花：投递标记失败下次可能重复提示一次，可接受
+        }
+      }
     } catch (e) {
       yield emit({ type: "turn.error", code: codeOf(e), message: errMessage(e), retryable: true });
     } finally {

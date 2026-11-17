@@ -3,7 +3,7 @@
  * 不含业务规则；游戏层拒绝一律 HTTP 200 + {ok:false,code,message}，500 只表示未预期异常。
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { Memory, Store, Turn, TurnEvent } from "../../../packages/shared/src/contract/types.ts";
+import type { Memory, MemoryRecord, Store, Turn, TurnEvent } from "../../../packages/shared/src/contract/types.ts";
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
 import type { LlmSettings } from "./settings.ts";
@@ -15,7 +15,7 @@ export interface AppDeps {
   /** 运行时模型接入（玩家自备 key）：/api/v1/settings/llm */
   settings: LlmSettings;
   /** 读取账号维度的私忆档案（GET /api/v1/me）；记忆是日志投影，这里只读 */
-  memory: Memory;
+  memory: Memory & { all(roomId: string): MemoryRecord[] };
   createRoom(mode: "solo" | "coop", userId?: string): Promise<{ roomId: string; actorId: string }>;
   /** 开发期账号：没有登录态时用 GALGAME_DEV_USER 兜底（上线接登录中间件后删掉） */
   devUser?: string;
@@ -23,9 +23,13 @@ export interface AppDeps {
   canonize?: {
     retireRoom(roomId: string): Promise<{ written: string[]; candidates: number }>;
     tombstone(memoryId: string, reason: string): Promise<boolean>;
+    stats(): { worldId: string; version: number; writtenToday: number; writtenTotal: number; circuitOpen: boolean; consecutiveJudgeFailures: number };
+    sample(limit: number): MemoryRecord[];
   };
   /** 管理员令牌；canonize 端点用它鉴权（地图端点由 MapService 自己校验） */
   adminToken?: string;
+  /** 世界印象（用户投影）：/me 只读，投递在 Turn 里 */
+  impressions?: { pending(userId: string, roomId: string, limit: number): Promise<unknown[]>; count?(userId: string): Promise<number> };
   version: string;
 }
 
@@ -120,7 +124,13 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!q.roomId || !q.actorId) return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "roomId/actorId 必填" });
     if (!userId) return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "缺少 X-User-Id（或 GALGAME_DEV_USER）" });
     const profile = await deps.memory.profile(userId, q.actorId, q.roomId);
-    return { ok: true, userId, profile };
+    let impressionCount = 0;
+    let pendingImpressions: unknown[] = [];
+    if (deps.impressions) {
+      impressionCount = deps.impressions.count ? await deps.impressions.count(userId) : 0;
+      pendingImpressions = await deps.impressions.pending(userId, q.roomId, 5);
+    }
+    return { ok: true, userId, profile, impressionCount, pendingImpressions };
   });
 
   app.get("/api/v1/rooms/:roomId/state", async (req, reply) => {
@@ -197,6 +207,28 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!body.memoryId) return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "memoryId 必填" });
     const done = await deps.canonize.tombstone(body.memoryId, body.reason ?? "管理员撤回");
     return done ? { ok: true } : { ok: false, code: "E_MEMORY_IMMUTABLE", message: "撤回失败（条目不存在或不可变）" };
+  });
+
+  /** 观测（P4）：只读指标 + 人工抽样复审用的永久记忆清单 */
+  app.get("/api/v1/admin/stats", async (req, reply) => {
+    if (!adminTokenOf(req.headers) || adminTokenOf(req.headers) !== (deps.adminToken ?? "")) {
+      return reply.code(403).send({ ok: false, code: "E_FORBIDDEN", message: "需要管理员令牌" });
+    }
+    const q = req.query as { roomId?: string; sample?: string };
+    const rooms = q.roomId ? [q.roomId] : [];
+    const perRoom = rooms.map((roomId) => {
+      const records = deps.memory.all(roomId);
+      const byTier: Record<string, number> = {};
+      let tombstoned = 0;
+      for (const r of records) {
+        byTier[r.tier ?? "short"] = (byTier[r.tier ?? "short"] ?? 0) + 1;
+        if (r.status === "tombstoned") tombstoned += 1;
+      }
+      return { roomId, total: records.length, byTier, tombstoned };
+    });
+    const canonize = deps.canonize ? deps.canonize.stats() : null;
+    const sample = deps.canonize ? deps.canonize.sample(Number(q.sample ?? 10)) : [];
+    return { ok: true, canonize, rooms: perRoom, sample };
   });
 
   // ---------------------------------------------------------------- 地图（docs/06 §4）

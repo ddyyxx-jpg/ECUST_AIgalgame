@@ -26,6 +26,7 @@ import { CanonizeJob, worldRoomId } from "../../../packages/engine/src/index.ts"
 import type { ServerConfig } from "./config.ts";
 import { hasAudit, hasCanonize, hasLlm } from "./config.ts";
 import { DenyAllJudge, LlmCanonizeJudge } from "./canonize.ts";
+import { FileImpressions } from "./impressions.ts";
 import { LlmAudit } from "./audit.ts";
 import { MapService } from "./map.ts";
 import { loadSceneDescs, offlineNarrative } from "./offline-narrator.ts";
@@ -190,7 +191,13 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
         )
       : new NoopAudit();
 
-  const turn = new DefaultTurn({ store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality });
+  // 世界印象：用户投影（data/users/<id>/impressions.json），不写世界状态
+  const impressions = new FileImpressions(path.join(path.resolve(cfg.dataDir), "users"), {
+    ttlDays: cfg.impressionTtlDays ?? 30,
+    now,
+  });
+
+  const turn = new DefaultTurn({ store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions });
 
   // ---------------------------------------------------------------- 世界层永久记忆（docs/08 §7）
   // 世界房间 room_world_<worldId>：无成员、不可进入，只存 permanent。
@@ -226,6 +233,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
       minWitness: 2,
       perSourceCap: 2,
     },
+    onImpression: async (notice) => impressions.enqueue([notice]),
     onVersionBump: async (_worldId, next) => {
       await mkdir(path.dirname(versionFile), { recursive: true });
       await writeFile(versionFile, JSON.stringify({ worldId, version: next, updatedAt: now() }), "utf8");
@@ -251,6 +259,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     arbiter,
     memory,
     canonize,
+    impressions,
     worldRoom,
     adminToken: cfg.adminToken,
     turn,

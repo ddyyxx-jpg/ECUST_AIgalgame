@@ -13,6 +13,7 @@ import type {
   Arbiter,
   Envelope,
   Id,
+  ImpressionNotice,
   MemoryRecord,
   Plot,
   Proposal,
@@ -20,6 +21,7 @@ import type {
   WorldState,
 } from "../../shared/src/index.ts";
 import { contentHashOf } from "./memory.gate.ts";
+import { buildImpression } from "./impressions.ts";
 import type { EventLog } from "./store.ts";
 import type { Memory } from "../../shared/src/index.ts";
 
@@ -42,6 +44,15 @@ export interface CanonizeJudge {
   review(c: PermanentCandidate): Promise<{ allow: boolean; reason?: string }>;
 }
 
+export interface CanonizeStats {
+  worldId: Id;
+  version: number;
+  writtenToday: number;
+  writtenTotal: number;
+  circuitOpen: boolean;
+  consecutiveJudgeFailures: number;
+}
+
 export interface CanonizeLimits {
   enabled: boolean;
   /** 每日新条目上限（默认 200） */
@@ -50,6 +61,8 @@ export interface CanonizeLimits {
   minWitness: number;
   /** 单来源（同一条记忆 id）最多贡献几条候选（默认 2） */
   perSourceCap: number;
+  /** judge 连续失败多少次熔断（默认 3；熔断当天不再尝试） */
+  judgeFailureLimit?: number;
 }
 
 export const DEFAULT_CANONIZE_LIMITS: CanonizeLimits = {
@@ -74,6 +87,11 @@ export interface CanonizeDeps {
   now?: () => number;
   /** 注入时钟日期（测试用）；默认本地日期 YYYY-MM-DD */
   today?: () => string;
+  /**
+   * 印象入队回调（server 写用户投影文件）。引擎不发事件、不做 IO：
+   * "谁被记住了"是派生视图，不是世界状态。
+   */
+  onImpression?: (notice: ImpressionNotice, roomId: RoomId) => void | Promise<void>;
 }
 
 export interface CanonizeReport {
@@ -150,14 +168,40 @@ export class CanonizeJob {
   private writtenToday = 0;
   private readonly perSource = new Map<Id, number>();
   private worldVersion = 0;
+  private writtenTotal = 0;
+  private consecutiveJudgeFailures = 0;
+  /** 熔断：judge 连续不可用 N 次后当天不再尝试（避免每回合白花一次审核调用） */
+  private readonly judgeFailureLimit: number;
 
   constructor(private readonly deps: CanonizeDeps) {
     this.limits = { ...DEFAULT_CANONIZE_LIMITS, ...(deps.limits ?? {}) };
+    this.judgeFailureLimit = this.limits.judgeFailureLimit ?? 3;
     this.day = this.today();
   }
 
   get version(): number {
     return this.worldVersion;
+  }
+
+  /** 观测（P4）：给 admin/指标用，别把内部状态散着读 */
+  stats(): CanonizeStats {
+    return {
+      worldId: this.deps.worldId,
+      version: this.worldVersion,
+      writtenToday: this.writtenToday,
+      writtenTotal: this.writtenTotal,
+      circuitOpen: this.consecutiveJudgeFailures >= this.judgeFailureLimit,
+      consecutiveJudgeFailures: this.consecutiveJudgeFailures,
+    };
+  }
+
+  /** 人工抽样复审：返回世界层最近的永久记忆（新→旧） */
+  sample(limit = 20): MemoryRecord[] {
+    const records = typeof this.deps.memory.all === "function" ? this.deps.memory.all(this.deps.worldRoom) : [];
+    return records
+      .filter((r) => r.tier === "permanent" && r.status === "current")
+      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+      .slice(0, Math.max(0, limit));
   }
 
   /** 房间退役：把该房间的公共长期记忆提成候选（docs/08 §6/§7.2） */
@@ -209,6 +253,10 @@ export class CanonizeJob {
     // 幂等只看**世界层**已有条目；房间里的记忆当然有同样的内容，那是候选的来源，不是重复
     const existing = new Set(this.worldHashes(await this.deps.store.events(this.deps.worldRoom, 0)));
 
+    if (this.consecutiveJudgeFailures >= this.judgeFailureLimit) {
+      return { worldId: this.deps.worldId, candidates: candidates.length, written, skipped: [{ reason: "circuit_open", count: candidates.length }], errors, writtenToday: this.writtenToday };
+    }
+
     for (const candidate of candidates) {
       // ① 来源可追溯
       if (candidate.sourceRefs.length === 0 || !candidate.sourceRefs.every((r) => SOURCE_REF.test(r))) {
@@ -229,11 +277,13 @@ export class CanonizeJob {
       // ④ 独立审核（judge 抛错 = 拒绝：fail-closed）
       try {
         const verdict = await this.deps.judge.review(candidate);
+        this.consecutiveJudgeFailures = 0;
         if (!verdict.allow) {
           this.skip(skipped, `judge:${verdict.reason ?? "deny"}`);
           continue;
         }
       } catch {
+        this.consecutiveJudgeFailures += 1;
         this.skip(skipped, "judge_unavailable");
         continue;
       }
@@ -291,15 +341,35 @@ export class CanonizeJob {
         this.skip(skipped, `arbiter:${code}`);
         continue;
       }
+      let memoryId: Id | undefined;
       for (const ev of applied.events) {
         if (ev.type === "memory.written") {
           const id = (ev.payload as { memoryId?: Id }).memoryId;
-          if (id) written.push(id);
+          if (id) {
+            written.push(id);
+            memoryId = id;
+          }
+        }
+      }
+      // 印象：只有"关于某个玩家的公开事迹"才通知他（每条约 1 个 userId，按 userId 去重）
+      if (memoryId && this.deps.onImpression && candidate.aboutUserIds && candidate.aboutUserIds.length > 0) {
+        const npcId = candidate.about.find((id) => id.startsWith("npc_"));
+        for (const userId of [...new Set(candidate.aboutUserIds)].slice(0, 4)) {
+          const notice = buildImpression({
+            memoryId,
+            userId,
+            worldId: this.deps.worldId,
+            content: candidate.content,
+            ...(npcId ? { npcId } : {}),
+            now: this.deps.now ? this.deps.now() : Date.now(),
+          });
+          if (notice) await this.deps.onImpression(notice, roomId);
         }
       }
       existing.add(hash);
       this.perSource.set(src, (this.perSource.get(src) ?? 0) + 1);
       this.writtenToday += 1;
+      this.writtenTotal += 1;
       this.worldVersion += 1;
       if (this.deps.onVersionBump) await this.deps.onVersionBump(this.deps.worldId, this.worldVersion);
     }

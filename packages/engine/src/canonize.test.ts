@@ -86,7 +86,7 @@ function withPlot(store: EventSourcedStore): void {
   ]);
 }
 
-async function job(f: Fixture, judge: CanonizeJudge = { review: async () => ({ allow: true }) }, enabled = true, dailyCap = 200) {
+async function job(f: Fixture, judge: CanonizeJudge = { review: async () => ({ allow: true }) }, enabled = true, dailyCap = 200, judgeFailureLimit = 3) {
   return new CanonizeJob({
     store: f.store,
     arbiter: f.arbiter,
@@ -94,7 +94,7 @@ async function job(f: Fixture, judge: CanonizeJudge = { review: async () => ({ a
     worldId: WORLD,
     memory: f.memory,
     judge,
-    limits: { enabled, dailyCap, minWitness: 2, perSourceCap: 2 },
+    limits: { enabled, dailyCap, minWitness: 2, perSourceCap: 2, judgeFailureLimit },
     onVersionBump: async (worldId, version) => {
       f.bump.push({ worldId, version });
     },
@@ -182,4 +182,19 @@ describe("canonize 八道闸门（P3）", () => {
     expect(hits.map((h) => h.record.id)).not.toContain(memoryId);
     expect(hits.every((h) => h.record.status !== "tombstoned")).toBe(true);
   });
+
+  it("熔断：judge 连续失败到阈值后当天不再尝试，stats() 报 circuitOpen", async () => {
+    const records = ["食堂新开了一家面馆", "操场边上多了一排长椅", "图书馆换了新的借书系统"].map((c, i) => record(`mem_${i}`, [A, B][i % 2]!, c));
+    const f = await fixture({ records: records.flatMap((r) => [r, record(`${r.id}_b`, r.ownerId === A ? B : A, r.content)]) });
+    const judge = { review: async () => { throw new Error("审核服务 502"); } };
+    const j = await job(f, judge, true, 200, 2);
+    const r = await j.retireRoom(ROOM);
+    expect(r.written).toHaveLength(0);
+    expect(j.stats().circuitOpen).toBe(true);
+    expect(j.stats().consecutiveJudgeFailures).toBeGreaterThanOrEqual(2);
+    const again = await j.retireRoom(ROOM);
+    expect(again.skipped[0]?.reason).toBe("circuit_open");
+    expect(j.sample(10)).toEqual([]);
+  });
 });
+
