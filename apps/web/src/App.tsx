@@ -73,7 +73,12 @@ export default function App() {
   }, []);
 
   const refreshSaves = useCallback(async () => {
-    setSaves(await fetchSaves());
+    try {
+      setSaves(await fetchSaves());
+    } catch {
+      // 存档列表是锦上添花：服务器不可达 / 隐私模式没有本地身份时静默降级，不影响开局
+      setSaves([]);
+    }
   }, []);
 
   // 只读本地记录的房间号，用来决定"继续上次"是否出现

@@ -155,6 +155,7 @@
 ### feat/save-session
 
 - 2026-11-17 ｜ `feat/save-session` ｜ 本提交 ｜ feat ｜ issue #7「续玩/会话恢复」MVP：`data/rooms/<roomId>.history.jsonl` 记已提交回合（`withTurnRecording` 包在 Turn 外层，含 map.travel；只在 turn.commit 后写、turnId 去重）、`data/users/<userId>/saves.json` 存档索引（建房登记 / turn.commit 推进游标 / 只删索引，tmp+rename 原子写）、3 个端点（`GET /rooms/:id/history`、`GET/DELETE /me/saves`，docs/03 §5.2.5）、web 本地身份 `ecust.playerId` + 标题页「我的存档」+ 进房重放历史不重播序章、新增 `docs/09-存档与会话恢复方案.md` ｜ 权威仍是事件日志，历史和索引都只是投影：写失败只告警不回滚已提交回合；恢复不产生新回合；不 bump CONTRACT_VERSION、不改引擎、不新增 op；本地 UUID 仅开发期身份（可伪造） ｜ tsc 0；29 文件/201 用例全过（新增 history 9 / saves 5 / e2e 2）；check:contract 8 项全过；build:web 275.17 kB / gzip 87.96 kB ｜ 已知限制：speakers 恒空、历史最多一次 200 行、本地身份清空即丢索引（房间仍可进）、历史写失败只告警；恢复后前端不重拉历史（仅本回合流式追加 + 重拉 state）
+- 2026-11-17 ｜ `feat/save-session` ｜ 本提交 ｜ fix ｜ 审阅 P1/P2：历史移到独立目录 `data/history/<roomId>.jsonl`（`data/rooms/` 只放事件日志，避免 `FileStore.listRooms()` 把 `*.history.jsonl` 切成幻影房间、避免 append 覆盖历史）；`GET .../history` 不下发 `userId`（仅落盘审计）；前端 `refreshSaves` 失败兜底 `[]`；docs/03 §5.2.5 + docs/09 补独立目录、隐私、老房间可读说明 ｜ 历史是投影，不能污染房间发现逻辑：`listRooms()` 按 `*.jsonl` 扫目录，投影文件必须与事件日志物理隔离 ｜ tsc 0；29 文件/202 用例全过（e2e 增 listRooms 断言）；check:contract 8 项全过；build:web 成功 ｜ 未改 `POST /rooms` 登记游标取法（共享 `Store` 契约无 `seq()`，沿用 `events()` 尾 seq；见 PR #13 说明）
 
 ### feat/memory-module
 

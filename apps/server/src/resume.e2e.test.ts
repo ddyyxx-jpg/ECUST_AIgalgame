@@ -3,6 +3,8 @@
  * 历史与存档索引仍在，且恢复游标与事件日志一致。
  * 断言游标/结构，不断言叙事文案。
  */
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { tempDir } from "@galgame/testkit";
 import type { TurnEvent } from "../../../packages/shared/src/index.ts";
@@ -58,6 +60,15 @@ describe("会话恢复（issue #7，端到端）", () => {
     expect(historyBefore).toHaveLength(1);
     expect(historyBefore[0]?.committedSeq).toBe(seq1);
     expect(historyBefore[0]?.userId).toBe("u_a");
+
+    // P1 回归：历史文件必须与事件日志物理隔离，否则 listRooms() 会把
+    // "room_a.history" 当房间（且未来 append 该 id 会覆盖历史）。
+    const listRooms = (app1.store as unknown as { listRooms: () => Promise<string[]> }).listRooms.bind(app1.store);
+    expect(await listRooms()).toEqual([roomId]);
+    const roomFiles = readdirSync(join(cfg.dataDir, "rooms")).filter((name) => name.endsWith(".jsonl"));
+    expect(roomFiles).toHaveLength(1);
+    expect(roomFiles.some((name) => name.includes(".history."))).toBe(false);
+    expect(readdirSync(join(cfg.dataDir, "history")).filter((name) => name.endsWith(".jsonl"))).toHaveLength(1);
 
     // 第二次启动：同一 dataDir（模拟进程重启），不重新建房
     const app2 = await createApp(cfg);

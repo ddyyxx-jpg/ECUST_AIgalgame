@@ -207,7 +207,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   // 续玩（issue #7）：历史和存档索引都是"投影"，写失败不影响已提交的回合。
   // 历史挂在 Turn 外层（而不是 HTTP 路由里），这样 map.travel 这类内部回合也能被记录。
   const dataRoot = path.resolve(cfg.dataDir);
-  const history = new TurnHistory(path.join(dataRoot, "rooms"));
+  const history = new TurnHistory(path.join(dataRoot, "history"));
   const saves = new SaveIndex(path.join(dataRoot, "users"));
   const rawTurn = new DefaultTurn({ store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions });
   const turn = withTurnRecording(rawTurn, { history, saves, store, now });

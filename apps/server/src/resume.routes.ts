@@ -67,6 +67,11 @@ export function registerResumeRoutes(app: FastifyInstance, deps: AppDeps, helper
           limit: Number.isFinite(limit) ? limit : 50,
         })
       : { lines: [], lastCommittedSeq: 0 };
-    return { ok: true, roomId, history: page.lines, lastCommittedSeq: page.lastCommittedSeq };
+    // userId 只落盘用于归属/审计，不下发：合作房间里不向他人暴露账号 id
+    const history = page.lines.map((line) => {
+      const { userId: _owner, ...rest } = line;
+      return rest;
+    });
+    return { ok: true, roomId, history, lastCommittedSeq: page.lastCommittedSeq };
   });
 }
