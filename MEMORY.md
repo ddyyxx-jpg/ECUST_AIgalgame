@@ -3,7 +3,7 @@
 > **用途**：让新会话 / 新协作者在 5 分钟内恢复上下文——代码架构、工程规范、工程进度、各分支的关键决策与遗留。
 > **维护规则**：见 `AGENTS.md` §11（读取时机、按分支写入、提交/审阅合并时的写法）。
 > **定位**：活文档，只追加、不覆盖；不是契约。与 `docs/03-接口总表.md` 冲突时以 `docs/03` 为准。
-> **最后更新**：2026-11-17（main；当前 sha 以 `git rev-parse --short main` 为准）
+> **最后更新**：2026-11-17（分支 `feat/memory-module`，未合入 main；未 push）
 
 ---
 
@@ -11,12 +11,12 @@
 
 | 项 | 值 |
 |---|---|
-| 主分支 | `main`（sha 见 `git rev-parse --short main`；与 `origin/main` 同步；PR #2 已 squash 合入） |
-| `CONTRACT_VERSION` | **3.0.0**（`SCHEMA_VERSION 2`，`API_VERSION 2`） |
-| `PROMPT_VERSION` | **2026-11-16.1** |
-| 测试 | **17 文件 / 134 用例全过**（地图 21 + PR #2 新增 17）；`check:contract` **8 项全过**；`typecheck` 0 错；`build:web` 269.06 kB / gzip 86.02 kB |
-| 已具备 | M0 骨架、地图模块（旅行/场景/草案双审）、引擎 3.0.0（原子结算 + 持久化闭环）、内容审核层、现实锚定层、前端体验与运行时模型接入（标题页/对话流/图鉴/打字机/settings 热切换/离线叙述） |
-| 下一步 | M1：单房单 NPC 完整玩法、夜间 tick/密谋编排；M2 模块宿主验收（`study` 只加目录）；M3 记忆与导演真调 LLM；M4 联机 |
+| 主分支 | `main`（sha 见 `git rev-parse --short main`；记忆子系统在 `feat/memory-module`，**未 push、未合入**） |
+| `CONTRACT_VERSION` | **3.1.0**（记忆子系统 minor；`SCHEMA_VERSION 2`，`API_VERSION 2`，`WORLD_MEM_VERSION 1`） |
+| `PROMPT_VERSION` | **2026-11-17.2** |
+| 测试 | **23 文件 / 171 用例全过**（记忆 11+7+8+5+3、审核 6、地图 21…）；`check:contract` **8 项全过**；`typecheck` 0 错；`smoke` 建房 12 实体 + 幂等重放 OK |
+| 已具备 | M0 骨架、地图模块（旅行/场景/草案双审）、引擎 3.0.0（原子结算 + 持久化闭环）、内容审核层、现实锚定层、前端体验与运行时模型接入、**记忆子系统 3.1.0（P0–P4：事件溯源/账号隔离/世界层 canonize/世界印象）** |
+| 下一步 | 记忆分支的交由审阅；M1：单房单 NPC 完整玩法、夜间 tick/密谋编排；M2 模块宿主验收（`study` 只加目录）；M4 联机 |
 | 已知遗留 | 见 §3.3（均为 MINOR，不阻断当前 main） |
 
 ---
