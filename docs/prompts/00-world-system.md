@@ -21,7 +21,7 @@
 > `WORLD_MEMORY` 由世界层永久记忆（`tier=permanent`、`status=current`）注入：最多 8 条、≤200 tok，
 > 句式固定以「这个世界已经知道的事：」开头，逐条按 `id` 排序（保证同输入同输出）。
 > 它是**世界史**，不是当前 NPC 的私忆：全校都知道的事，NPC 不该表现得像第一次听说；但也不能把它当成本回合刚发生的事。
-> 为空时整段省略（连标题一起省，不要留空段）。改世界层内容 → bump `WORLD_MEM_VERSION`（不是 `PROMPT_VERSION`）。
+> 为空时整段省略（连标题一起省，不要留空段）。改这个世界**已经知道的事**（内容）→ 由 canonize 更新 `worlds/<worldId>/mem.version`；`WORLD_MEM_VERSION` 是**记忆格式版本**，只有 S1.5 的段落结构/排序规则变了才 bump（不是 `PROMPT_VERSION`）。
 
 ## 二、硬规则（违反任何一条即为失败）
 

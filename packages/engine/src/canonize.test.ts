@@ -157,6 +157,8 @@ describe("canonize 八道闸门（P3）", () => {
     const f = await fixture({ records });
     const j = await job(f);
     const first = await j.retireRoom(ROOM);
+    // 先锁"第一次确实写进去了"：只断言第二次被挡，等于没验证幂等键是否在第一次就生效
+    expect(first.written).toHaveLength(1);
     const second = await j.retireRoom(ROOM);
     expect(second.written).toHaveLength(0);
     expect(second.skipped.some((s) => s.reason === "duplicate")).toBe(true);
