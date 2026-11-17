@@ -7,6 +7,9 @@ import type { Memory, MemoryRecord, Registry, Store, Turn, TurnEvent } from "../
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
 import type { LlmSettings } from "./settings.ts";
+import { EMPTY_SCENARIOS } from "./scenarios.ts";
+import type { ScenarioCatalog } from "./scenarios.ts";
+import { registerViewRoutes } from "./view.routes.ts";
 
 export interface AppDeps {
   store: Store;
@@ -36,6 +39,8 @@ export interface AppDeps {
   adminToken?: string;
   /** 世界印象（用户投影）：/me 只读，投递在 Turn 里 */
   impressions?: { pending(userId: string, roomId: string, limit: number): Promise<unknown[]>; count?(userId: string): Promise<number> };
+  /** 开局剧本 / NPC 公开档案（content/scenarios/*.json）；标题页与图鉴用，缺省 = 无预设 */
+  scenarios?: ScenarioCatalog;
   version: string;
 }
 
@@ -329,5 +334,13 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   app.post("/api/v1/admin/map/drafts/:id/generate", (req, reply) => {
     const { id } = req.params as { id: string };
     return safe(reply, () => deps.map.retryGenerate(id, adminTokenOf(req.headers)));
+  });
+
+  // ---------------------------------------------------------------- 图鉴 / 开局剧本（docs/03 §5.2.5、§5.2.6）
+  // 路由实现放独立文件，这里只做装配：并行开发时这段代码尽量不成为冲突点
+  registerViewRoutes(app, {
+    store: deps.store,
+    registry: deps.registry,
+    scenarios: deps.scenarios ?? EMPTY_SCENARIOS,
   });
 }

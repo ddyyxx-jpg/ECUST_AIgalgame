@@ -32,6 +32,7 @@ import { MapService } from "./map.ts";
 import { loadSceneDescs, offlineNarrative } from "./offline-narrator.ts";
 import { LlmSwitch } from "./llm-switch.ts";
 import { LlmSettings, loadPersistedLlmSettings } from "./settings.ts";
+import { loadScenarios } from "./scenarios.ts";
 import type { AppDeps } from "./routes.ts";
 
 interface CanonWorld {
@@ -84,6 +85,9 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
 
   const registry: Registry = new JsonRegistry(undefined, path.join(contentDir, "registry"));
   await registry.reload();
+
+  // 开局剧本 / NPC 公开档案是内容数据（content/scenarios/*.json）；缺文件 = 无预设，不影响启动
+  const scenarios = await loadScenarios(path.join(contentDir, "scenarios"));
 
   // 审核策略（分类/阈值/扣分/删档线）是内容，不是代码；缺文件就用引擎默认值
   const auditPolicy = resolveAuditPolicy(await readOptionalJson(path.join(contentDir, "registry", "policy.json")));
@@ -304,6 +308,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     map,
     settings,
     registry,
+    scenarios,
     trustUserHeader: cfg.trustUserHeader,
     devUser: cfg.devUser,
     canonizeJudge: hasCanonize(cfg) ? "llm" : "deny_all",

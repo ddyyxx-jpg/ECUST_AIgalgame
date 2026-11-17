@@ -11,7 +11,10 @@ import type { Scenario } from "./scenarios.ts";
 import { setSoundOn, soundOn } from "./sfx.ts";
 
 export interface TitleScreenProps {
+  /** 开局列表来自服务端 /api/v1/scenarios；空数组 = 无预设开局 */
   scenarios: Scenario[];
+  /** 开局列表还在加载（区别于"加载失败后的空"） */
+  scenariosLoading: boolean;
   /** 选定开局并新建一局 */
   onStart: (scenarioId: string) => void;
   /** 继续上次的房间；没有存档时传 null（按钮不渲染） */
@@ -41,7 +44,15 @@ const ABOUT: { k: string; v: string }[] = [
 const DEFAULT_BASE = "https://ai.ecustcic.com/api/v1";
 const DEFAULT_MODEL = "deepseek-v4.1-flash";
 
-export default function TitleScreen({ scenarios, onStart, onResume, savedRoomId, busy, err }: TitleScreenProps) {
+export default function TitleScreen({
+  scenarios,
+  scenariosLoading,
+  onStart,
+  onResume,
+  savedRoomId,
+  busy,
+  err,
+}: TitleScreenProps) {
   const [panel, setPanel] = useState<Panel>("none");
   const [version, setVersion] = useState("");
   const [sfx, setSfx] = useState(soundOn);
@@ -165,21 +176,38 @@ export default function TitleScreen({ scenarios, onStart, onResume, savedRoomId,
               <>
                 <p className="title-mark">选择你的身份</p>
                 <p className="muted scenario-note">世界是同一所学校；不同的是你站在哪一边。</p>
-                <div className="scenario-grid">
-                  {scenarios.map((s) => (
+                {scenarios.length === 0 ? (
+                  // 内容数据缺失/服务不可用时也允许开局：不编造文案，只提示并直接进
+                  <div className="panel-note">
+                    <p className="muted">
+                      {scenariosLoading ? "正在载入开局…" : "无预设开局（服务端 /api/v1/scenarios 不可用）。"}
+                    </p>
                     <button
-                      key={s.id}
                       type="button"
-                      className="scenario-card"
-                      onClick={() => onStart(s.id)}
-                      disabled={busy}
+                      className="btn primary"
+                      onClick={() => onStart("")}
+                      disabled={busy || scenariosLoading}
                     >
-                      <strong>{s.name}</strong>
-                      <span className="muted">{s.role}</span>
-                      <span className="scenario-tagline">{s.tagline}</span>
+                      直接开始
                     </button>
-                  ))}
-                </div>
+                  </div>
+                ) : (
+                  <div className="scenario-grid">
+                    {scenarios.map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        className="scenario-card"
+                        onClick={() => onStart(s.id)}
+                        disabled={busy}
+                      >
+                        <strong>{s.name}</strong>
+                        <span className="muted">{s.role}</span>
+                        <span className="scenario-tagline">{s.tagline}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </>
             )}
 
