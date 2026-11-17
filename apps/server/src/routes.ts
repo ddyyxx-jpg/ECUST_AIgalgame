@@ -10,6 +10,9 @@ import type { LlmSettings } from "./settings.ts";
 import type { SaveIndex } from "./saves.ts";
 import type { TurnHistory } from "./turn-history.ts";
 import { registerResumeRoutes } from "./resume.routes.ts";
+import { EMPTY_SCENARIOS } from "./scenarios.ts";
+import type { ScenarioCatalog } from "./scenarios.ts";
+import { registerViewRoutes } from "./view.routes.ts";
 
 export interface AppDeps {
   store: Store;
@@ -43,6 +46,8 @@ export interface AppDeps {
   history?: TurnHistory;
   /** 存档索引（issue #7）：账号 → 房间游标 */
   saves?: SaveIndex;
+  /** 开局剧本 / NPC 公开档案（content/scenarios/*.json）；标题页与图鉴用，缺省 = 无预设 */
+  scenarios?: ScenarioCatalog;
   version: string;
 }
 
@@ -360,5 +365,19 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   app.post("/api/v1/admin/map/drafts/:id/generate", (req, reply) => {
     const { id } = req.params as { id: string };
     return safe(reply, () => deps.map.retryGenerate(id, adminTokenOf(req.headers)));
+  });
+
+  // ---------------------------------------------------------------- 图鉴 / 开局剧本（docs/03 §5.2.5、§5.2.6）
+  // 路由实现放独立文件，这里只做装配：并行开发时这段代码尽量不成为冲突点。
+  // 图鉴需要"房间存在性"：FileStore 有 listRooms，snapshot 对缺失房间不抛错；
+  // 测试替身若不实现 listRooms，按空房间表处理（图鉴 404），不影响其它端点。
+  const viewStore = deps.store as Store & { listRooms?: () => Promise<string[]> };
+  registerViewRoutes(app, {
+    store: {
+      snapshot: (roomId) => viewStore.snapshot(roomId),
+      listRooms: () => viewStore.listRooms?.() ?? Promise.resolve([]),
+    },
+    registry: deps.registry,
+    scenarios: deps.scenarios ?? EMPTY_SCENARIOS,
   });
 }

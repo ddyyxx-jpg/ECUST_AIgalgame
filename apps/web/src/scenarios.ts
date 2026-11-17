@@ -1,13 +1,10 @@
 /**
- * 开场剧本（临时放前端）。
+ * 开局剧本的 HTTP 层（docs/03 §5.2.6）。
  *
- * 为什么先放这里：后端还没有"按开局下发种子"的接口（M1 的计划），而世界数据是同一份 canon，
- * 所以现在"选开局"只能改**开场叙述与玩家身份**，改不了实体/属性。
- * 等后端提供 /scenarios 之类的接口，这份数据应搬到 content/scenarios/*.json，本文件只留类型。
- *
- * 不变的部分（世界层，谁都不能改）：三条校规、三条事实（示波器失窃 / 校刊被撕 12 页 / 名额 6→4）。
- * 变化的部分（玩家层）：你是谁、你和谁有旧账、你第一天遇到什么。
+ * 文案与身份都是内容数据（`content/scenarios/openings.json`），由服务端 `GET /api/v1/scenarios` 下发；
+ * 这里只保留类型与请求，不在前端硬编码任何开局文本（issue #3）。拉不到时调用方降级为「无预设开局」。
  */
+import { request, unwrap } from "./http.ts";
 
 export interface Scenario {
   id: string;
@@ -22,76 +19,8 @@ export interface Scenario {
   hint: string;
 }
 
-export const SCENARIOS: Scenario[] = [
-  {
-    id: "transfer",
-    name: "转学生",
-    role: "大二 · 插班转学生",
-    tagline: "行李箱还没拆，班群已经把你移除了",
-    opening: [
-      "九月末，奉贤的风已经有凉意。你拖着行李箱站在图书馆门口，学号是新的，课表是新的，宿舍在 3 号楼三层最里面那间。",
-      "报到那天，辅导员只交代了两句话：一是别掺和学生会的事，二是十月的一等奖学金名额从六个减到了四个。",
-      "你没当回事。直到你打开班群，发现自己被移出了群聊——没人解释，也没人重新拉你。",
-    ],
-    hint: "试试：「先去宿舍放下行李」或「去图书馆看看有什么不对劲」",
-  },
-  {
-    id: "scholarship",
-    name: "贫困生",
-    role: "大二 · 靠奖学金读书的人",
-    tagline: "名额从 6 个砍到 4 个，你正好卡在第五",
-    opening: [
-      "你算过很多次：学费、住宿、饭卡，以及每个月给家里寄回的那两百块。一等奖学金是唯一能让这一切不崩的东西。",
-      "今年名额从六个减到四个，名单先由学生会初评，再交学院。你排在第五。",
-      "昨晚马骁在宿舍问你借三十块，说这周就还。你借了，因为他是室友，也因为你需要一个能替你在班会上说话的人。",
-    ],
-    hint: "试试：「去学生会问问初评名单什么时候出来」或「回宿舍找马骁要钱」",
-  },
-  {
-    id: "student_union",
-    name: "学生会新人",
-    role: "大三 · 学生会办公室干事",
-    tagline: "部长让你把一份材料「先别往上报」",
-    opening: [
-      "你进学生会两年，做的是最琐碎的活：贴海报、点人数、给部长写稿子。周明远是你的部长，也是这个学校里最会说话的人。",
-      "九月二十八号夜里，实验楼 302 丢了一台示波器。门禁记录显示当晚只有学生会的人进出过。",
-      "今天早上，周明远把一份设备检查表放在你桌上，笑着说：「这个先别往上报，等我理清楚。」",
-    ],
-    hint: "试试：「问周明远那份检查表是什么」或「去实验楼看看 302」",
-  },
-];
-
-export const DEFAULT_SCENARIO_ID = SCENARIOS[0]!.id;
-
-export function getScenario(id: string): Scenario {
-  return SCENARIOS.find((s) => s.id === id) ?? SCENARIOS[0]!;
+/** 服务端同时下发 NPC 公开档案（图鉴端点自己拼装），标题页只需要开局列表 */
+export async function fetchScenarios(): Promise<Scenario[]> {
+  const res = await request<{ openings: Scenario[] }>("scenarios", "/api/v1/scenarios");
+  return unwrap(res).openings;
 }
-
-/** 图鉴用的公开人物档案（身份/性格在 canon 里有，但没进 WorldState；等后端带进 View 再搬走） */
-export interface NpcProfile {
-  id: string;
-  role: string;
-  traits: string[];
-  line: string;
-}
-
-export const NPC_PROFILES: Record<string, NpcProfile> = {
-  npc_zhou: {
-    id: "npc_zhou",
-    role: "校学生会主席 · 大三 · 行政管理",
-    traits: ["掌控欲强", "擅长场面话", "记仇"],
-    line: "笑着说话的人，通常最不希望你把话说完。",
-  },
-  npc_lin: {
-    id: "npc_lin",
-    role: "图书馆流通部管理员 · 工作五年",
-    traits: ["话少", "按规章办事", "暗中记人"],
-    line: "她从不评价学生，但每一本书的去向她都记得。",
-  },
-  npc_ma: {
-    id: "npc_ma",
-    role: "同寝室室友 · 大二 · 计算机",
-    traits: ["嘴碎", "爱占小便宜", "怕担责"],
-    line: "他欠的钱不多，但他怕的东西很多。",
-  },
-};

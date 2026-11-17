@@ -1,75 +1,111 @@
 /**
  * 图鉴页：这一局里你"认识"的人，以及你对他们的读数。
  *
- * 属性一律按 `/api/v1/registry` 的声明渲染（I2）：不在前端写死任何属性键。
- * - `public`/`self` 的数值属性 → 标签 + 数值 + 进度条；
- * - `secret` 的数值属性 → 只给三档体感（低/中/高），不给精确值；
- * - 非数值属性 → 文本行；未写入的属性不显示（建房只播 public，其余由玩法写入）。
+ * 数据全部来自服务端 `GET /api/v1/rooms/:roomId/gallery`（docs/03 §5.2.5）：
+ * 面板不读 `WorldState.entities[].attrs`、不出现任何属性键、不自己算分档（I2 / issue #3）。
+ * - `display: "exact"` → 标签 + 数值 + 进度条（public）
+ * - `display: "band"` → 只给三档体感（secret；self 对他人也只给分档）
+ * - `display: "text"` → 文本行（public 文本）
+ * - `display: "masked"` → 「—」（不可见或玩法尚未写入）
  */
 import { useEffect, useState } from "react";
-import type { WorldState } from "../../../packages/shared/src/contract/types.ts";
-import { getRegistry } from "./api-registry.ts";
-import type { AttrDecl } from "./api-registry.ts";
-import { NPC_PROFILES } from "./scenarios.ts";
+import { fetchGallery } from "./api-gallery.ts";
+import type { Band, GalleryNpc, GalleryStat, GalleryView } from "./api-gallery.ts";
 
-interface AttrRow {
-  key: string;
-  label: string;
-  unit?: string;
-  secret: boolean;
-  text?: string;
-  value?: number;
-  ratio?: number;
-  band?: { label: string; cls: string };
-}
+const BAND_CLS: Record<Band, string> = { 低: "calm", 中: "wary", 高: "tense" };
 
-function bandOf(value: number, min: number, max: number): { label: string; cls: string } {
-  const span = max - min || 1;
-  const t = (value - min) / span;
-  if (t <= 1 / 3) return { label: "低", cls: "calm" };
-  if (t <= 2 / 3) return { label: "中", cls: "wary" };
-  return { label: "高", cls: "tense" };
-}
-
-/** 把某实体的属性按注册表声明摊平成可渲染行 */
-function rowsOf(e: WorldState["entities"][string], decls: AttrDecl[]): AttrRow[] {
-  const rows: AttrRow[] = [];
-  for (const def of decls) {
-    if (def.hidden || !def.scope.includes(e.kind)) continue;
-    const value = e.attrs[def.key];
-    if (value === undefined) continue;
-    if (def.type === "number" && typeof value === "number") {
-      const min = def.min ?? 0;
-      const max = def.max ?? 100;
-      if (def.visibility === "secret") {
-        rows.push({ key: def.key, label: def.label, secret: true, band: bandOf(value, min, max) });
-      } else {
-        rows.push({
-          key: def.key,
-          label: def.label,
-          unit: def.unit,
-          secret: false,
-          value,
-          ratio: Math.max(0, Math.min(1, (value - min) / (max - min || 1))),
-        });
-      }
-    } else {
-      rows.push({ key: def.key, label: def.label, unit: def.unit, secret: def.visibility === "secret", text: String(value) });
-    }
+function StatRow({ stat }: { stat: GalleryStat }) {
+  if (stat.display === "text") {
+    return (
+      <div className="row">
+        <dt>{stat.label}</dt>
+        <dd>{stat.text}</dd>
+      </div>
+    );
   }
-  return rows;
+  if (stat.display === "band") {
+    return (
+      <div className="stat">
+        <span className="stat-label">{stat.label}</span>
+        <span className={`chip guard ${stat.band ? BAND_CLS[stat.band] : ""}`}>{stat.band ?? "—"}</span>
+        <span className="stat-num muted">体感</span>
+      </div>
+    );
+  }
+  if (stat.display === "masked") {
+    return (
+      <div className="stat">
+        <span className="stat-label">{stat.label}</span>
+        <span className="stat-num muted">—</span>
+      </div>
+    );
+  }
+  return (
+    <div className="stat">
+      <span className="stat-label">{stat.label}</span>
+      <div className="bar">
+        <i style={{ width: `${(stat.ratio ?? 0) * 100}%` }} />
+      </div>
+      <span className="stat-num">
+        {stat.value}
+        {stat.unit ?? ""}
+      </span>
+    </div>
+  );
 }
 
-export default function GalleryPanel({ state }: { state: WorldState | null }) {
-  const [decls, setDecls] = useState<AttrDecl[]>([]);
+function NpcCard({ npc }: { npc: GalleryNpc }) {
+  return (
+    <article className={`npc-card${npc.met ? "" : " locked"}`}>
+      <header>
+        <h3>{npc.met ? npc.name : "？？？"}</h3>
+        <span className={`pill ${npc.present ? "published" : "approved"}`}>
+          {npc.present ? "在场" : npc.met ? "在别处" : "未见面"}
+        </span>
+      </header>
+      <div className="muted">{npc.met ? (npc.role ?? "身份不明") : "还没见过这个人"}</div>
+
+      {npc.met ? (
+        <>
+          {(npc.traits?.length ?? 0) > 0 && (
+            <div className="chips">
+              {npc.traits?.map((t) => (
+                <span className="chip tag" key={t}>
+                  {t}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {npc.stats.map((s) => (
+            <StatRow key={s.key} stat={s} />
+          ))}
+
+          <div className="row">
+            <dt>位置</dt>
+            <dd>{npc.present ? "就在你身边" : (npc.locName ?? "行踪不明")}</dd>
+          </div>
+          {npc.line && <p className="npc-line">「{npc.line}」</p>}
+        </>
+      ) : (
+        <p className="muted npc-line">在校园里遇到他，这一页才会写下名字。</p>
+      )}
+    </article>
+  );
+}
+
+export default function GalleryPanel({ roomId }: { roomId: string }) {
+  const [gallery, setGallery] = useState<GalleryView | null>(null);
   const [err, setErr] = useState("");
 
-  // 注册表是"世界里有哪些属性"的唯一来源（I2）：拿不到就只显示身份/位置，不硬编码兜底
+  // 服务端是读数的唯一来源；切回图鉴（组件重挂载）或换房间时重新拉
   useEffect(() => {
     let alive = true;
-    getRegistry()
-      .then((d) => {
-        if (alive) setDecls(d);
+    setGallery(null);
+    setErr("");
+    fetchGallery(roomId)
+      .then((g) => {
+        if (alive) setGallery(g);
       })
       .catch((e) => {
         if (alive) setErr(e instanceof Error ? e.message : String(e));
@@ -77,48 +113,15 @@ export default function GalleryPanel({ state }: { state: WorldState | null }) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [roomId]);
 
-  if (!state) {
+  if (!gallery) {
     return (
       <div className="panel-note">
-        <div className="muted">正在读取世界状态…</div>
+        <div className="muted">{err ? `图鉴读取失败：${err}` : "正在读取图鉴…"}</div>
       </div>
     );
   }
-
-  const playerLoc = state.room.scene.locId;
-  const presentIds = new Set(state.room.scene.presentIds);
-
-  /** NPC 的位置：located_in 边的 to（引擎投影，不猜） */
-  const locOf = (npcId: string): string => {
-    const link = state.links.find((l) => l.kind === "located_in" && l.from === npcId);
-    return link?.to ?? "";
-  };
-
-  const npcs = Object.values(state.entities)
-    .filter((e) => e.kind === "npc" && e.status === "active")
-    .sort((a, b) => a.id.localeCompare(b.id))
-    .map((e) => {
-      const loc = locOf(e.id);
-      const present = presentIds.has(e.id);
-      const profile = NPC_PROFILES[e.id];
-      const sameLoc = loc !== "" && loc === playerLoc;
-      return {
-        id: e.id,
-        name: e.name,
-        met: present || sameLoc,
-        present,
-        locName: loc ? state.entities[loc]?.name ?? loc : "",
-        role: profile?.role ?? "身份不明",
-        traits: profile?.traits ?? [],
-        line: profile?.line ?? "",
-        rows: rowsOf(e, decls),
-      };
-    });
-
-  const metCount = npcs.filter((c) => c.met).length;
-  const visited = Object.values(state.entities).filter((e) => e.kind === "loc").length;
 
   return (
     <div className="gallery-panel">
@@ -127,72 +130,16 @@ export default function GalleryPanel({ state }: { state: WorldState | null }) {
           <strong>人物图鉴</strong>
           <span className="muted">
             {" "}
-            · 已遇见 {metCount}/{npcs.length} · 校园地点 {visited}
+            · 已遇见 {gallery.counts.met}/{gallery.counts.total} · 校园地点 {gallery.counts.locs}
           </span>
         </div>
-        <span className="muted">遇到人（或和他同处一地）才会解锁；读数由玩法写入，随互动变化</span>
+        <span className="muted">遇到人（或和他同处一地）才会解锁；读数由服务端按玩法写入，随互动变化</span>
       </div>
       {err && <div className="err">{err}</div>}
 
       <div className="gallery-grid">
-        {npcs.map((c) => (
-          <article key={c.id} className={`npc-card${c.met ? "" : " locked"}`}>
-            <header>
-              <h3>{c.met ? c.name : "？？？"}</h3>
-              <span className={`pill ${c.present ? "published" : "approved"}`}>
-                {c.present ? "在场" : c.met ? "在别处" : "未见面"}
-              </span>
-            </header>
-            <div className="muted">{c.met ? c.role : "还没见过这个人"}</div>
-
-            {c.met ? (
-              <>
-                {c.traits.length > 0 && (
-                  <div className="chips">
-                    {c.traits.map((t) => (
-                      <span className="chip tag" key={t}>
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                {c.rows.map((r) =>
-                  r.secret ? (
-                    <div className="stat" key={r.key}>
-                      <span className="stat-label">{r.label}</span>
-                      <span className={`chip guard ${r.band?.cls ?? ""}`}>{r.band?.label ?? r.text ?? "—"}</span>
-                      <span className="stat-num muted">体感</span>
-                    </div>
-                  ) : r.text !== undefined ? (
-                    <div className="row" key={r.key}>
-                      <dt>{r.label}</dt>
-                      <dd>{r.text}</dd>
-                    </div>
-                  ) : (
-                    <div className="stat" key={r.key}>
-                      <span className="stat-label">{r.label}</span>
-                      <div className="bar">
-                        <i style={{ width: `${(r.ratio ?? 0) * 100}%` }} />
-                      </div>
-                      <span className="stat-num">
-                        {r.value}
-                        {r.unit ?? ""}
-                      </span>
-                    </div>
-                  ),
-                )}
-
-                <div className="row">
-                  <dt>位置</dt>
-                  <dd>{c.present ? "就在你身边" : c.locName || "行踪不明"}</dd>
-                </div>
-                {c.line && <p className="npc-line">「{c.line}」</p>}
-              </>
-            ) : (
-              <p className="muted npc-line">在校园里遇到他，这一页才会写下名字。</p>
-            )}
-          </article>
+        {gallery.npcs.map((npc) => (
+          <NpcCard key={npc.id} npc={npc} />
         ))}
       </div>
     </div>

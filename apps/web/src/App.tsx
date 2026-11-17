@@ -7,10 +7,11 @@ import DraftsPanel from "./DraftsPanel.tsx";
 import GalleryPanel from "./GalleryPanel.tsx";
 import MapPanel from "./MapPanel.tsx";
 import TitleScreen from "./TitleScreen.tsx";
-import { DEFAULT_SCENARIO_ID, SCENARIOS, getScenario } from "./scenarios.ts";
+import { fetchScenarios } from "./scenarios.ts";
 import type { Scenario } from "./scenarios.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
+import type { TypeItem } from "./typewriter.ts";
 import { ACTOR, errorMessage, phaseLabel } from "./ui.ts";
 import type { Line, LineKind } from "./ui.ts";
 
@@ -35,7 +36,10 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("chat");
   const [roomId, setRoomId] = useState<string>("");
   const [savedRoomId, setSavedRoomId] = useState<string>("");
-  const [scenario, setScenario] = useState<Scenario>(getScenario(DEFAULT_SCENARIO_ID));
+  const [scenario, setScenario] = useState<Scenario | null>(null);
+  /** 开局剧本是内容数据（content/scenarios/openings.json）：服务端拉不到就降级为"无预设开局" */
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [scenariosLoading, setScenariosLoading] = useState(true);
   const [entering, setEntering] = useState(false);
   const [state, setState] = useState<WorldState | null>(null);
   const [view, setView] = useState<ViewPatch>({});
@@ -96,6 +100,24 @@ export default function App() {
     void refreshSaves();
   }, [refreshSaves]);
 
+  // 开局剧本随内容数据走：失败不是致命错误，标题页会提示"无预设开局"并允许直接开始
+  useEffect(() => {
+    let alive = true;
+    fetchScenarios()
+      .then((list) => {
+        if (alive) setScenarios(list);
+      })
+      .catch(() => {
+        if (alive) setScenarios([]);
+      })
+      .finally(() => {
+        if (alive) setScenariosLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   /**
    * 进入一个已存在的房间：拉权威状态、记下房间号与开局，并把开场剧情铺进对话流。
    * 开场只由前端渲染（不在前端推演世界）；之后玩家输入与叙事接在它下面。
@@ -103,16 +125,18 @@ export default function App() {
   const enterRoom = useCallback(
     async (id: string, opts: { resumed?: boolean; scenarioId?: string } = {}) => {
       const snapshot = await fetchState(id);
-      let sc = getScenario(DEFAULT_SCENARIO_ID);
+      const fallback = scenarios[0] ?? null;
+      let sc: Scenario | null = fallback;
       try {
         const stored = localStorage.getItem(scenarioKey(id)) ?? "";
-        sc = getScenario(opts.scenarioId ?? (stored || DEFAULT_SCENARIO_ID));
-        localStorage.setItem(scenarioKey(id), sc.id);
+        const wanted = opts.scenarioId ?? stored;
+        sc = scenarios.find((s) => s.id === wanted) ?? fallback;
+        if (sc) localStorage.setItem(scenarioKey(id), sc.id);
         localStorage.setItem(ROOM_KEY, id);
         setSavedRoomId(id);
       } catch {
         // 隐私模式读不了/写不了本地记录：用调用方给的或默认开局，不影响本局
-        sc = getScenario(opts.scenarioId ?? DEFAULT_SCENARIO_ID);
+        sc = opts.scenarioId ? scenarios.find((s) => s.id === opts.scenarioId) ?? fallback : fallback;
       }
 
       // 历史 = 已提交回合的投影（issue #7）：读得到就直接铺出来，不重播序章、不发任何 turn；
@@ -128,16 +152,26 @@ export default function App() {
           for (const f of h.facts) if (f.trim()) replay.push({ id: ++lineId, kind: "fact", text: f });
         }
         setLines([
-          { id: ++lineId, kind: "system", text: `继续上次 · ${sc.name} · ${sc.role}（已恢复 ${history.length} 个回合）` },
+          {
+            id: ++lineId,
+            kind: "system",
+            text: `继续上次${sc ? ` · ${sc.name} · ${sc.role}` : ""}（已恢复 ${history.length} 个回合）`,
+          },
           ...replay,
         ]);
       } else {
         // 开场 = 对话流的第一屏：身份 → 正文 → 第一条建议。全部交给打字机逐字打出。
+        // 没有预设剧本（服务端 /api/v1/scenarios 不可用）时只留一行提示，不编造内容。
         setLines([]);
+        const opening: TypeItem[] = sc
+          ? [
+              { kind: "system", text: `序章 · ${sc.name} · ${sc.role}` },
+              ...sc.opening.map((text) => ({ kind: "narrative" as LineKind, text })),
+              { kind: "system", text: `试试：${sc.hint}` },
+            ]
+          : [{ kind: "system", text: "无预设开局（服务端 /api/v1/scenarios 不可用），直接开始吧。" }];
         tw.enqueue([
-          { kind: "system", text: `序章 · ${sc.name} · ${sc.role}` },
-          ...sc.opening.map((text) => ({ kind: "narrative" as LineKind, text })),
-          { kind: "system", text: `试试：${sc.hint}` },
+          ...opening,
           ...(opts.resumed
             ? [{ kind: "system" as LineKind, text: "（世界状态已从事件日志恢复；本局对话历史从这次继续开始记录）" }]
             : []),
@@ -150,7 +184,7 @@ export default function App() {
       setTab("chat");
       setScreen("game");
     },
-    [],
+    [scenarios],
   );
 
   const startNew = useCallback(
@@ -269,7 +303,8 @@ export default function App() {
   if (screen === "title") {
     return (
       <TitleScreen
-        scenarios={SCENARIOS}
+        scenarios={scenarios}
+        scenariosLoading={scenariosLoading}
         onStart={(scenarioId) => void startNew(scenarioId)}
         onResume={savedRoomId ? () => void resumeLast() : null}
         saves={saves}
@@ -291,7 +326,7 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <h1>ECUST · AI 校园</h1>
-          <span className="muted">{roomId ? `${scenario.name} · room ${roomId}` : "连接中…"}</span>
+          <span className="muted">{roomId ? `${scenario?.name ?? ""}${scenario ? " · " : ""}room ${roomId}` : "连接中…"}</span>
         </div>
         <nav className="tabs">
           {TABS.map((t) => (
@@ -337,7 +372,8 @@ export default function App() {
 
       <div className="app-body">
         <div className="tab-pane" key={tab}>
-        {tab === "gallery" && <GalleryPanel state={state} />}
+        {tab === "gallery" &&
+          (roomId ? <GalleryPanel roomId={roomId} /> : <div className="panel-note">连接房间中…</div>)}
 
         {tab === "chat" && (
           <ChatPanel
