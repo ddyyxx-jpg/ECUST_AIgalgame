@@ -5,7 +5,7 @@
  * 单独成文件也让并行开发的分支尽量少在同一段代码上打架。
  */
 import type { FastifyInstance, FastifyReply } from "fastify";
-import type { Registry, Store } from "../../../packages/shared/src/contract/types.ts";
+import type { Registry, RoomId, Store, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import { buildGalleryView } from "./gallery.ts";
 import type { ScenarioCatalog } from "./scenarios.ts";
 
@@ -13,7 +13,14 @@ import type { ScenarioCatalog } from "./scenarios.ts";
 const WORLD_ROOM_PREFIX = "room_world_";
 
 export interface ViewRouteDeps {
-  store: Pick<Store, "snapshot">;
+  store: {
+    snapshot(roomId: RoomId): Promise<WorldState>;
+    /**
+     * 房间存在性（`FileStore.listRooms`）。必须有：`snapshot` 对不存在的房间
+     * 返回空 WorldState 而不抛错，靠它才能把"未知房间"判成 404 而不是 200+空图鉴。
+     */
+    listRooms(): Promise<RoomId[]>;
+  };
   registry: Registry;
   scenarios: ScenarioCatalog;
 }
@@ -35,8 +42,18 @@ export function registerViewRoutes(app: FastifyInstance, deps: ViewRouteDeps): v
   /** 按 registry 的 visibility 口径生成读数；secret 只给分档，绝不回精确值 */
   app.get("/api/v1/rooms/:roomId/gallery", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    // 世界层先判：它的 id 也不会出现在 listRooms 里，但明确区分"不是玩家房间"
     if (roomId.startsWith(WORLD_ROOM_PREFIX)) return notFound(reply);
-    let state;
+
+    let rooms: RoomId[];
+    try {
+      rooms = await deps.store.listRooms();
+    } catch {
+      return notFound(reply);
+    }
+    if (!rooms.includes(roomId)) return notFound(reply);
+
+    let state: WorldState;
     try {
       state = await deps.store.snapshot(roomId);
     } catch {

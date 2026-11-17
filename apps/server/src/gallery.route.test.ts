@@ -6,12 +6,17 @@
  * - secret → 只给分档，**不得出现精确数值/ratio**；
  * - self 对他人 → 只给分档（文本 → masked），不下发精确值；
  * - display.hidden → 不出现；未遇见的人不返回档案与读数；
- * - world room / 未知房间 → 404。
+ * - secret/self 数值缺 min/max → masked（不猜 0~100 的分档）；
+ * - world room / 未知房间 → 404（含真实 FileStore 路径：snapshot 对缺失房间不抛错）。
  */
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import Fastify from "fastify";
 import type { AttrDef, Entity, EntityKind, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import { JsonRegistry } from "../../../packages/engine/src/registry.ts";
+import { FileStore } from "../../../packages/engine/src/store.ts";
 import type { GalleryView } from "./gallery.ts";
 import { registerViewRoutes } from "./view.routes.ts";
 import type { ScenarioCatalog } from "./scenarios.ts";
@@ -20,6 +25,7 @@ const ATTRS: AttrDef[] = [
   { key: "stamina", type: "number", scope: ["plr", "npc"], min: 0, max: 100, visibility: "public", display: { label: "体力", unit: "点" } },
   { key: "trust", type: "number", scope: ["npc"], min: 0, max: 100, visibility: "self", display: { label: "信任", unit: "点" } },
   { key: "guard", type: "number", scope: ["npc"], min: 0, max: 100, visibility: "secret", display: { label: "戒备" } },
+  { key: "dread", type: "number", scope: ["npc"], visibility: "secret", display: { label: "恐惧" } },
   { key: "mood", type: "string", scope: ["npc"], visibility: "self", display: { label: "心情" } },
   { key: "coord_x", type: "number", scope: ["npc"], min: 0, max: 6000, visibility: "public", display: { label: "地图 X", hidden: true } },
 ];
@@ -53,6 +59,7 @@ function world(): WorldState {
         stamina: 80,
         guard: 73,
         trust: 64,
+        dread: 5,
         mood: "平静",
         coord_x: 1200,
       }),
@@ -69,9 +76,13 @@ function world(): WorldState {
   };
 }
 
-async function makeApp(snapshot: (roomId: string) => Promise<WorldState>) {
+async function makeApp(snapshot: (roomId: string) => Promise<WorldState>, rooms: string[] = ["room_x"]) {
   const app = Fastify();
-  registerViewRoutes(app, { store: { snapshot }, registry: new JsonRegistry({ attrs: ATTRS }), scenarios: SCENARIOS });
+  registerViewRoutes(app, {
+    store: { snapshot, listRooms: async () => rooms },
+    registry: new JsonRegistry({ attrs: ATTRS }),
+    scenarios: SCENARIOS,
+  });
   await app.ready();
   return app;
 }
@@ -112,6 +123,12 @@ describe("GET /api/v1/rooms/:roomId/gallery", () => {
     expect(mood).toMatchObject({ display: "masked" });
     expect(mood).not.toHaveProperty("text");
 
+    // secret 数值缺 min/max → 不猜范围，降级 masked
+    const dread = a?.stats.find((s) => s.key === "dread");
+    expect(dread).toMatchObject({ display: "masked" });
+    expect(dread).not.toHaveProperty("band");
+    expect(dread).not.toHaveProperty("value");
+
     // hidden 属性（坐标）不出现，也不在响应里泄露
     expect(a?.stats.some((s) => s.key === "coord_x")).toBe(false);
     expect(res.body).not.toContain("1200");
@@ -140,7 +157,32 @@ describe("GET /api/v1/rooms/:roomId/gallery", () => {
     const missingRes = await app.inject({ method: "GET", url: "/api/v1/rooms/room_missing/gallery" });
     expect(missingRes.statusCode).toBe(404);
     expect(missingRes.json()).toMatchObject({ ok: false, code: "E_ROOM_NOT_FOUND" });
+    // 未知房间在存在性预检处就返回，不再读 snapshot
+    expect(calls).toBe(0);
 
     await app.close();
+  });
+
+  it("真实 FileStore：缺失房间 404（snapshot 对缺失文件不抛错），存在房间 200", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "galgame-gallery-"));
+    try {
+      const app = Fastify();
+      registerViewRoutes(app, { store: new FileStore(dir), registry: new JsonRegistry({ attrs: ATTRS }), scenarios: SCENARIOS });
+      await app.ready();
+
+      const missingRes = await app.inject({ method: "GET", url: "/api/v1/rooms/room_ghost/gallery" });
+      expect(missingRes.statusCode).toBe(404);
+      expect(missingRes.json()).toMatchObject({ ok: false, code: "E_ROOM_NOT_FOUND" });
+
+      // 只要房间日志文件存在，读到的空投影也算"房间存在"（与 /state 现状一致）
+      await writeFile(path.join(dir, "room_x.jsonl"), "", "utf8");
+      const existsRes = await app.inject({ method: "GET", url: "/api/v1/rooms/room_x/gallery" });
+      expect(existsRes.statusCode).toBe(200);
+      expect((existsRes.json() as { gallery: GalleryView }).gallery).toMatchObject({ roomId: "room_x", npcs: [] });
+
+      await app.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

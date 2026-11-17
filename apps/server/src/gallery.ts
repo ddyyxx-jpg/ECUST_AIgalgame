@@ -63,9 +63,8 @@ export interface GalleryInput {
 }
 
 /** secret 数值三等分：t≤1/3 低、t≤2/3 中、否则高（与 docs/03 §5.2.5 一致） */
-export function bandOf(value: number, def: Pick<AttrDef, "min" | "max">): Band {
-  const min = def.min ?? 0;
-  const max = def.max ?? 100;
+export function bandOf(value: number, range: { min: number; max: number }): Band {
+  const { min, max } = range;
   const t = (value - min) / (max - min || 1);
   if (t <= 1 / 3) return "低";
   if (t <= 2 / 3) return "中";
@@ -83,6 +82,7 @@ function ratioOf(value: number, def: Pick<AttrDef, "min" | "max">): number {
  * 把一个 NPC 的属性摊平成读数：
  * - public 数值 → exact（精确值+比例）；public 文本 → text；
  * - self/secret 数值 → band（**不下发精确值**，也不下发 ratio 这种可反推的连续量）；
+ *   分档需要声明的 min/max，缺失则 masked（不猜范围）；
  * - self/secret 文本 → masked（文本本身就是精确值）；
  * - display.hidden → 不出现；未写入 → masked（UI 显示「—」）。
  */
@@ -104,11 +104,14 @@ function statsOf(entity: Entity, defs: AttrDef[]): GalleryStat[] {
       continue;
     }
     if (def.type === "number" && typeof value === "number") {
-      out.push(
-        def.visibility === "public"
-          ? { ...base, display: "exact", value, ratio: ratioOf(value, def) }
-          : { ...base, display: "band", band: bandOf(value, def) },
-      );
+      if (def.visibility === "public") {
+        out.push({ ...base, display: "exact", value, ratio: ratioOf(value, def) });
+      } else if (def.min === undefined || def.max === undefined) {
+        // 分档必须基于声明的范围；缺 min/max 时不猜 0~100，降级为「—」
+        out.push(base);
+      } else {
+        out.push({ ...base, display: "band", band: bandOf(value, { min: def.min, max: def.max }) });
+      }
     } else if (def.visibility === "public") {
       out.push({ ...base, display: "text", text: String(value) });
     } else {

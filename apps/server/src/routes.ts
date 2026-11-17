@@ -337,9 +337,15 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   });
 
   // ---------------------------------------------------------------- 图鉴 / 开局剧本（docs/03 §5.2.5、§5.2.6）
-  // 路由实现放独立文件，这里只做装配：并行开发时这段代码尽量不成为冲突点
+  // 路由实现放独立文件，这里只做装配：并行开发时这段代码尽量不成为冲突点。
+  // 图鉴需要"房间存在性"：FileStore 有 listRooms，snapshot 对缺失房间不抛错；
+  // 测试替身若不实现 listRooms，按空房间表处理（图鉴 404），不影响其它端点。
+  const viewStore = deps.store as Store & { listRooms?: () => Promise<string[]> };
   registerViewRoutes(app, {
-    store: deps.store,
+    store: {
+      snapshot: (roomId) => viewStore.snapshot(roomId),
+      listRooms: () => viewStore.listRooms?.() ?? Promise.resolve([]),
+    },
     registry: deps.registry,
     scenarios: deps.scenarios ?? EMPTY_SCENARIOS,
   });

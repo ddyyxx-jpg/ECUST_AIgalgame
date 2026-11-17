@@ -57,7 +57,7 @@ describe("GET /api/v1/scenarios", () => {
     };
     const app = Fastify();
     registerViewRoutes(app, {
-      store: { snapshot: async () => Promise.reject(new Error("unused")) },
+      store: { snapshot: async () => Promise.reject(new Error("unused")), listRooms: async () => [] },
       registry: new JsonRegistry(),
       scenarios,
     });
@@ -69,7 +69,7 @@ describe("GET /api/v1/scenarios", () => {
 
     const emptyApp = Fastify();
     registerViewRoutes(emptyApp, {
-      store: { snapshot: async () => Promise.reject(new Error("unused")) },
+      store: { snapshot: async () => Promise.reject(new Error("unused")), listRooms: async () => [] },
       registry: new JsonRegistry(),
       scenarios: EMPTY_SCENARIOS,
     });
