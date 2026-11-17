@@ -165,11 +165,17 @@ export class FileStore extends EventSourcedStore {
   /**
    * 回放文件 → 内存。遇到 seq 断档/重复时**修复而不是裸抛**：
    * 保留能连成链的前缀，把修复后的日志写回，房间仍可继续玩（丢的是断档之后的尾部事件）。
+   *
+   * Issue #7：`loaded` 只能在**成功读取并回放**之后才置位。读失败（网络盘/占用/权限/EISDIR）
+   * 时若先置位，房间会被永久当成"已载入"：seq 假 0、后续 append 从 1 重写并覆盖真实日志。
+   * 同理，断档修复的写盘也必须在改内存之前完成，写失败时 loaded/日志保持原样、下次可重试。
    */
   private async readLog(roomId: RoomId): Promise<void> {
     const file = this.file(roomId);
-    this.loaded.add(roomId);
-    if (!existsSync(file)) return;
+    if (!existsSync(file)) {
+      this.loaded.add(roomId);
+      return;
+    }
 
     const text = await readFile(file, "utf8");
     const parsed: Envelope[] = [];
@@ -196,14 +202,25 @@ export class FileStore extends EventSourcedStore {
       }
     }
 
-    this.appendMemory(roomId, kept);
     if (broken) {
-      this.repaired.add(roomId);
+      // 先写回修复结果、再改内存：写盘失败时本次 load 抛错，loaded 与内存都不变，可重试
       await this.writeAll(roomId, kept);
+      this.repaired.add(roomId);
       if (process.env.GALGAME_DEBUG) {
         console.error(`[store] ${roomId} 日志 seq 不连续，已截断到 seq ${kept.length}（原 ${parsed.length} 条）`);
       }
     }
+
+    try {
+      this.appendMemory(roomId, kept);
+    } catch (err) {
+      // 正常路径不会失败（kept 已是 seq 1 起的连续前缀）；只有出现第二个写入口才可能到这里。
+      // 清掉本次半载入，避免"内存有日志、loaded 未置位"导致重试永远 E_SEQ_GAP。
+      this.logs.delete(roomId);
+      this.states.delete(roomId);
+      throw err;
+    }
+    this.loaded.add(roomId);
   }
 
   /** 原子写整份日志：tmp → rename（不要 appendFile，半批事件会撕裂存档） */
