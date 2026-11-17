@@ -9,6 +9,8 @@ export interface TurnJson {
   narrative?: string;
   dialogue?: string;
   proposals?: Proposal[];
+  /** 3.1.0：本回合值得记住的事（结构由 memory.gate 的 zod 再校验一次） */
+  memory?: unknown[];
 }
 
 /** 契约错误码是闭集，没有"未知内部错误"；这类异常按引擎故障上报 */

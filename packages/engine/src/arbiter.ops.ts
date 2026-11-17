@@ -4,8 +4,9 @@
  * 校验顺序即优先级：结构 → 引用存在 → canon 锁 → 属性注册 → 区间/clamp → x. 区限额 → 配额。
  */
 import type {
-  AttrDef, AttrValue, Entity, EntityKind, Envelope, LinkKind, OpName, Phase, Plot, Proposal, Registry, WorldState,
+  AttrDef, AttrValue, Entity, EntityKind, Envelope, LinkKind, MemoryRecord, MemoryStatus, OpName, Phase, Plot, Proposal, Registry, WorldState,
 } from "../../shared/src/contract/types.ts";
+import { normalizeSalience } from "./memory.ts";
 
 export interface OpCtx {
   state: WorldState;
@@ -17,7 +18,26 @@ export interface OpCtx {
    * 由 Arbiter 按 turn 维护：限额是"整回合累计"，不是"单条"，否则拆成多次 apply 就能绕过。
    */
   deltaBudget?: Map<string, number>;
+  /**
+   * 记忆索引（可选）：permanent 的幂等键/不可变校验要看已有条目。
+   * 没注入时只做结构校验 —— 单测可以不带记忆跑，线上由 bootstrap 注入。
+   */
+  memories?: MemoryReader;
+  /**
+   * 本回合第几条记忆（由 Arbiter 按 turn 维护）。
+   * 旧实现用 `tags.length` 当序号，同回合同 owner 同 tags 会撞 id（docs/08 §0 记录的真 bug）。
+   */
+  nextMemorySeq?: () => number;
 }
+
+/** 记忆的最小只读视图（避免 engine 的 ops 层依赖整个 Memory 服务） */
+export interface MemoryReader {
+  has(id: string): boolean;
+  get(id: string): MemoryRecord | undefined;
+}
+
+/** 世界层保留房间前缀：permanent 只能写在这里 */
+const WORLD_ROOM_PREFIX = "room_world_";
 export interface OpLimits {
   npc: number;
   loc: number;
@@ -256,19 +276,102 @@ export function validateOp(
     }
     case "memory.write": {
       if (!isId(a.ownerId) || !isStr(a.content)) return { fail: fail("E_SCHEMA_INVALID", "memory.write 需要 {ownerId,content}") };
+      const content = a.content.trim();
+      if (content.length < 1 || content.length > limits.memoryContentMax) {
+        return { fail: fail("E_OVER_LIMIT", `content 长度 1~${limits.memoryContentMax}`) };
+      }
+      const tier = a.tier === "permanent" ? "permanent" : a.tier === "long" ? "long" : "short";
+      const status: MemoryStatus = a.status === "tombstoned" ? "tombstoned" : a.status === "historical" ? "historical" : "current";
+      const tags = Array.isArray(a.tags) ? [...new Set(a.tags.filter(isStr))] : [];
+      if (tags.length > limits.memoryTagsMax) return { fail: fail("E_OVER_LIMIT", `tags 最多 ${limits.memoryTagsMax} 个`) };
+      // 旧数据里的 "scene" 兼容成 public（03 §10.10）
+      const visibility = a.visibility === "public" || a.visibility === "scene" ? "public" : a.visibility === "secret" ? "secret" : "private";
+      const salience = normalizeSalience(a.salience);
+      const about = Array.isArray(a.about) ? a.about.filter(isStr) : [];
+      const userId = isId(a.userId) ? a.userId : undefined;
+      const aboutUserIds = Array.isArray(a.aboutUserIds) ? a.aboutUserIds.filter(isId) : [];
+      const contentHash = isStr(a.contentHash) && a.contentHash.length > 0 ? a.contentHash : undefined;
+      const sourceRefs = Array.isArray(a.sourceRefs) ? a.sourceRefs.filter(isId) : [];
+      const at = tick;
+
+      // ---------- 世界层（permanent）：不可变、只增、由 canonize 写 ----------
+      if (tier === "permanent") {
+        if (!trustedOrigin(ctx, ["canonize", "canon"])) {
+          return { fail: fail("E_FORBIDDEN", "permanent 只能由 canonize 写入（叙事/模块都不许直接进世界层）") };
+        }
+        if (a.ownerId !== "mem_world") return { fail: fail("E_MEMORY_WORLD_MISMATCH", "permanent 的 ownerId 必须是 mem_world") };
+        if (!ctx.cause.roomId.startsWith(WORLD_ROOM_PREFIX)) {
+          return { fail: fail("E_MEMORY_WORLD_MISMATCH", "permanent 只能写世界房间 room_world_<worldId>") };
+        }
+        const worldId = isId(a.worldId) ? a.worldId : ctx.cause.roomId.slice(WORLD_ROOM_PREFIX.length);
+        if (ctx.cause.roomId !== `${WORLD_ROOM_PREFIX}${worldId}`) {
+          return { fail: fail("E_MEMORY_WORLD_MISMATCH", `世界房间 ${ctx.cause.roomId} 与 worldId ${worldId} 不匹配`) };
+        }
+        if (visibility !== "public") return { fail: fail("E_FORBIDDEN", "世界层记忆必须是 public（秘密不进世界层）") };
+        if (status === "tombstoned") {
+          const target = isStr(a.supersedes) ? a.supersedes : "";
+          if (!target) return { fail: fail("E_SCHEMA_INVALID", "撤回世界记忆必须带 supersedes") };
+          const old = ctx.memories?.get(target);
+          if (old && (old.tier !== "permanent" || (old.worldId !== undefined && old.worldId !== worldId))) {
+            return { fail: fail("E_MEMORY_WORLD_MISMATCH", `只能撤回同一世界的 permanent 条目：${target}`) };
+          }
+          if (old && old.status === "tombstoned") return { fail: fail("E_MEMORY_IMMUTABLE", `世界记忆 ${target} 已撤回`) };
+          return { event: { type: "memory.tombstoned", payload: { memoryId: target, supersedes: target, worldId, userId, reason: content, at } } };
+        }
+        if (!contentHash) return { fail: fail("E_SCHEMA_INVALID", "permanent 必须带 contentHash（幂等键）") };
+        if (sourceRefs.length === 0) return { fail: fail("E_MEMORY_TAINT", "世界记忆必须带 sourceRefs（来源可追溯）") };
+        const badRef = sourceRefs.find((r) => !/^(evt_|canon_|fact_|lore_|mem_)/.test(r));
+        if (badRef) return { fail: fail("E_MEMORY_TAINT", `来源 ${badRef} 不是已提交的事件/内容 id`) };
+        const memoryId = `mem_${contentHash.slice(0, 12)}`;
+        const existing = ctx.memories?.get(memoryId);
+        if (existing) {
+          // 不可变：同样的 hash 就是同一条（幂等），内容一旦不同就是改写
+          if (existing.content !== content) return { fail: fail("E_MEMORY_IMMUTABLE", `世界记忆 ${memoryId} 不可改写（先 tombstone 再写新条目）`) };
+          if (existing.status === "tombstoned") return { fail: fail("E_MEMORY_IMMUTABLE", `世界记忆 ${memoryId} 已撤回`) };
+        }
+        return {
+          event: {
+            type: "memory.written",
+            payload: {
+              memoryId, ownerId: "mem_world", content, tags, salience: 5, visibility, about, aboutUserIds,
+              tier, worldId, sourceRefs, contentHash, status, at, turn: ctx.state.clock.day,
+            },
+          },
+        };
+      }
+
+      // ---------- 私忆（short/long）：owner 必须是活着的实体 ----------
       const owner = live(ctx.state, a.ownerId);
       if (!owner) return { fail: fail("E_ENTITY_MISSING", `记忆所有者 ${a.ownerId} 不存在`) };
-      if (a.content.length < 1 || a.content.length > limits.memoryContentMax) return { fail: fail("E_OVER_LIMIT", `content 长度 1~${limits.memoryContentMax}`) };
-      // 代写资格同样按信封来源判定：导演/引擎可代写，其余只能写自己
+      // 代写资格按信封来源判定：引擎/导演可代写；回合骨架只能代写**在场**的 NPC
+      // （"谁记得这一刻"由引擎按场景决定，但引擎之外的东西不能借回合格子给任意实体写记忆）
       const proxy = trustedOrigin(ctx, ["engine", "tick", "dialogue", "plot"]);
-      if (!proxy && owner.id !== ctx.cause.actorId) return { fail: fail("E_FORBIDDEN", "只能写自己的记忆（视角化写入由引擎/导演骨架代写）") };
-      const tags = Array.isArray(a.tags) ? a.tags.filter(isStr) : [];
-      if (tags.length > limits.memoryTagsMax) return { fail: fail("E_OVER_LIMIT", `tags 最多 ${limits.memoryTagsMax} 个`) };
-      const visibility = isStr(a.visibility) ? a.visibility : "private";
-      if (!["private", "scene", "public"].includes(visibility)) return { fail: fail("E_SCHEMA_INVALID", `非法 visibility ${visibility}`) };
-      const salience = isNum(a.salience) ? Math.max(0, Math.min(100, a.salience)) : 50;
-      const memoryId = `mem_${owner.id}_${tick}_${tags.length}`;
-      return { event: { type: "memory.written", payload: { memoryId, ownerId: owner.id, content: a.content, tags, salience, visibility, about: Array.isArray(a.about) ? a.about.filter(isStr) : undefined, at: tick } } };
+      const turnProxy = trustedOrigin(ctx, ["turn"]) && ctx.state.room.scene.presentIds.includes(owner.id);
+      if (!proxy && !turnProxy && owner.id !== ctx.cause.actorId) {
+        return { fail: fail("E_FORBIDDEN", "只能写自己的记忆（视角化写入由引擎/导演骨架代写）") };
+      }
+      // secret 走强制注入通道，只能是引擎/导演产出（叙事层写的 secret 等于把秘密交给会被诱导的模型）
+      if (visibility === "secret" && !trustedOrigin(ctx, ["engine", "tick", "dialogue", "plot", "canonize"])) {
+        return { fail: fail("E_FORBIDDEN", "secret 记忆只能由引擎/导演骨架写") };
+      }
+      const seq = ctx.nextMemorySeq ? ctx.nextMemorySeq() : tags.length;
+      const memoryId = contentHash ? `mem_${contentHash.slice(0, 12)}` : `mem_${ctx.cause.roomId}_${at}_${seq}`;
+      if (status === "tombstoned") {
+        const target = isStr(a.supersedes) ? a.supersedes : "";
+        if (!target) return { fail: fail("E_SCHEMA_INVALID", "撤回记忆必须带 supersedes") };
+        return { event: { type: "memory.tombstoned", payload: { memoryId: target, supersedes: target, userId, reason: content, at } } };
+      }
+      return {
+        event: {
+          type: "memory.written",
+          payload: {
+            memoryId, ownerId: owner.id, content, tags, salience, visibility, about, tier, at, turn: ctx.state.clock.day,
+            ...(userId ? { userId } : {}),
+            ...(contentHash ? { contentHash } : {}),
+            ...(aboutUserIds.length > 0 ? { aboutUserIds } : {}),
+          },
+        },
+      };
     }
     case "plot.upsert": {
       if (!isStr(a.goal) || a.goal.length < 1) return { fail: fail("E_SCHEMA_INVALID", "plot.upsert 需要非空 goal") };

@@ -21,7 +21,7 @@ import type {
 } from "../../shared/src/contract/types.ts";
 import { OP_NAMES } from "../../shared/src/contract/types.ts";
 import { applyEvent } from "./projection.ts";
-import type { OpLimits } from "./arbiter.ops.ts";
+import type { MemoryReader, OpLimits } from "./arbiter.ops.ts";
 import { validateOp } from "./arbiter.ops.ts";
 import type { EventLog } from "./store.ts";
 
@@ -54,6 +54,11 @@ export interface ArbiterOptions {
   now?: () => number;
   /** 保留多少个"回合预算"档（默认 64，超出按插入顺序淘汰） */
   maxTrackedTurns?: number;
+  /**
+   * 记忆索引（只读）：permanent 的幂等/不可变校验、tombstone 目标校验要看已有条目。
+   * 不注入时只做结构校验（单测可以省掉）。
+   */
+  memories?: MemoryReader;
 }
 
 interface TurnBudget {
@@ -61,6 +66,8 @@ interface TurnBudget {
   delta: Map<string, number>;
   /** 本回合 x. 区已写入条数（多次 apply 共享） */
   xWrites: number;
+  /** 本回合已写记忆条数：memory id 的序号，保证同回合同 owner 不撞 id */
+  memSeq: number;
 }
 
 export class DefaultArbiter {
@@ -69,6 +76,7 @@ export class DefaultArbiter {
   private readonly limits: ArbiterLimits;
   private readonly now: () => number;
   private readonly maxTrackedTurns: number;
+  private readonly memories?: MemoryReader;
   private readonly budgets = new Map<string, TurnBudget>();
   /** 每房间一条串行链：并发 apply 不会交错读同一份快照 */
   private readonly chains = new Map<RoomId, Promise<unknown>>();
@@ -79,6 +87,7 @@ export class DefaultArbiter {
     this.limits = { ...DEFAULT_LIMITS, ...opts.limits };
     this.now = opts.now ?? Date.now;
     this.maxTrackedTurns = opts.maxTrackedTurns ?? 64;
+    this.memories = opts.memories;
   }
 
   /** 同房间串行化：所有 apply 排队执行，避免两个请求各读到同一 seq 后互相覆盖 */
@@ -96,7 +105,7 @@ export class DefaultArbiter {
       const oldest = this.budgets.keys().next();
       if (!oldest.done) this.budgets.delete(oldest.value);
     }
-    b = { delta: new Map(), xWrites: 0 };
+    b = { delta: new Map(), xWrites: 0, memSeq: 0 };
     this.budgets.set(turnKey, b);
     return b;
   }
@@ -110,7 +119,7 @@ export class DefaultArbiter {
   async dryRun(roomId: RoomId, ops: Proposal[]): Promise<ValidationResult> {
     const seq = await this.store.load(roomId); // 先载入：文件实现未载入时 seq 是 0
     const state = await this.store.snapshot(roomId);
-    const sim = this.simulate(seq, state, ops, this.pseudoCause(roomId, seq), "atomic", { delta: new Map(), xWrites: 0 });
+    const sim = this.simulate(seq, state, ops, this.pseudoCause(roomId, seq), "atomic", { delta: new Map(), xWrites: 0, memSeq: 0 });
     return { ok: !sim.fatal && sim.rejected.length === 0, rejected: sim.rejected };
   }
 
@@ -138,12 +147,14 @@ export class DefaultArbiter {
       // 失败回滚时预算也要回滚，否则一条被拒的提案会白吃掉本回合额度
       const deltaBackup = new Map(budget.delta);
       const xBackup = budget.xWrites;
+      const memBackup = budget.memSeq;
 
       const sim = this.simulate(seqBefore, state, ops, cause, mode, budget);
       const abort = sim.fatal || (mode === "atomic" && sim.rejected.length > 0);
       if (abort) {
         budget.delta = deltaBackup;
         budget.xWrites = xBackup;
+        budget.memSeq = memBackup;
         return { ok: false, mode, seq: seqBefore, applied: [], rejected: sim.rejected, events: [] };
       }
       if (sim.events.length > 0) {
@@ -153,6 +164,7 @@ export class DefaultArbiter {
         } catch (e) {
           budget.delta = deltaBackup;
           budget.xWrites = xBackup;
+          budget.memSeq = memBackup;
           return {
             ok: false, mode, seq: seqBefore, applied: [], rejected: [], events: [],
             error: { code: "E_STORE_FAULT", message: `落盘失败：${e instanceof Error ? e.message : String(e)}` },
@@ -212,7 +224,18 @@ export class DefaultArbiter {
       const args = proposal.args ?? {};
       const key = typeof args.key === "string" ? args.key : "";
       const isXWrite = (op === "attr.delta" || op === "attr.set") && key.startsWith("x.");
-      const result = validateOp(op as OpName, args, { state, registry: this.registry, cause, deltaBudget: budget.delta }, proposal, this.limits);
+      const ctx = {
+        state,
+        registry: this.registry,
+        cause,
+        deltaBudget: budget.delta,
+        ...(this.memories ? { memories: this.memories } : {}),
+        nextMemorySeq: () => {
+          budget.memSeq += 1;
+          return budget.memSeq;
+        },
+      };
+      const result = validateOp(op as OpName, args, ctx, proposal, this.limits);
       if ("fail" in result) {
         rejected.push({ proposal, code: result.fail.code, detail: result.fail.detail });
         continue;

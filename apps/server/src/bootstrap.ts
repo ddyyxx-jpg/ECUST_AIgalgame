@@ -12,7 +12,7 @@ import {
   DefaultTurn,
   DialogueHost,
   FileStore,
-  InMemoryMemory,
+  EventSourcedMemory,
   JsonRegistry,
   MemoryTransport,
   ModuleHost,
@@ -87,7 +87,9 @@ export async function createApp(cfg: ServerConfig): Promise<AppDeps> {
     locId: startLoc,
   });
 
-  const arbiter = new DefaultArbiter({ store, registry });
+  // 记忆与裁决器共享同一份事件日志：记忆是"日志的投影"，不是第二个数据库
+  const memory = new EventSourcedMemory();
+  const arbiter = new DefaultArbiter({ store, registry, memories: memory });
   const modules = new ModuleHost({ dir: path.join(contentDir, "modules") });
   await modules.load();
 
@@ -141,7 +143,6 @@ export async function createApp(cfg: ServerConfig): Promise<AppDeps> {
     console.log(`[settings] 已从本地恢复模型配置（${saved.model} @ ${saved.baseUrl}）`);
   }
 
-  const memory = new InMemoryMemory();
   const transport = new MemoryTransport();
   const directors = await loadDirectors(path.join(contentDir, "directors"));
   const dialogue = new DialogueHost((spec) => ({
