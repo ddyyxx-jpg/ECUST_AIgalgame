@@ -261,6 +261,33 @@ describe("额度对账端点", () => {
 });
 
 describe("存储故障脱敏", () => {
+  it("safe() 包裹的地图写入口也把存储故障映射 503", async () => {
+    const { app, deps } = await makeApp();
+    deps.map.createDraft = async () => {
+      throw Object.assign(new Error("EACCES: /secret/map"), { code: "EACCES" });
+    };
+    const res = await app.inject({
+      method: "POST", url: "/api/v1/map/drafts", headers: { ...ADMIN, ...ORIGIN },
+      payload: { name: "旧水房", idea: "宿舍楼后面废弃的水房，夜里有人低语" },
+    });
+    expect(res.statusCode).toBe(503);
+    expect((res.json() as { code: string }).code).toBe("E_STORE_FAULT");
+    expect(res.body).not.toContain("/secret");
+    await app.close();
+  });
+
+  it("Fastify 可预期 4xx（非法 JSON）不被折叠成 500", async () => {
+    const { app } = await makeApp();
+    const res = await app.inject({
+      method: "POST", url: "/api/v1/auth/login",
+      headers: { ...ORIGIN, "content-type": "application/json" },
+      payload: '{"username":',
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { code: string }).code).toBe("E_SCHEMA_INVALID");
+    await app.close();
+  });
+
   it("管理写路由存储故障 → 503 E_STORE_FAULT，不回显 fs 路径", async () => {
     const { app, deps } = await makeApp();
     deps.auth.store.updateSettings = async () => {

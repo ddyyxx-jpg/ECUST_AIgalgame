@@ -144,6 +144,9 @@ async function safe(reply: FastifyReply, fn: () => Promise<unknown>): Promise<un
   } catch (e) {
     // 内部异常（含绝对路径的 zod 错误等）只进服务端日志，不回给客户端
     console.error("[server] unhandled route error", e);
+    if (isStoreFault(e)) {
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "存储读写失败，请稍后重试" });
+    }
     return reply.code(500).send({ ok: false, code: "E_MODULE_FAULT", message: "服务器内部错误" });
   }
 }
@@ -152,6 +155,15 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   // 未预期异常兜底：存储故障统一 503 E_STORE_FAULT 并脱敏（不把 fs 路径回显给客户端），
   // 其余 500 E_MODULE_FAULT；业务拒绝不经过这里。
   app.setErrorHandler((error, _req, reply) => {
+    // Fastify 自己的可预期 4xx（非法 JSON 400 / body 过大 413 / 不支持的 Content-Type 415）
+    // 必须保留状态码，不能被折叠成 500；只做脱敏，不回显底层解析细节。
+    const statusCode = (error as { statusCode?: unknown } | null)?.statusCode;
+    const status = typeof statusCode === "number" ? statusCode : 500;
+    if (status >= 400 && status < 500) {
+      const code = status === 401 ? "E_UNAUTHORIZED" : status === 403 ? "E_FORBIDDEN" : "E_SCHEMA_INVALID";
+      const message = status === 413 ? "请求体过大" : status === 415 ? "不支持的 Content-Type" : "请求格式不正确";
+      return reply.code(status).send({ ok: false, code, message });
+    }
     console.error("[server] unhandled route error", error);
     if (isStoreFault(error)) {
       return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "存储读写失败，请稍后重试" });
