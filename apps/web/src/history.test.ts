@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildHistoryQuery } from "./api.ts";
 import type { HistoryLine } from "./api.ts";
-import { earlierCursor, historyToLines, restoreConversation } from "./history-lines.ts";
+import { earlierCursor, historyToLines, missingTurnContent, restoreConversation } from "./history-lines.ts";
 import type { Scenario } from "./scenarios.ts";
 
 function line(seq: number, over: Partial<HistoryLine> = {}): HistoryLine {
@@ -47,6 +47,24 @@ describe("historyToLines / earlierCursor（恢复投影）", () => {
   it("加载更早的游标 = 段首 committedSeq；空段为 null", () => {
     expect(earlierCursor([line(4), line(5)])).toBe(4);
     expect(earlierCursor([])).toBeNull();
+  });
+});
+
+describe("missingTurnContent（断流后补齐历史差集）", () => {
+  it("已收到完整叙事和 facts → 不重复追加", () => {
+    const l = line(1);
+    expect(missingTurnContent(l, { narrative: l.narrative, facts: [...l.facts] })).toEqual({ narrative: "", facts: [] });
+  });
+
+  it("只收到叙事前缀和部分 facts → 只补剩余部分", () => {
+    const l = line(1, { narrative: "前半段\n后半段", facts: ["a", "b", "c"] });
+    expect(missingTurnContent(l, { narrative: "前半段", facts: ["a"] })).toEqual({ narrative: "\n后半段", facts: ["b", "c"] });
+  });
+
+  it("什么都没收到 → 全量补；收到的不是历史前缀 → 不冒险重复追加", () => {
+    const l = line(1);
+    expect(missingTurnContent(l, { narrative: "", facts: [] })).toEqual({ narrative: l.narrative, facts: l.facts });
+    expect(missingTurnContent(l, { narrative: "别的文本", facts: [] })).toEqual({ narrative: "", facts: l.facts });
   });
 });
 

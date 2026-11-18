@@ -71,6 +71,11 @@ function safeRoomFile(roomId: string): string {
   return `x_${createHash("sha256").update(roomId, "utf8").digest("hex").slice(0, 24)}`;
 }
 
+/** 去重作用域与引擎一致：房间内按 actorId + turnId（turnId 已包含 clientTurnId） */
+function historyKey(line: Pick<TurnHistoryLine, "actorId" | "turnId">): string {
+  return `${line.actorId}\u0000${line.turnId}`;
+}
+
 export class TurnHistory {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly known = new Map<string, Set<string>>();
@@ -136,7 +141,7 @@ export class TurnHistory {
     };
   }
 
-  /** 同一 turnId 幂等：Turn 的 seen 缓存重放会再次产出 turn.commit，不能重复记账 */
+  /** 同一作用域（actorId + turnId）幂等：Turn 的 seen 缓存重放会再次产出 turn.commit，不能重复记账 */
   append(line: TurnHistoryLine): Promise<void> {
     const prev = this.chains.get(line.roomId) ?? Promise.resolve();
     const task = prev.then(() => this.doAppend(line));
@@ -146,17 +151,18 @@ export class TurnHistory {
 
   private async doAppend(line: TurnHistoryLine): Promise<void> {
     const known = await this.knownFor(line.roomId);
-    if (known.has(line.turnId)) return;
+    const key = historyKey(line);
+    if (known.has(key)) return;
     const file = this.fileFor(line.roomId);
     await mkdir(path.dirname(file), { recursive: true });
     await appendFile(file, `${JSON.stringify(line)}\n`, "utf8");
-    known.add(line.turnId);
+    known.add(key);
   }
 
   private async knownFor(roomId: string): Promise<Set<string>> {
     const cached = this.known.get(roomId);
     if (cached) return cached;
-    const set = new Set((await this.readAll(roomId)).map((line) => line.turnId));
+    const set = new Set((await this.readAll(roomId)).map(historyKey));
     this.known.set(roomId, set);
     return set;
   }

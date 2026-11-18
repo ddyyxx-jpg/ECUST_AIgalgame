@@ -208,6 +208,19 @@ describe("行动核对端点", () => {
     await app.close();
   });
 
+  it("自动对账写盘失败 → 503 E_STORE_FAULT，不伪装成待核对", async () => {
+    const { app, deps, cookie, roomId, turn } = await setup();
+    await turn("c1");
+    deps.ledger.transition("c1", "unconfirmed");
+    deps.ledger.reconcileCommitted = async () => ({
+      ok: false, code: "E_STORE_FAULT", message: "额度账本写入失败，未结案，可重试",
+    });
+    const res = await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/turns/c1`, headers: { cookie } });
+    expect(res.statusCode).toBe(503);
+    expect((res.json() as { code: string }).code).toBe("E_STORE_FAULT");
+    await app.close();
+  });
+
   it("对账只认本账号+角色的历史：同房间同名 ID 不被他人回合冒充", async () => {
     const { app, deps, cookie, roomId, actorId } = await setup();
     const me = await app.inject({ method: "GET", url: "/api/v1/auth/me", headers: { cookie } });

@@ -20,6 +20,33 @@ export function earlierCursor(history: HistoryLine[]): number | null {
   return history.length > 0 ? history[0].committedSeq : null;
 }
 
+export interface ReceivedTurnContent {
+  narrative: string;
+  facts: string[];
+}
+
+/**
+ * 断流后核对到 committed 时，补齐该回合历史里尚未收到的叙事/facts。
+ * 只补差集：断流前已经展示过的前缀不再重复刷一遍。
+ */
+export function missingTurnContent(
+  line: Pick<HistoryLine, "narrative" | "facts">,
+  received: ReceivedTurnContent,
+): { narrative: string; facts: string[] } {
+  const narrative =
+    received.narrative === ""
+      ? line.narrative
+      : line.narrative.startsWith(received.narrative)
+        ? line.narrative.slice(received.narrative.length)
+        : ""; // 收到的内容不是历史前缀（异常/错位）时不冒险重复追加
+  const remaining = [...line.facts];
+  for (const fact of received.facts) {
+    const index = remaining.indexOf(fact);
+    if (index >= 0) remaining.splice(index, 1);
+  }
+  return { narrative, facts: remaining };
+}
+
 export interface RestoredConversation {
   /** 有历史时直接铺出的对话行（含"继续上次"提示） */
   lines: Line[];

@@ -575,7 +575,13 @@ const access = await guardRoom(req, reply, deps, roomId, userIdOf);
       const line = (await deps.history.readAll(roomId)).find(
         (l) => l.clientTurnId === clientTurnId && l.userId === userId && l.actorId === entry.actorId,
       );
-      if (line) await deps.ledger?.reconcileCommitted(scope, { turnId: line.turnId, committedSeq: line.committedSeq });
+      if (line) {
+        const reconciled = await deps.ledger?.reconcileCommitted(scope, { turnId: line.turnId, committedSeq: line.committedSeq });
+        // 账本写失败不能伪装成"结果待核对"：玩家/运维需要区分存储故障与真的未决
+        if (reconciled && !reconciled.ok && reconciled.code === "E_STORE_FAULT") {
+          return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: reconciled.message });
+        }
+      }
     }
     const current = (scope ? deps.ledger?.get(scope) : undefined) ?? entry;
     return { ok: true, state: current.state, ...(current.turnId ? { turnId: current.turnId } : {}), ...(current.committedSeq !== undefined ? { committedSeq: current.committedSeq } : {}) };

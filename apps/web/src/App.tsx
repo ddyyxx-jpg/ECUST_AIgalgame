@@ -6,7 +6,7 @@ import { GameError, HttpError, httpFailMessage, isUnauthorized, onUnauthorized }
 import { useAuth } from "./use-auth.ts";
 import { useSaves } from "./use-saves.ts";
 import { RequestScope } from "./request-scope.ts";
-import { earlierCursor, historyToLines, restoreConversation } from "./history-lines.ts";
+import { earlierCursor, historyToLines, missingTurnContent, restoreConversation } from "./history-lines.ts";
 import { makeTurnHandlers } from "./turn-handlers.ts";
 import AuthScreen from "./AuthScreen.tsx";
 import type { SaveEntry } from "./api.ts";
@@ -73,6 +73,8 @@ export default function App() {
   const [unconfirmed, setUnconfirmed] = useState<{ clientTurnId: string } | null>(null);
   /** 最近一次玩家行动：重试时原样再发，不重复打印玩家行 */
   const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null } | null>(null);
+  /** 断流前已收到的叙事/facts：核对到 committed 后只补历史里的差集，避免重复刷屏 */
+  const pendingTurn = useRef<{ clientTurnId: string; narrative: string; facts: string[] } | null>(null);
   /** 全屏地图层：点对话页左上角的小地图打开 */
   const [mapOpen, setMapOpen] = useState(false);
 const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
@@ -405,13 +407,32 @@ const token = scopeRef.current.current();
       }
       const clientTurnId = reuseId ?? `${Date.now()}_${++turnSeq.current}`;
       tw.setTurnEnded(false);
+      // 记录断流前已经收到的内容：核对到 committed 后只补历史差集，避免重复显示
+      const received: { clientTurnId: string; narrative: string; facts: string[] } = { clientTurnId, narrative: "", facts: [] };
+      pendingTurn.current = received;
+      const baseHandlers = makeTurnHandlers({ current, tw, lastFacts, setState, setView, setErr, setErrRetryable, setUnconfirmed, expireSession });
+      const handlers = {
+        ...baseHandlers,
+        onDelta: (field: "narrative" | "dialogue", chunk: string) => {
+          if (field === "narrative") received.narrative = received.narrative ? `${received.narrative}\n${chunk}` : chunk;
+          baseHandlers.onDelta?.(field, chunk);
+        },
+        onFacts: (facts: string[]) => {
+          received.facts.push(...facts);
+          baseHandlers.onFacts?.(facts);
+        },
+        onCommit: (seq: number) => {
+          pendingTurn.current = null;
+          baseHandlers.onCommit?.(seq);
+        },
+      };
       try {
 await runTurn(
           roomId,
           actorId,
           text,
           clientTurnId,
-          makeTurnHandlers({ current, tw, lastFacts, setState, setView, setErr, setErrRetryable, setUnconfirmed, expireSession }),
+          handlers,
           token.signal,
           targetNpc?.id,
         );
@@ -456,8 +477,32 @@ await runTurn(
         const status = await fetchTurnStatus(roomId, clientTurnId);
         if (!current()) return;
         if (status.state === "committed") {
+          const received = pendingTurn.current?.clientTurnId === clientTurnId
+            ? pendingTurn.current
+            : { narrative: "", facts: [] as string[] };
+          pendingTurn.current = null;
           setUnconfirmed(null);
           setErrRetryable(false);
+          // 断流时没收到的叙事/facts：按 committedSeq 从历史补齐，只追加差集
+          if (status.committedSeq !== undefined) {
+            try {
+              const page = await fetchHistory(roomId, { fromTurn: String(status.committedSeq - 1), limit: 1 });
+              if (!current()) return;
+              const line = page.history.find((h) => h.committedSeq === status.committedSeq);
+              if (line) {
+                const missing = missingTurnContent(line, received);
+                if (missing.narrative) push("narrative", missing.narrative);
+                for (const fact of missing.facts) push("fact", fact);
+              }
+            } catch (e) {
+              if (!current()) return;
+              if (isUnauthorized(e)) {
+                fail(e);
+                return;
+              }
+              push("system", "该行动已提交；补齐该回合叙事失败，可重新进入房间从历史查看。");
+            }
+          }
           push("system", `已核对：该行动已提交（seq ${status.committedSeq ?? "?"}），未重复执行。`);
           refreshState();
           return;

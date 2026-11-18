@@ -100,6 +100,27 @@ describe("TurnHistory", () => {
     expect(await history.readAll("room_x")).toHaveLength(1);
   });
 
+  it("同 turnId 不同角色各自保留（去重作用域与引擎一致）", async () => {
+    const dir = tempDir("galgame-history-actor-scope-");
+    const history = new TurnHistory(dir);
+    const base = {
+      formatVersion: 1 as const,
+      roomId: "room_x",
+      turnId: "t_same",
+      committedSeq: 1,
+      input: "hi",
+      narrative: "n",
+      speakers: [],
+      facts: [],
+      createdAt: 1,
+    };
+    await history.append({ ...base, actorId: "plr_a" });
+    await history.append({ ...base, actorId: "plr_b", committedSeq: 2 });
+    const lines = await history.readAll("room_x");
+    expect(lines).toHaveLength(2);
+    expect(lines.map((line) => line.actorId).sort()).toEqual(["plr_a", "plr_b"]);
+  });
+
   it("非法房间号不会穿越目录（落盘名走 hash 前缀）", () => {
     const history = new TurnHistory(tempDir("galgame-history-safe-"));
     expect(history.fileFor("room_abc-123")).toContain("room_abc-123.history.jsonl");
