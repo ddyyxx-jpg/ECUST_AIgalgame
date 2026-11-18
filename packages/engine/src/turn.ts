@@ -314,8 +314,10 @@ export class DefaultTurn implements Turn {
       }
     } catch (e) {
       const code = codeOf(e);
-      // 只有契约里标为可重试的错误才提示前端重试；E_MODULE_FAULT 这类硬失败重试也没用（issue #21-3）
-      yield emit({ type: "turn.error", code, message: errMessage(e), retryable: RETRYABLE.includes(code) });
+      // 可重试 = 契约 RETRYABLE（格式/超时/限流）+ E_STORE_FAULT（写盘失败，本回合未 commit，重试安全，docs/03 §7）；
+      // E_MODULE_FAULT 这类硬失败重试也没用，不该给前端重试按钮（issue #21-3 / PR #23 复审）
+      const retryable = RETRYABLE.includes(code) || code === "E_STORE_FAULT";
+      yield emit({ type: "turn.error", code, message: errMessage(e), retryable });
     } finally {
       // 不论成功、失败还是抛异常，都释放本回合预算（否则预算表只增不减）
       this.deps.arbiter.endTurn(turnId);

@@ -6,7 +6,7 @@ import { emptyRegistry } from "./registry.ts";
 import { DefaultTurn } from "./turn.ts";
 import { ModuleHost } from "./modules.ts";
 import { InMemoryMemory } from "./memory.ts";
-import type { LlmPort, LlmRequest, LlmResult, Modules, TurnEvent } from "../../shared/src/index.ts";
+import type { LlmPort, LlmRequest, LlmResult, Modules, RoomId, TurnEvent, WorldState } from "../../shared/src/index.ts";
 
 /** 测试只用内存件；ModuleHost 指向不存在的目录 = 零模块，验证"没有玩法回合也能跑完" */
 async function makeTurn(llm: LlmPort, registry = emptyRegistry(), dir = "/tmp/galgame-no-modules") {
@@ -87,6 +87,43 @@ describe("turn.run", () => {
     expect(port.calls).toBe(1);
     expect(evs.some((e) => e.type === "turn.delta")).toBe(true);
     expect(evs.at(-1)?.type).toBe("turn.commit");
+  });
+
+  it("叙事里含 ``` 的合法 JSON：先按原文解析，不触发重问（PR #23 复审回归）", async () => {
+    const raw = JSON.stringify({ narrative: "试试这个 ```js\nconsole.log(1)\n``` 行不行", proposals: [] });
+    const port = rawLlm([raw]);
+    const { turn, roomId } = await makeTurn(port);
+    const evs = await collect(turn.run({ roomId, actorId: "plr_self", input: "去图书馆", clientTurnId: "c_fence" }));
+    expect(port.calls).toBe(1);
+    const delta = evs.find((e) => e.type === "turn.delta");
+    expect(delta && delta.type === "turn.delta" ? delta.text : "").toContain("```js");
+    expect(evs.at(-1)?.type).toBe("turn.commit");
+  });
+
+  it("E_STORE_FAULT（读盘/落盘故障）标记为可重试：本回合未提交，重试安全", async () => {
+    const llm = new MockLlm({ responses: [okJson] });
+    // 第 1 次 snapshot 是 Turn 载入；第 2 次（Arbiter.apply）模拟磁盘故障
+    class FlakyStore extends EventSourcedStore {
+      private snapshots = 0;
+      override async snapshot(roomId: RoomId): Promise<WorldState> {
+        this.snapshots += 1;
+        if (this.snapshots >= 2) throw Object.assign(new Error("磁盘暂不可用"), { code: "E_STORE_FAULT" });
+        return await super.snapshot(roomId);
+      }
+    }
+    const store = new FlakyStore({ worldId: "w", locId: "loc_gate" });
+    const arbiter = new DefaultArbiter({ store, registry: emptyRegistry() });
+    const modules = new ModuleHost({ dir: "/tmp/galgame-no-modules" });
+    await modules.load();
+    const turn = new DefaultTurn({ store, arbiter, registry: emptyRegistry(), modules, llm, memory: new InMemoryMemory() });
+    const evs = await collect(turn.run({ roomId: "room_t", actorId: "plr_self", input: "x", clientTurnId: "c_store" }));
+    const err = evs.at(-1);
+    expect(err?.type).toBe("turn.error");
+    if (err?.type === "turn.error") {
+      expect(err.code).toBe("E_STORE_FAULT");
+      expect(err.retryable).toBe(true);
+    }
+    expect(evs.some((e) => e.type === "turn.commit")).toBe(false);
   });
 
   it("截断的 JSON：带解析错误自动重问一次后成功提交", async () => {

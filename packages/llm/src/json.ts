@@ -50,7 +50,11 @@ export function safeParseJson(raw: string): JsonParseResult {
   return { ok: true, value: parsed };
 }
 
-/** 去掉 ```json ... ``` 围栏；没有围栏时原样返回。 */
+/**
+ * 去掉 ```json ... ``` 围栏；没有围栏时原样返回。
+ * 与 packages/engine/src/turn.parse.ts 的 stripOuterFences 互为镜像（引擎那边先按原文解析、
+ * 失败才剥首尾围栏，避免把叙事字符串里的 ``` 当成围栏起点）；改这里必须同步评估那边。
+ */
 function stripFences(text: string): string {
   const open = text.indexOf("```");
   if (open === -1) return text;

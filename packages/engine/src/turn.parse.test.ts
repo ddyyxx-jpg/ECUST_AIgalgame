@@ -8,6 +8,11 @@ describe("parseTurn 容错提取", () => {
     expect(parseTurn("```json\n" + JSON.stringify(base) + "\n```")).toEqual(base);
   });
 
+  it("叙事字符串里含 ``` 的合法 JSON 不被围栏逻辑截断（PR #23 复审回归）", () => {
+    const payload = JSON.stringify({ narrative: "试试这个 ```js\nconsole.log(1)\n``` 行不行", proposals: [] });
+    expect(parseTurn(payload)).toEqual({ narrative: "试试这个 ```js\nconsole.log(1)\n``` 行不行", proposals: [] });
+  });
+
   it("忽略前后说明文字", () => {
     expect(parseTurn("好的，结果如下：" + JSON.stringify(base) + " 希望有帮助")).toEqual(base);
   });

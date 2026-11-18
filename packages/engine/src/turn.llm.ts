@@ -55,7 +55,8 @@ export class TurnLlm {
       // 只有"格式错"值得重问；超时/限流由上层按可重试错误直接上报，避免多花一次调用
       if (codeOf(e) !== "E_LLM_FORMAT") throw e;
       const repaired = await this.repair(req, state, [], kind, mem, errMessage(e));
-      if (!repaired.ok) throw formatError(`模型输出不是合法 JSON，自动修复一次后仍失败：${repaired.error}`);
+      // 错误信息可能带网关/模型的长报文：压平并截到 200 字，避免把整段原文写进 turn.error 与日志
+      if (!repaired.ok) throw formatError(`模型输出不是合法 JSON，自动修复一次后仍失败：${clip(repaired.error)}`);
       return repaired;
     }
   }
@@ -155,6 +156,12 @@ export class TurnLlm {
       ...(this.deps.registry ? { registry: this.deps.registry } : {}),
     });
   }
+}
+
+/** 压平空白并截到 max 字：解析错误里可能带模型原文/网关长报文，不能整段进日志与前端 */
+function clip(text: string, max = 200): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
 }
 
 /** 可恢复的格式错误：code 供上层按 §7 报 E_LLM_FORMAT，recoverable 供引擎内部/测试识别"还能再救" */
