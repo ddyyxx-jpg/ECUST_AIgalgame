@@ -51,3 +51,38 @@ export function planNpcTalk(
   }
   return { kind: "elsewhere", npc, locId, locName: scene.name };
 }
+
+export interface LinkLike {
+  kind: string;
+  from: string;
+  to: string;
+}
+
+/** 从世界状态的 links 里取 NPC 当前所在点位（`located_in` 的第一条） */
+export function npcLocIdFromLinks(npcId: string, links: readonly LinkLike[]): string {
+  for (const link of links) {
+    if (link.kind === "located_in" && link.from === npcId && link.to) return link.to;
+  }
+  return "";
+}
+
+/**
+ * 点「重试」前再校验一次对话目标是否仍在当前场景（issue #21 P2）。
+ *
+ * 换场景时必须让旧重试失效，但重试对象是上一回合记下来的 `target`，
+ * 它可能已经被聊天之外的移动甩在别的场景；直接重发会凭空构造
+ * 「对 X 说：…」，等于绕过 `planNpcTalk` 隔空聊天。这里和 `planNpcTalk`
+ * 共用同一套在场定义：在 `scene.presentIds` 里，或 `located_in` 正好指向脚下。
+ * `target` 为 null（没指定对象）时与场景无关，允许重试。
+ */
+export function targetStillInScene(
+  target: { id: string } | null,
+  currentLocId: string,
+  npcLocId: string,
+  presentIds: readonly string[] = [],
+): boolean {
+  if (!target) return true;
+  if (!currentLocId) return false;
+  if (presentIds.includes(target.id)) return true;
+  return npcLocId !== "" && npcLocId === currentLocId;
+}

@@ -34,3 +34,14 @@ export function isRetryableTurnError(code: string, retryable?: boolean): boolean
   if (!code) return false;
   return code === "E_UPSTREAM" || (RETRYABLE as readonly string[]).includes(code);
 }
+
+/**
+ * 位置变化时是否作废旧的重试（issue #21 P2）。
+ *
+ * `App` 在 `view.position.locId` 变化时用它清掉 `lastTurn`：旧目标可能已经不
+ * 在玩家身边，重发就等于隔空聊天。只有"确实从一个场景换到了另一个场景"才算，
+ * 首次拿到位置（prev 为空）不算移动。
+ */
+export function shouldDropRetryOnMove(prevLocId: string, nextLocId: string): boolean {
+  return Boolean(prevLocId) && Boolean(nextLocId) && prevLocId !== nextLocId;
+}

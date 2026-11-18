@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { explainTurnError, isRetryableTurnError } from "./turn-error.ts";
+import { explainTurnError, isRetryableTurnError, shouldDropRetryOnMove } from "./turn-error.ts";
 
 describe("isRetryableTurnError（重试判定）", () => {
   it("服务端 retryable=true/false 优先于错误码集合", () => {
@@ -39,5 +39,17 @@ describe("explainTurnError（可读文案）", () => {
 
   it("完全空的输入也给可读兜底", () => {
     expect(explainTurnError("", "")).toBe("回合失败");
+  });
+});
+
+describe("shouldDropRetryOnMove（换场景作废旧重试）", () => {
+  it("确实从一个场景换到另一个场景：作废", () => {
+    expect(shouldDropRetryOnMove("loc_lib", "loc_dorm")).toBe(true);
+  });
+
+  it("同场景 / 首次拿到位置 / 位置暂时为空：不误伤", () => {
+    expect(shouldDropRetryOnMove("loc_lib", "loc_lib")).toBe(false);
+    expect(shouldDropRetryOnMove("", "loc_lib")).toBe(false);
+    expect(shouldDropRetryOnMove("loc_lib", "")).toBe(false);
   });
 });

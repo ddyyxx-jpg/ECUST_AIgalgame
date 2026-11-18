@@ -13,7 +13,8 @@ import { turnSuggestions } from "./suggestions.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
 import type { TypeItem } from "./typewriter.ts";
-import { explainTurnError, isRetryableTurnError } from "./turn-error.ts";
+import { explainTurnError, isRetryableTurnError, shouldDropRetryOnMove } from "./turn-error.ts";
+import { npcLocIdFromLinks, targetStillInScene } from "./npc-presence.ts";
 import { errorMessage, phaseLabel } from "./ui.ts";
 import type { Line, LineKind } from "./ui.ts";
 
@@ -393,8 +394,41 @@ export default function App() {
   const retry = useCallback(() => {
     const last = lastTurn.current;
     if (!last) return;
+    // 最后一道保险（issue #21 P2）：位置变化时上面的 effect 已经清过 lastTurn，
+    // 但 NPC 自己也可能在回合之间换场景；重发前用当前状态再核一次在场，
+    // 不在就禁用重试，绝不构造「对 X 说：…」绕过场景隔离。
+    if (last.target) {
+      const currentLocId = view.position?.locId ?? state?.room.scene.locId ?? "";
+      const npcLocId = npcLocIdFromLinks(last.target.id, state?.links ?? []);
+      const presentIds = state?.room.scene.presentIds ?? [];
+      if (!targetStillInScene(last.target, currentLocId, npcLocId, presentIds)) {
+        lastTurn.current = null;
+        setErrRetryable(false);
+        setErr(`${last.target.name} 已不在当前场景，上次失败的重试已失效。`);
+        return;
+      }
+    }
     void dispatchTurn(last.text, last.target, false);
-  }, [dispatchTurn]);
+  }, [dispatchTurn, state, view.position?.locId]);
+
+  /**
+   * 换场景后旧的重试目标不再可信（issue #21 P2）：
+   * 清掉 `lastTurn`；如果重试按钮正显示着，把按钮收掉并说明失效原因。
+   * 重试按钮只可能出现在「上一回合可重试失败」之后，所以清 lastTurn 不影响正常对话。
+   */
+  const lastSceneRef = useRef<string>("");
+  useEffect(() => {
+    const locId = view.position?.locId ?? "";
+    if (!locId) return;
+    const prev = lastSceneRef.current;
+    lastSceneRef.current = locId;
+    if (!shouldDropRetryOnMove(prev, locId)) return;
+    lastTurn.current = null;
+    if (errRetryable) {
+      setErrRetryable(false);
+      setErr("已离开原来的场景，上次失败的重试已失效。");
+    }
+  }, [view.position?.locId, errRetryable]);
 
   if (screen === "title") {
     return (

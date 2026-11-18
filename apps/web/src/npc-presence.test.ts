@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planNpcTalk } from "./npc-presence.ts";
+import { npcLocIdFromLinks, planNpcTalk, targetStillInScene } from "./npc-presence.ts";
 import type { NpcLite, SceneLite } from "./npc-presence.ts";
 
 const SCENES: SceneLite[] = [
@@ -58,5 +58,46 @@ describe("planNpcTalk（点 NPC 的场景隔离判定）", () => {
   it("当前场景为空（还没拿到位置）时不判成在场", () => {
     const plan = planNpcTalk(NPCS, SCENES, "npc_a", "周明远", "");
     expect(plan.kind).toBe("elsewhere");
+  });
+});
+
+describe("npcLocIdFromLinks（从世界状态取 NPC 所在地）", () => {
+  const LINKS = [
+    { kind: "knows", from: "npc_a", to: "npc_b" },
+    { kind: "located_in", from: "npc_a", to: "loc_lib" },
+    { kind: "located_in", from: "npc_b", to: "loc_dorm" },
+  ];
+
+  it("取 located_in 指向的点位，忽略其它关系", () => {
+    expect(npcLocIdFromLinks("npc_a", LINKS)).toBe("loc_lib");
+    expect(npcLocIdFromLinks("npc_b", LINKS)).toBe("loc_dorm");
+  });
+
+  it("没有 located_in / 点为空：返回空串（由调用方按「不可定位」处理）", () => {
+    expect(npcLocIdFromLinks("npc_ghost", LINKS)).toBe("");
+    expect(npcLocIdFromLinks("npc_a", [{ kind: "located_in", from: "npc_a", to: "" }])).toBe("");
+  });
+});
+
+describe("targetStillInScene（重试前复核对话目标）", () => {
+  it("没有对话目标：与场景无关，允许重试", () => {
+    expect(targetStillInScene(null, "loc_lib", "", [])).toBe(true);
+  });
+
+  it("目标在 scene.presentIds 里：允许重试", () => {
+    expect(targetStillInScene({ id: "npc_a" }, "loc_lib", "loc_dorm", ["npc_a"])).toBe(true);
+  });
+
+  it("目标的 located_in 正好是脚下场景：允许重试", () => {
+    expect(targetStillInScene({ id: "npc_a" }, "loc_lib", "loc_lib")).toBe(true);
+  });
+
+  it("目标已在别的场景：禁用重试（防隔空聊天）", () => {
+    expect(targetStillInScene({ id: "npc_b" }, "loc_lib", "loc_dorm")).toBe(false);
+  });
+
+  it("当前位置未知 / 目标不可定位：保守禁用", () => {
+    expect(targetStillInScene({ id: "npc_a" }, "", "loc_lib")).toBe(false);
+    expect(targetStillInScene({ id: "npc_ghost" }, "loc_lib", "")).toBe(false);
   });
 });
