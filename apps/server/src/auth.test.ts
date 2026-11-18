@@ -42,7 +42,10 @@ async function makeApp() {
   return { cfg, deps, app };
 }
 
-const reg = (body: Record<string, unknown>) => ({ method: "POST" as const, url: "/api/v1/auth/register", payload: body });
+/** auth 写路由同样过 CSRF：与普通写请求一样必须带合法 Origin */
+const ORIGIN = { origin: "https://galgame.test" };
+
+const reg = (body: Record<string, unknown>, headers: Record<string, string> = ORIGIN) => ({ method: "POST" as const, url: "/api/v1/auth/register", headers, payload: body });
 
 describe("简易用户系统", () => {
   it("邀请注册 → 自动登录；受保护接口无 Cookie 401，有 Cookie 200", async () => {
@@ -97,15 +100,15 @@ describe("简易用户系统", () => {
     const duplicate = await app.inject(reg({ username: "BOB", password: "password123", inviteCode: "invite-123" }));
     expect(duplicate.statusCode).toBe(409);
 
-    const wrong = await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "bob", password: "wrongpass" } });
+    const wrong = await app.inject({ method: "POST", url: "/api/v1/auth/login", headers: ORIGIN, payload: { username: "bob", password: "wrongpass" } });
     expect(wrong.statusCode).toBe(401);
 
-    const ok = await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "Bob", password: "password123" } });
+    const ok = await app.inject({ method: "POST", url: "/api/v1/auth/login", headers: ORIGIN, payload: { username: "Bob", password: "password123" } });
     expect(ok.statusCode).toBe(200);
     const cookie = cookieOf(ok);
     expect((await app.inject({ method: "GET", url: "/api/v1/auth/me", headers: { cookie } })).statusCode).toBe(200);
 
-    const out = await app.inject({ method: "POST", url: "/api/v1/auth/logout", headers: { cookie, origin: "https://galgame.test" } });
+    const out = await app.inject({ method: "POST", url: "/api/v1/auth/logout", headers: { cookie, ...ORIGIN } });
     expect(out.statusCode).toBe(200);
     expect((await app.inject({ method: "GET", url: "/api/v1/auth/me", headers: { cookie } })).statusCode).toBe(401);
     await app.close();
@@ -124,12 +127,34 @@ describe("简易用户系统", () => {
     await app.close();
   });
 
+  it("CSRF：auth 写路由（register/login/logout/password/reset）跨源或缺失 Origin 一律 403", async () => {
+    const { app, deps } = await makeApp();
+    const cross = { origin: "https://evil.test" };
+    const writes = [
+      { url: "/api/v1/auth/register", payload: { username: "eve", password: "password123", inviteCode: "invite-123" } },
+      { url: "/api/v1/auth/login", payload: { username: "eve", password: "password123" } },
+      { url: "/api/v1/auth/logout", payload: {} },
+      { url: "/api/v1/auth/password", payload: { oldPassword: "password123", newPassword: "newpassword123" } },
+      { url: "/api/v1/auth/reset-password", payload: { username: "eve", credential: "x", newPassword: "newpassword123" } },
+    ];
+    for (const w of writes) {
+      for (const headers of [cross, {}]) {
+        const res = await app.inject({ method: "POST", url: w.url, headers, payload: w.payload });
+        expect(res.statusCode, `${w.url} ${JSON.stringify(headers)}`).toBe(403);
+        expect((res.json() as { code: string }).code).toBe("E_FORBIDDEN");
+      }
+    }
+    // 跨站注册没有落库（不是"先建号再拒绝"）
+    expect(deps.auth.store.listUsers().length).toBe(0);
+    await app.close();
+  });
+
   it("登录连续失败 5 次/分钟 → 429（建议5）", async () => {
     const { app } = await makeApp();
     await app.inject(reg({ username: "dave", password: "password123", inviteCode: "invite-123" }));
     let last = 0;
     for (let i = 0; i < 6; i += 1) {
-      last = (await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "dave", password: "wrongpass" } })).statusCode;
+      last = (await app.inject({ method: "POST", url: "/api/v1/auth/login", headers: ORIGIN, payload: { username: "dave", password: "wrongpass" } })).statusCode;
     }
     expect(last).toBe(429);
     await app.close();

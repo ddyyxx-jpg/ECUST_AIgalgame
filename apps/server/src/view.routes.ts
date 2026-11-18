@@ -63,8 +63,10 @@ export function registerViewRoutes(app: FastifyInstance, deps: ViewRouteDeps): v
     let state: WorldState;
     try {
       state = await deps.store.snapshot(roomId);
-    } catch {
-      return notFound(reply);
+    } catch (e) {
+      // 房间已由 listRooms 证实存在：这里再失败是存档损坏/IO 故障，不能报"房间不存在"
+      console.error(`[view] 读取房间状态失败：${roomId}`, e);
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "房间状态读取失败，请稍后重试" });
     }
     return {
       ok: true,

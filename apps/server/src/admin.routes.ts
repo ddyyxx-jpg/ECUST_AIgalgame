@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { AuthService } from "./auth.ts";
 import type { TurnLedger } from "./quota.ts";
 import type { AdminLog } from "./admin-log.ts";
+import type { AdminTokenGate, TokenVerdict } from "./admin-token.ts";
 import { adminTokenOf } from "./room-guard.ts";
 
 export interface AdminDeps {
@@ -14,6 +15,8 @@ export interface AdminDeps {
   ledger: TurnLedger;
   log: AdminLog;
   adminToken: string;
+  /** 与主路由共用同一实例：令牌失败计数要在所有管理入口间累计，否则限制形同虚设 */
+  gate?: AdminTokenGate;
 }
 
 const StateBody = z.object({ state: z.enum(["active", "suspended", "archived"]), reason: z.string().default("") });
@@ -35,21 +38,28 @@ const ResolveBody = z.object({
   roomId: z.string().optional(),
 });
 
-function operatorOf(req: FastifyRequest, deps: AdminDeps): string | null {
-  const token = adminTokenOf(req.headers);
-  if (token && deps.adminToken && token === deps.adminToken) return "token";
+function operatorOf(req: FastifyRequest, deps: AdminDeps): { operator: string | null; verdict?: TokenVerdict } {
   const user = deps.auth.resolve(req);
-  return user?.role === "admin" ? user.userId : null;
+  const fromSession = user?.role === "admin" ? user.userId : null;
+  const token = adminTokenOf(req.headers);
+  if (!token) return { operator: fromSession };
+  const verdict = deps.gate ? deps.gate.check(token, req.ip) : { ok: !!deps.adminToken && token === deps.adminToken };
+  if (verdict.ok) return { operator: "token" };
+  // 令牌失败仍可退回管理员会话；但被限流时一律 429（fail closed），不给猜令牌留窗口
+  return { operator: fromSession, verdict };
 }
 
 export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void {
   const guard = (req: FastifyRequest, reply: FastifyReply): string | null => {
-    const operator = operatorOf(req, deps);
-    if (!operator) {
-      reply.code(deps.auth.resolve(req) ? 403 : 401).send({ ok: false, code: deps.auth.resolve(req) ? "E_FORBIDDEN" : "E_UNAUTHORIZED", message: "需要管理员权限" });
+    const { operator, verdict } = operatorOf(req, deps);
+    if (verdict?.blocked) {
+      if (verdict.retryAfterMs) reply.header("retry-after", Math.max(1, Math.ceil(verdict.retryAfterMs / 1000)));
+      reply.code(429).send({ ok: false, code: "E_RATE_LIMITED", message: "管理员鉴权失败次数过多，请稍后再试" });
       return null;
     }
-    return operator;
+    if (operator) return operator;
+    reply.code(deps.auth.resolve(req) ? 403 : 401).send({ ok: false, code: deps.auth.resolve(req) ? "E_FORBIDDEN" : "E_UNAUTHORIZED", message: "需要管理员权限" });
+    return null;
   };
   const notFound = (reply: FastifyReply) => reply.code(404).send({ ok: false, code: "E_REF_NOT_FOUND", message: "目标不存在" });
   const publicUser = (u: { userId: string; username: string; role: string; state: string; nickname?: string; createdAt: number }) => ({
@@ -167,7 +177,8 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
     if (!guard(req, reply)) return reply;
     const q = req.query as { userId?: string; state?: string };
     const state = q.state as import("./quota.ts").LedgerState | undefined;
-    return { ok: true, entries: deps.ledger.list({ userId: q.userId, state }) };
+    // skippedLines > 0：上次崩溃留下不可解析行，幂等/对账可能缺记录，需人工确认
+    return { ok: true, entries: deps.ledger.list({ userId: q.userId, state }), skippedLines: deps.ledger.skippedLines };
   });
 
   app.post("/api/v1/admin/quota/:clientTurnId/resolve", async (req, reply) => {

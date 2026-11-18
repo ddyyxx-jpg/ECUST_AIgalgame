@@ -49,6 +49,7 @@ async function register(app: Awaited<ReturnType<typeof makeApp>>["app"], usernam
   const res = await app.inject({
     method: "POST",
     url: "/api/v1/auth/register",
+    headers: ORIGIN,
     payload: { username, password: "password123", inviteCode: "invite-123" },
   });
   expect(res.statusCode).toBe(200);
@@ -165,6 +166,27 @@ describe("房间授权（issue #33，强制登录模式）", () => {
       headers: { cookie: cookieA, "x-admin-token": "wrong" },
     });
     expect(badToken.statusCode).toBe(403);
+    await app.close();
+  });
+  it("存档读取故障 → 503 E_STORE_FAULT，不折叠成 404（也不触发任何写）", async () => {
+    const { deps, app } = await makeApp();
+    const cookieA = await register(app, "alice");
+    const created = await app.inject({ method: "POST", url: "/api/v1/rooms", headers: { cookie: cookieA, ...ORIGIN }, payload: { mode: "solo" } });
+    const { roomId } = created.json() as { roomId: string };
+    const before = await eventCount(deps, roomId);
+    const realSnapshot = deps.store.snapshot.bind(deps.store);
+    deps.store.snapshot = async () => {
+      throw new Error("corrupt jsonl");
+    };
+    for (const path of ["state", "events", "map", "gallery", "history"]) {
+      const res = await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/${path}`, headers: { cookie: cookieA } });
+      expect(res.statusCode, path).toBe(503);
+      expect((res.json() as { code: string }).code, path).toBe("E_STORE_FAULT");
+    }
+    deps.store.snapshot = realSnapshot;
+    expect(await eventCount(deps, roomId)).toBe(before);
+    // 房间仍然存在，故障恢复后照常可读（客户端不会因 404 清掉房间指针）
+    expect((await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/state`, headers: { cookie: cookieA } })).statusCode).toBe(200);
     await app.close();
   });
 });

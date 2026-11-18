@@ -41,7 +41,7 @@ async function setup() {
   const deps = await createApp(testConfig());
   const app = Fastify();
   registerRoutes(app, deps);
-  const reg = await app.inject({ method: "POST", url: "/api/v1/auth/register", payload: { username: "alice", password: "password123", inviteCode: "invite-123" } });
+  const reg = await app.inject({ method: "POST", url: "/api/v1/auth/register", headers: ORIGIN, payload: { username: "alice", password: "password123", inviteCode: "invite-123" } });
   const cookie = cookieOf(reg);
   const created = await app.inject({ method: "POST", url: "/api/v1/rooms", headers: { cookie, ...ORIGIN }, payload: { mode: "solo" } });
   const { roomId, actorId } = created.json() as { roomId: string; actorId: string };
@@ -101,7 +101,7 @@ describe("行动核对端点", () => {
     expect(missing.statusCode).toBe(404);
     expect((missing.json() as { code: string }).code).toBe("E_REF_NOT_FOUND");
 
-    const regB = await app.inject({ method: "POST", url: "/api/v1/auth/register", payload: { username: "bob", password: "password123", inviteCode: "invite-123" } });
+    const regB = await app.inject({ method: "POST", url: "/api/v1/auth/register", headers: ORIGIN, payload: { username: "bob", password: "password123", inviteCode: "invite-123" } });
     const cookieB = cookieOf(regB);
     const forbidden = await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/turns/c1`, headers: { cookie: cookieB } });
     expect(forbidden.statusCode).toBe(403);

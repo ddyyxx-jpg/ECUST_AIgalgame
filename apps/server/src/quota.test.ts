@@ -2,7 +2,7 @@
  * 行动额度账本（收敛稿 B1，docs/03 §5.2.10）：状态机 / 每日额度 / 幂等 / 对账 / 重启重建。
  * 断言状态与错误码，不断言文案。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tempDir } from "@galgame/testkit";
@@ -163,6 +163,34 @@ describe("TurnLedger 状态机", () => {
     await expect(l.transitionDurable({ userId: "u_a", roomId: "room_x", clientTurnId: "c1" }, "running")).rejects.toThrow();
     // flush 仍是"尽力而为"投影写；关键状态由调用方用 transitionDurable 判定
     await expect(l.flush()).resolves.toBeUndefined();
+  });
+
+  it("transitionDurable 返回即已落盘：不 flush 也能被下一进程读回（fsync 语义）", async () => {
+    const file = path.join(tempDir("galgame-quota-durable-fsync-"), "ledger.jsonl");
+    const l1 = new TurnLedger(file);
+    l1.reserve({ ...base, clientTurnId: "c1" });
+    await l1.flush();
+    await l1.transitionDurable({ userId: "u_a", roomId: "room_x", clientTurnId: "c1" }, "committed", { committedSeq: 8 });
+
+    const l2 = new TurnLedger(file);
+    await l2.load();
+    expect(l2.get("c1")).toMatchObject({ state: "committed", committedSeq: 8 });
+  });
+
+  it("坏行（崩溃留下的半截尾行/结构不符）加载时跳过、计数并告警", async () => {
+    const file = path.join(tempDir("galgame-quota-tail-"), "ledger.jsonl");
+    const good = JSON.stringify({ clientTurnId: "c1", roomId: "r1", userId: "u_a", state: "committed", day: "2026-11-18", reservedAt: 1 });
+    await writeFile(file, `${good}\n{"clientTurnId":"c2","roomId":"r1"\n{"clientTurnId":1}\n`, "utf8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const l = new TurnLedger(file);
+      await l.load();
+      expect(l.get("c1")?.state).toBe("committed");
+      expect(l.skippedLines).toBe(2);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("list 按 userId/state 过滤", () => {

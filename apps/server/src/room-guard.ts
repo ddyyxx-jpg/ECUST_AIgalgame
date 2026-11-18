@@ -10,6 +10,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { WorldState } from "../../../packages/shared/src/contract/types.ts";
 import type { AppDeps } from "./routes.ts";
+import { tokenEquals, type TokenVerdict } from "./admin-token.ts";
 
 export type UserIdOf = (req: FastifyRequest, deps: AppDeps, body?: { userId?: string }) => string | undefined;
 
@@ -41,15 +42,27 @@ export async function guardRoom(
   let state: WorldState;
   try {
     state = await deps.store.snapshot(roomId);
-  } catch {
-    reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "房间不存在或事件日志不可读" });
+  } catch (e) {
+    // 存在性已由 roomGate 判过；这里再炸只能是存档损坏/IO 故障，不能折叠成"房间不存在"——
+    // 否则客户端会清掉房间指针，运维也看不到存储故障（复审 P0）。
+    console.error(`[room-guard] 读取房间状态失败：${roomId}`, e);
+    reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "房间状态读取失败，请稍后重试" });
     return null;
   }
 
   const userId = userIdOf(req, deps, opts.body);
 
   const token = adminTokenOf(req.headers);
-  if (token && deps.adminToken && token === deps.adminToken) return { state, userId };
+  if (token) {
+    const verdict: TokenVerdict = deps.adminGate
+      ? deps.adminGate.check(token, req.ip)
+      : { ok: tokenEquals(token, deps.adminToken ?? "") };
+    if (verdict.blocked) {
+      reply.code(429).send({ ok: false, code: "E_RATE_LIMITED", message: "管理员鉴权失败次数过多，请稍后再试" });
+      return null;
+    }
+    if (verdict.ok) return { state, userId };
+  }
 
   const owners = state.room.members.flatMap((m) => (m.userId ? [m.userId] : []));
   if (owners.length === 0) {

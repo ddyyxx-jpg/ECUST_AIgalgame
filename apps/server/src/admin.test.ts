@@ -45,7 +45,7 @@ async function makeApp() {
 }
 
 async function registerPlayer(app: Awaited<ReturnType<typeof makeApp>>["app"], username: string) {
-  const res = await app.inject({ method: "POST", url: "/api/v1/auth/register", payload: { username, password: "password123", inviteCode: "invite-123" } });
+  const res = await app.inject({ method: "POST", url: "/api/v1/auth/register", headers: ORIGIN, payload: { username, password: "password123", inviteCode: "invite-123" } });
   expect(res.statusCode).toBe(200);
   const cookie = cookieOf(res);
   const me = await app.inject({ method: "GET", url: "/api/v1/auth/me", headers: { cookie } });
@@ -75,6 +75,19 @@ describe("管理端点鉴权", () => {
     expect(res.statusCode).toBe(200);
     await app.close();
   });
+
+  it("admin-token 连续失败达阈值 → 429 E_RATE_LIMITED + Retry-After（窗口内正确令牌也拒绝）", async () => {
+    const { app } = await makeApp();
+    for (let i = 0; i < 10; i += 1) {
+      const res = await app.inject({ method: "GET", url: "/api/v1/admin/users", headers: { "x-admin-token": `wrong-${i}` } });
+      expect(res.statusCode, `attempt ${i}`).toBe(401);
+    }
+    const blocked = await app.inject({ method: "GET", url: "/api/v1/admin/users", headers: ADMIN });
+    expect(blocked.statusCode).toBe(429);
+    expect((blocked.json() as { code: string }).code).toBe("E_RATE_LIMITED");
+    expect(blocked.headers["retry-after"]).toBeDefined();
+    await app.close();
+  });
 });
 
 describe("邀请注册", () => {
@@ -86,9 +99,9 @@ describe("邀请注册", () => {
     expect(invite.codeHash).toBeUndefined();
     expect(typeof code).toBe("string");
 
-    const ok = await app.inject({ method: "POST", url: "/api/v1/auth/register", payload: { username: "bob", password: "password123", inviteCode: code } });
+    const ok = await app.inject({ method: "POST", url: "/api/v1/auth/register", headers: ORIGIN, payload: { username: "bob", password: "password123", inviteCode: code } });
     expect(ok.statusCode).toBe(200);
-    const reuse = await app.inject({ method: "POST", url: "/api/v1/auth/register", payload: { username: "carol", password: "password123", inviteCode: code } });
+    const reuse = await app.inject({ method: "POST", url: "/api/v1/auth/register", headers: ORIGIN, payload: { username: "carol", password: "password123", inviteCode: code } });
     expect(reuse.statusCode).toBe(403);
 
     const list = await app.inject({ method: "GET", url: "/api/v1/admin/invites", headers: ADMIN });
@@ -111,15 +124,15 @@ describe("重置凭证", () => {
     expect(typeof credential).toBe("string");
     expect(expiresAt).toBeGreaterThan(Date.now());
 
-    const reset = await app.inject({ method: "POST", url: "/api/v1/auth/reset-password", payload: { username: "alice", credential, newPassword: "newpassword123" } });
+    const reset = await app.inject({ method: "POST", url: "/api/v1/auth/reset-password", headers: ORIGIN, payload: { username: "alice", credential, newPassword: "newpassword123" } });
     expect(reset.statusCode).toBe(200);
     // 旧会话被撤销
     expect((await app.inject({ method: "GET", url: "/api/v1/auth/me", headers: { cookie } })).statusCode).toBe(401);
     // 旧密码失效、新密码可登录
-    expect((await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "alice", password: "password123" } })).statusCode).toBe(401);
-    expect((await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "alice", password: "newpassword123" } })).statusCode).toBe(200);
+    expect((await app.inject({ method: "POST", url: "/api/v1/auth/login", headers: ORIGIN, payload: { username: "alice", password: "password123" } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/api/v1/auth/login", headers: ORIGIN, payload: { username: "alice", password: "newpassword123" } })).statusCode).toBe(200);
     // 凭证一次性：复用被拒
-    expect((await app.inject({ method: "POST", url: "/api/v1/auth/reset-password", payload: { username: "alice", credential, newPassword: "another12345" } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/api/v1/auth/reset-password", headers: ORIGIN, payload: { username: "alice", credential, newPassword: "another12345" } })).statusCode).toBe(401);
     await app.close();
   });
 });
@@ -131,7 +144,7 @@ describe("账号状态 / 设置", () => {
     const suspended = await app.inject({ method: "POST", url: `/api/v1/admin/users/${userId}/state`, headers: { ...ADMIN, ...ORIGIN }, payload: { state: "suspended", reason: "违规" } });
     expect(suspended.statusCode).toBe(200);
     expect((await app.inject({ method: "GET", url: "/api/v1/auth/me", headers: { cookie } })).statusCode).toBe(401);
-    expect((await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "alice", password: "password123" } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/api/v1/auth/login", headers: ORIGIN, payload: { username: "alice", password: "password123" } })).statusCode).toBe(401);
     await app.close();
   });
 
@@ -139,7 +152,7 @@ describe("账号状态 / 设置", () => {
     const { app } = await makeApp();
     const put = await app.inject({ method: "PUT", url: "/api/v1/admin/settings", headers: { ...ADMIN, ...ORIGIN }, payload: { registrationOpen: false, defaultDailyTurns: 5 } });
     expect(put.statusCode).toBe(200);
-    const reg = await app.inject({ method: "POST", url: "/api/v1/auth/register", payload: { username: "bob", password: "password123", inviteCode: "invite-123" } });
+    const reg = await app.inject({ method: "POST", url: "/api/v1/auth/register", headers: ORIGIN, payload: { username: "bob", password: "password123", inviteCode: "invite-123" } });
     expect(reg.statusCode).toBe(403);
     const status = await app.inject({ method: "GET", url: "/api/v1/auth/status" });
     expect(status.json()).toMatchObject({ required: true, registrationOpen: false });

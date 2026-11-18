@@ -80,19 +80,27 @@ curl -k -sS --resolve huaaaji.cloud:443:<公网IP> https://huaaaji.cloud/ | grep
 curl -k https://<公网IP>/api/v1/health
 
 # 注册（邀请码来自 .env）；记下 set-cookie
+# auth 写路由同样过 CSRF：必须带与 GALGAME_PUBLIC_ORIGIN 完全一致的 Origin
 curl -k -i -X POST https://<公网IP>/api/v1/auth/register \
-  -H 'content-type: application/json' \
+  -H 'content-type: application/json' -H 'origin: https://<公网IP>' \
   -d '{"username":"alice","password":"password123","inviteCode":"<邀请码>"}'
 
 # 带 Cookie 建一个房间
 curl -k -X POST https://<公网IP>/api/v1/rooms \
-  -H 'content-type: application/json' -b '<cookie>' -d '{"mode":"solo"}'
+  -H 'content-type: application/json' -H 'origin: https://<公网IP>' -b '<cookie>' -d '{"mode":"solo"}'
 ```
 
-## 6. 注意
+## 6. 注意 / 部署约束
 
 - 单实例；`FileStore` 没有多进程锁，不要扩副本。
+- **会话是进程内存态（部署约束）**：重启/重新部署后所有人需要重新登录；不要把它当持久登录。会话过期项靠访问时清理，长期运行也只在一台进程内。
+- **单进程单写者（部署约束）**：`data/` 同一时刻只能有一个 server 进程写（额度账本、账号库、事件日志都没有跨进程锁）。扩容/滚动发布要停旧起新，不能双跑。
+- **额度 `defaultDailyTurns=null` = 不限（部署约束）**：默认不设日限额；要控成本请在 `PUT /api/v1/admin/settings` 显式给数值。
+- **管理员令牌不自动轮换（部署约束）**：`GALGAME_ADMIN_TOKEN` 只要环境变量不改就一直有效；建议定期换值并重启。显式配置必须 ≥16 字符且高熵，否则**拒绝启动**；未配置时每进程随机生成并打印到控制台（重启即失效，适合临时运维）。
+- **CSRF / Origin（部署约束）**：`GALGAME_PUBLIC_ORIGIN` 必须与浏览器地址栏的源逐字一致（含 scheme 与端口）；auth 写路由与所有 Cookie 写请求都校验它。反代需原样透传 `Origin`（Nginx 默认透传），不要改写。
+- **`GALGAME_TRUST_PROXY=1` 仅在反代后开启**：直连部署开启会让客户端伪造 `X-Forwarded-For` 绕过按 IP 的登录/令牌限流。
 - `data/` 是唯一持久卷，备份它。
+- **额度账本坏行**：启动日志出现 `[quota] ... 行无法解析`，或 `GET /api/v1/admin/quota` 的 `skippedLines>0`，说明上次进程非正常退出（半截尾行）。被跳过的记录不参与幂等/对账，请人工核对对应 `clientTurnId` 后再开放行动。
 - 自签证书浏览器会警告；HTTPS 是 Cookie `Secure` 和密码传输的前提。若只想组内使用，可再加 UFW 源 IP 白名单或 VPN。
 - `GALGAME_AUTH_REQUIRED=1` 后，旧 `X-User-Id` 不再生效；每人一个账号，清 localStorage 不影响账号。
 - 若宿主机 8788 跑着 `LLM_context_checker`，可以把游戏 LLM 流量接进去：

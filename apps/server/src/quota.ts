@@ -9,7 +9,7 @@
  * reserved 尚未真正开跑 → 转 failed 释放额度。否则账号会被永久 E_TURN_BUSY / 占额度。
  * 预留过期不自动释放：unconfirmed 需核对到提交事实或管理员 resolve 才结案（#34 未交付的残留风险）。
  */
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 
 export type LedgerState = "reserved" | "running" | "committed" | "failed" | "unconfirmed";
@@ -78,8 +78,17 @@ export type ResolveResult =
 export class TurnLedger {
   private readonly entries = new Map<string, LedgerEntry>();
   private chain: Promise<unknown> = Promise.resolve();
+  private skippedFromLoad = 0;
 
   constructor(private readonly filePath: string) {}
+
+  /**
+   * 启动加载时被跳过的行数：>0 说明上次进程可能非正常退出（尾部半行）或账本被破坏。
+   * 被跳过的条目不会参与幂等/对账（已提交行动可能被当新请求），所以必须对运维可见。
+   */
+  get skippedLines(): number {
+    return this.skippedFromLoad;
+  }
 
   async load(): Promise<void> {
     let raw: string;
@@ -90,12 +99,13 @@ export class TurnLedger {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
       throw new LedgerUnreadableError(this.filePath, e);
     }
+    let skipped = 0;
     for (const line of raw.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
         const parsed = JSON.parse(trimmed) as unknown;
-        if (!isEntry(parsed)) continue;
+        if (!isEntry(parsed)) throw new Error("账本行结构不符");
         // P1-2：旧进程在途状态不可能还活着。running（已开跑，结果未知）→ 待核对；
         // reserved（还没真正开跑）→ failed 释放额度。避免重启后账号被永久阻塞。
         const entry: LedgerEntry =
@@ -104,8 +114,13 @@ export class TurnLedger {
           parsed;
         this.entries.set(scopeKey(entry), entry);
       } catch {
-        // 半截行跳过
+        // 坏行（多为崩溃留下的半截尾行）跳过，但计数告警：静默会掩盖"已提交记录丢失"
+        skipped += 1;
       }
+    }
+    this.skippedFromLoad = skipped;
+    if (skipped > 0) {
+      console.warn(`[quota] 额度账本有 ${skipped} 行无法解析，已跳过（上次进程可能非正常退出）：${this.filePath}`);
     }
   }
 
@@ -233,7 +248,15 @@ export class TurnLedger {
   private append(entry: LedgerEntry): Promise<void> {
     const run = this.chain.then(async () => {
       await mkdir(path.dirname(this.filePath), { recursive: true });
-      await appendFile(this.filePath, `${JSON.stringify(entry)}\n`, "utf8");
+      // appendFile 到 OS 缓存就返回，崩溃断电会丢掉"已承诺落盘"的最后一条；
+      // transitionDurable 的语义要求 fsync 之后才算写完。
+      const fh = await open(this.filePath, "a");
+      try {
+        await fh.writeFile(`${JSON.stringify(entry)}\n`, "utf8");
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
     });
     this.chain = run.then(() => undefined, () => undefined);
     return run;

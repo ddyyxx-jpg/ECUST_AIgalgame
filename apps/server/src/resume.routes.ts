@@ -59,8 +59,10 @@ export function registerResumeRoutes(app: FastifyInstance, deps: AppDeps, helper
     let state: WorldState;
     try {
       state = await deps.store.snapshot(roomId);
-    } catch {
-      return reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "房间不存在或事件日志不可读" });
+    } catch (e) {
+      // guardRoom 刚刚成功读到过状态：再失败只能是存储故障，不能折叠成"房间不存在"
+      console.error(`[resume] 读取房间状态失败：${roomId}`, e);
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "房间状态读取失败，请稍后重试" });
     }
 
     const query = req.query as { fromTurn?: string; before?: string; limit?: string };

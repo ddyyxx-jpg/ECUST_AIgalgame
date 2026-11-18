@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { hasAudit, hasLlm, loadConfig } from "./config.ts";
 
-const KEYS = ["GALGAME_LLM_BASE_URL", "GALGAME_LLM_MODEL", "GALGAME_LLM_API_KEY", "GALGAME_AUDIT_BASE_URL", "GALGAME_AUDIT_MODEL", "GALGAME_AUDIT_API_KEY"];
+const KEYS = ["GALGAME_ADMIN_TOKEN", "GALGAME_LLM_BASE_URL", "GALGAME_LLM_MODEL", "GALGAME_LLM_API_KEY", "GALGAME_AUDIT_BASE_URL", "GALGAME_AUDIT_MODEL", "GALGAME_AUDIT_API_KEY"];
 const saved = new Map<string, string | undefined>(KEYS.map((k) => [k, process.env[k]]));
 
 afterEach(() => {
@@ -45,5 +45,30 @@ describe("审核器配置", () => {
 
     process.env.GALGAME_AUDIT_API_KEY = "sk-audit";
     expect(hasAudit(loadConfig())).toBe(true);
+  });
+});
+
+describe("管理员令牌强度（复审 P1）", () => {
+  it("显式配置的低熵/过短令牌拒绝启动", () => {
+    clearAudit();
+    for (const weak of ["dev-admin", "admin1234567890123", "aaaaaaaaaaaaaaaa"]) {
+      process.env.GALGAME_ADMIN_TOKEN = weak;
+      expect(() => loadConfig(), weak).toThrow(/GALGAME_ADMIN_TOKEN/);
+    }
+  });
+
+  it("高熵随机令牌通过并原样使用", () => {
+    clearAudit();
+    const strong = "K7pQ2xV9mR4tY8wZ3nB6cL1sD5fG0hJ2";
+    process.env.GALGAME_ADMIN_TOKEN = strong;
+    expect(loadConfig().adminToken).toBe(strong);
+  });
+
+  it("未配置时生成本进程随机令牌（不落默认口令）", () => {
+    clearAudit();
+    const a = loadConfig().adminToken;
+    const b = loadConfig().adminToken;
+    expect(a.length).toBeGreaterThanOrEqual(16);
+    expect(a).not.toBe(b);
   });
 });
