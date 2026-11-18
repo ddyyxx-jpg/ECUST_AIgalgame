@@ -129,7 +129,7 @@
 
 ### 3.3 已知遗留（MINOR，均有记录；按需修）
 
-- **地图**（来自 `map-review.md` M1–M12）：`createDraft` 无鉴权 + draft id 32 位无碰撞检查；save 先改缓存后写盘（写盘失败假成功）；冷启动并发丢更新；tick 先推时间后校验移动（失败时时间已前进）；崩溃遗留 `generating` 无恢复；文件超 300 行（`map.ts` 575 等）；部分测试断言文案/fixture 偏差；docs 版本/坐标范围历史残留；app 层硬编码 map 数据路径；admin token 存 localStorage（已文档明示）。地图 v0.2：NPC 同点偏移 34 世界像素在 fit 缩放下屏幕差约 5px（视觉余量小、无测试）；偏移只读展示，不写状态。
+- **地图**（来自 `map-review.md` M1–M12）：`createDraft` 无鉴权 + draft id 32 位无碰撞检查；save 先改缓存后写盘（写盘失败假成功）；冷启动并发丢更新；tick 先推时间后校验移动（失败时时间已前进，已在 `fix/tick-consistency` 修复）；崩溃遗留 `generating` 无恢复；文件超 300 行（`map.ts` 575 等）；部分测试断言文案/fixture 偏差；docs 版本/坐标范围历史残留；app 层硬编码 map 数据路径；admin token 存 localStorage（已文档明示）。地图 v0.2：NPC 同点偏移 34 世界像素在 fit 缩放下屏幕差约 5px（视觉余量小、无测试）；偏移只读展示，不写状态。
 - **引擎**：`readLog` 失败污染 loaded 已修（PR #9，含 EISDIR 回归）；预算淘汰按插入顺序非 LRU；`bootstrap` 种子直写 + 种子 op abort 时可能半初始化；`trade` 端到端依赖地图/数据文件。另：`xWritesPerTurn=8` 为整回合 x 区限额，双 NPC + 模型各写满时（3+3 模型 + 2 工作记忆 + 2 tombstone = 10）可能 `E_X_LIMIT` 拒整批记忆（叙事两阶段重试仍成功），建议独立预算/放宽并补双 NPC 写满用例（PR #24 复审记录）。
 - **审核/现实锚定**：违规回合连同模块提案一起丢弃（`docs/05` §10.2 已写明理由）；审核测试断言 policy 模板文案（轻度）；子串匹配会漏变体/误伤正常句子（`docs/05` §11.4 已承认）。
 - **文档**：README/AGENTS/MEMORY 职责已收口（PR #10）；剩余：`docs/02` §6 SQL DDL 标“规划中”、`docs/07/08` 内的历史版本句子按需清理。
@@ -245,6 +245,10 @@
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `64f87b6` → squash `cad0cf1` ｜ merge ｜ PR #22 squash 合入 main（无需 rebase）；合并后 34 文件/237 用例 ｜ 首轮通过（2 nit），Codex P2（换场景后重试仍向旧 NPC 说话）修复后复核通过 ｜ tsc 0；8 项契约（3.2.0）；build 287.05 kB / gzip 90.90 kB ｜ 失败回合已流出叙事不回滚；无组件级测试
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `48d91d6` ｜ fix ｜ 点不在场 NPC 不再建立对话对象，改为「TA 不在这里（在「XX」）」+「前往 TA 所在地」（复用 `/map/travel`，到达后自动选中）；新增 `npc-presence.ts` 纯函数判定与测试；`turn.error/retryable` 透传，可重试时对话区给「重试」按钮，用新 `clientTurnId` 重发上次输入、不自动重试；docs/06 §7/§8 同步 ｜ 只在当前场景开聊才能保证「在场」语义；travel 成功要等 `view.position.locId` 到位再选中，避免被换场景清理 effect 覆盖；重试判定以服务端 `retryable` 为准、事件缺字段才回退契约 `RETRYABLE`，不自己维护错误码名单 ｜ tsc 0；34 文件 / 228 用例（新增 web 2 文件 13 例）；check:contract 8 项（3.2.0，未 bump）；build:web 286.13 kB / gzip 90.58 kB ｜ 与 PR #19（登录门/2D 地图）交互：本改动只在 ChatPanel/App 对话流与地图点击回调上，不改 MapView/路由；若 #19 改带 actorId 的 travel 调用签名需同步 `enterScene` 返回值 ｜ 未做：失败回合已流出的部分叙事不回滚（重试会追加新叙事）
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `6af5bd2` ｜ fix ｜ PR #22 评审 P2：换场景后重试仍向旧 NPC 发「对X说：…」。① `view.position.locId` 变化即清 `lastTurn`（`shouldDropRetryOnMove`），重试按钮可见时收掉并提示失效；② `retry` 提交前用当前 WorldState 复核目标在场（`targetStillInScene`：`scene.presentIds` 或 `located_in` 指向脚下），不在则禁用不请求 ｜ 只清旧重试、不动正常对话；复核与 `planNpcTalk` 共用同一套在场定义，避免两处口径漂移；首次拿到位置（prev 空）不算移动 ｜ tsc 0；34 文件 / 237 用例（web 22 例，新增 9）；check:contract 8/8；build:web 未回归 ｜ 未做：失败回合已流出的部分叙事不回滚（重试追加新叙事）
+
+### fix/tick-consistency（issue #38，待 PR）
+
+- 2026-11-18 ｜ `fix/tick-consistency` ｜ `5cd31f5` ｜ fix ｜ issue #38：`MapService.tick` 改为内存投影目标时段 clock 计算模块提案，`time.advance` 与模块提案合并为**一次** atomic `Arbiter.apply`；模块抛错/dryRun 拒绝/apply 拒绝/落盘失败一律零提交，错误码按 rejected→applied.error→E_MODULE_FAULT 映射；docs/06 §4.3 与 docs/03 §2.4 实现说明同步（无协议字段变化，未 bump） ｜ 选全有或全无避免部分成功语义；dryRun 只覆盖模块提案因为引擎伪 cause 会把 `time.advance` 判 E_ILLEGAL_OP，时间校验由合并 apply 的 simulate 完成；apply 内写盘先行，成功后不再额外 flush（否则制造已提交但报错的新不一致） ｜ tsc 0；37 文件/270 用例通过（新增 3 故障注入）；check:contract 8/8（3.2.1） ｜ 未做：#33/#35 按用户指示暂缓，不碰 PR #19 及他人分支
 
 ### 历史分支（已合并 / 已删除，保留记录）
 
