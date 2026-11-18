@@ -183,6 +183,10 @@
 
 - 2026-11-17 ｜ `fix/arbiter-turn-limits` ｜ `872f2a1` → `5a59556` ｜ fix ｜ `Turn` 创建 `TurnBudget` 并跨三次 `apply`（主批/去记忆重提/修复重提）显式传入；`xWritesPerTurn`/`maxDeltaPerTurn` 文档明确为整回合限额；`dryRun` 独立预算；初版文档误写“原实现每批限额”，已改为如实描述（3.1.0 已通过 `cause.causedBy` 隐式共享） ｜ 语义不变、只把隐式共享显式化并补测试，避免把历史写错 ｜ tsc 0；26 文件/189 用例；8 项契约（3.1.0） ｜ 未改：阶段数组扁平拼接、dryRun/权限环境一致性
 
+### fix/llm-robustness（issue #18 / #21-3，待审）
+
+- 2026-11-18 ｜ `fix/llm-robustness` ｜ 本提交 ｜ fix ｜ 引擎侧容忍 LLM 非法 JSON：`turn.parse.ts` 去围栏、取首个平衡 `{...}`（字符串/转义感知）、容忍尾随逗号与前后文本，顶层必须为对象；`TurnLlm.ask` 解析失败（含网关 `json:true` 抛 `E_LLM_FORMAT`）带解析错误摘要自动重问一次，仍失败才 `turn.error`；`turn.error.retryable` 改为按 `RETRYABLE`（`E_LLM_FORMAT`/`E_LLM_TIMEOUT`/`E_RATE_LIMITED` 为 true，`E_MODULE_FAULT` 等硬失败为 false）作为前端重试标记 ｜ 网关是"解析失败即抛"，引擎拿不到坏 raw，所以修复只能落在"容错对齐网关 + 自动重问"；`LlmResult.json` 是可选字段，自定义/旧端口仍必须引擎自己能解析；格式修复与提案拒绝修复分开措辞，避免模型借格式重问改业务内容 ｜ tsc 0；33 文件/225 用例（新增 turn.parse 7 + turn e2e 4）；check:contract 8 项（3.2.0） ｜ web 重试按钮、修复仍失败后的降级策略另任务/Lead 统筹；未 bump CONTRACT_VERSION（docs/03 §10.13 记录）
+
 ### feat/memory-module
 
 - 2026-11-17 ｜ `feat/memory-module` ｜ `<P0>` ｜ docs ｜ 记忆模块 P0 契约：`CONTRACT_VERSION 3.1.0`、`PROMPT_VERSION 2026-11-17.1`、新增 `MemoryTier/MemoryStatus/MemoryProfile/ImpressionNotice`、`Memory.recall/profile`、`TurnRequest.userId`、`RoomMember.userId`、`memory.write` 只增字段、新事件 `memory.tombstoned`/`memory.impression.queued`、33 错误码、`memory.*/canonize.*/impression.*` 配置键、新建 `docs/prompts/04-memory-writer.md`、`00-world-system.md` 加 S1.5 世界记忆占位 ｜ 文档先于代码（§10.10 记录版本影响）；依据 `docs/08` §2；12 op 与 `apiVersion` 不变 → 3.1.0 为 minor（只增字段/类型/事件） ｜ tsc 0；17 文件/134 用例；check:contract 8 项（3.1.0） ｜ 下一步 P1：事件溯源 `memory.ts` + `memory.gate.ts` + 两阶段裁决

@@ -6,10 +6,10 @@ import { emptyRegistry } from "./registry.ts";
 import { DefaultTurn } from "./turn.ts";
 import { ModuleHost } from "./modules.ts";
 import { InMemoryMemory } from "./memory.ts";
-import type { Modules, TurnEvent } from "../../shared/src/index.ts";
+import type { LlmPort, LlmRequest, LlmResult, Modules, TurnEvent } from "../../shared/src/index.ts";
 
 /** 测试只用内存件；ModuleHost 指向不存在的目录 = 零模块，验证"没有玩法回合也能跑完" */
-async function makeTurn(llm: MockLlm, registry = emptyRegistry(), dir = "/tmp/galgame-no-modules") {
+async function makeTurn(llm: LlmPort, registry = emptyRegistry(), dir = "/tmp/galgame-no-modules") {
   const store = new EventSourcedStore({ worldId: "w", locId: "loc_gate" });
   const arbiter = new DefaultArbiter({ store, registry });
   const modules = new ModuleHost({ dir });
@@ -25,6 +25,19 @@ async function collect(it: AsyncIterable<TurnEvent>): Promise<TurnEvent[]> {
 }
 
 const okJson = JSON.stringify({ narrative: "你走进图书馆，空气里全是纸味。", dialogue: "", proposals: [] });
+
+/** 不走网关解析、直接把 raw 交给引擎的端口：LlmResult.json 是可选字段，引擎容错必须自己扛 */
+function rawLlm(raws: string[]): { calls: number; chat: (req: LlmRequest) => Promise<LlmResult> } {
+  const port = {
+    calls: 0,
+    async chat(_req: LlmRequest): Promise<LlmResult> {
+      port.calls += 1;
+      const raw = raws[Math.min(port.calls - 1, raws.length - 1)]!;
+      return { raw, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "raw-test", latencyMs: 0 };
+    },
+  };
+  return port;
+}
 
 describe("turn.run", () => {
   it("skipLLM 时完全不调模型，仍能走完 accepted→commit", async () => {
@@ -45,13 +58,47 @@ describe("turn.run", () => {
     expect(evs.at(-1)?.type).toBe("turn.commit");
   });
 
-  it("模型返回非 JSON 时报 E_LLM_FORMAT 且不提交", async () => {
-    const llm = new MockLlm({ responses: ["抱歉，我不能输出 JSON。"] });
+  it("模型返回非 JSON：自动重问一次仍失败 → E_LLM_FORMAT 且带可重试标记，不提交", async () => {
+    const llm = new MockLlm({ responses: ["抱歉，我不能输出 JSON。", "还是不是 JSON"] });
     const { turn, roomId } = await makeTurn(llm);
     const evs = await collect(turn.run({ roomId, actorId: "plr_self", input: "x", clientTurnId: "c3" }));
-    const err = evs.find((e) => e.type === "turn.error");
-    expect(err && err.type === "turn.error" ? err.code : "").toBe("E_LLM_FORMAT");
+    expect(llm.calls).toBe(2); // 只重问一次，不无限循环
+    const err = evs.at(-1);
+    expect(err?.type).toBe("turn.error");
+    if (err?.type === "turn.error") {
+      expect(err.code).toBe("E_LLM_FORMAT");
+      expect(err.retryable).toBe(true);
+    }
     expect(evs.some((e) => e.type === "turn.commit")).toBe(false);
+  });
+
+  it("尾随逗号：网关已经容忍，引擎侧也不再误报（不触发重问）", async () => {
+    const llm = new MockLlm({ responses: ['{"narrative":"你走进图书馆。","proposals":[],}'] });
+    const { turn, roomId } = await makeTurn(llm);
+    const evs = await collect(turn.run({ roomId, actorId: "plr_self", input: "去图书馆", clientTurnId: "c9" }));
+    expect(llm.calls).toBe(1);
+    expect(evs.at(-1)?.type).toBe("turn.commit");
+  });
+
+  it("自定义 LlmPort 直接给带围栏的 raw（json 字段缺省）→ 引擎容错解析，不重问", async () => {
+    const port = rawLlm(["```json\n" + okJson + "\n```"]);
+    const { turn, roomId } = await makeTurn(port);
+    const evs = await collect(turn.run({ roomId, actorId: "plr_self", input: "去图书馆", clientTurnId: "c10" }));
+    expect(port.calls).toBe(1);
+    expect(evs.some((e) => e.type === "turn.delta")).toBe(true);
+    expect(evs.at(-1)?.type).toBe("turn.commit");
+  });
+
+  it("截断的 JSON：带解析错误自动重问一次后成功提交", async () => {
+    const llm = new MockLlm({ responses: ['{"narrative":"说到一半，然后', okJson] });
+    const { turn, roomId } = await makeTurn(llm);
+    const evs = await collect(turn.run({ roomId, actorId: "plr_self", input: "去图书馆", clientTurnId: "c11" }));
+    expect(llm.calls).toBe(2);
+    expect(evs.at(-1)?.type).toBe("turn.commit");
+    // 第二问是"修格式"，不能伪装成"提案被驳回"，否则模型会去改业务内容
+    const second = llm.requests[1]!.messages.at(-1)?.content ?? "";
+    expect(second).toContain("不是合法 JSON");
+    expect(second).not.toContain("被引擎拒绝");
   });
 
   it("同一 clientTurnId 重复提交完全重放，不再调模型", async () => {
@@ -92,6 +139,9 @@ describe("turn.run", () => {
     expect(llm.calls).toBe(2);
     expect(evs.filter((e) => e.type === "turn.delta")).toHaveLength(1);
     expect(evs.at(-1)?.type).toBe("turn.commit");
+    // 语义拒绝走的是"带拒绝原因"那条重问路径，不是格式修复
+    const repairPrompt = llm.requests[1]!.messages.at(-1)?.content ?? "";
+    expect(repairPrompt).toContain("被引擎拒绝");
   });
 
   it("修复后仍被拒：turn.error，且在 turn.delta 之前（不先宣布成功再回滚）", async () => {
@@ -125,5 +175,7 @@ describe("turn.run", () => {
     const err = evs.at(-1);
     expect(err?.type).toBe("turn.error");
     expect(err && err.type === "turn.error" ? err.code : "").toBe("E_MODULE_FAULT");
+    // 模块 bug 属于硬失败：重试同一输入只会再炸一次，不该显示重试按钮
+    expect(err && err.type === "turn.error" ? err.retryable : true).toBe(false);
   });
 });

@@ -23,7 +23,8 @@ import type {
 } from "../../shared/src/index.ts";
 import type { EventLog } from "./store.ts";
 import type { AuditPolicy, AuditPort } from "./audit.ts";
-import { codeOf, errMessage, parseTurn } from "./turn.parse.ts";
+import { codeOf, errMessage } from "./turn.parse.ts";
+import { RETRYABLE } from "../../shared/src/index.ts";
 import { buildTurnPrompt } from "./turn.prompt.ts";
 import { makeContext } from "./turn.context.ts";
 import { TurnLlm } from "./turn.llm.ts";
@@ -312,7 +313,9 @@ export class DefaultTurn implements Turn {
         }
       }
     } catch (e) {
-      yield emit({ type: "turn.error", code: codeOf(e), message: errMessage(e), retryable: true });
+      const code = codeOf(e);
+      // 只有契约里标为可重试的错误才提示前端重试；E_MODULE_FAULT 这类硬失败重试也没用（issue #21-3）
+      yield emit({ type: "turn.error", code, message: errMessage(e), retryable: RETRYABLE.includes(code) });
     } finally {
       // 不论成功、失败还是抛异常，都释放本回合预算（否则预算表只增不减）
       this.deps.arbiter.endTurn(turnId);
