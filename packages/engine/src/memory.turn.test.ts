@@ -59,9 +59,11 @@ describe("Turn × Memory（P1）", () => {
     const { turn, memory } = await makeTurn({ llm });
     await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "你好", clientTurnId: "c1" }));
     const mine = memory.all(ROOM).filter((r) => r.ownerId === NPC);
-    expect(mine).toHaveLength(1);
-    expect(mine[0]?.tier).toBe("long");
-    expect(mine[0]?.content).toContain("第一次见到");
+    const long = mine.filter((r) => r.tier === "long");
+    expect(long).toHaveLength(1);
+    expect(long[0]?.content).toContain("第一次见到");
+    // 本回合还写一条 short 工作记忆（最近对话，issue #21-2）；长期记忆仍只有种子一条
+    expect(mine.some((r) => r.tier === "short")).toBe(true);
   });
 
   it("下一回合把记忆注入提示词（NPC 不会每次都是初次见面）", async () => {
@@ -115,7 +117,8 @@ describe("Turn × Memory（P1）", () => {
     await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "聊两句", clientTurnId: "c1" }));
     const ids = memory.all(ROOM).map((r) => r.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(memory.all(ROOM)).toHaveLength(3); // 种子 + 两条
+    // 种子 + 两条模型记忆 = 3，已达每 owner 每回合上限，最近对话让位（docs/07 §4.2 取舍）
+    expect(memory.all(ROOM)).toHaveLength(3);
   });
 
   it("记忆被 Arbiter 拒绝时：只多一条 fact、不重问模型、行动照常生效", async () => {

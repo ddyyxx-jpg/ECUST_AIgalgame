@@ -36,7 +36,8 @@ import { createTurnBudget, type DefaultArbiter } from "./arbiter.ts";
 import type { EventSourcedMemory } from "./memory.ts";
 import type { MemoryDraft } from "../../shared/src/index.ts";
 import type { MemoryContext } from "./turn.memory.ts";
-import { attachAboutUserIds, readMemoryContext, seedDrafts, toMemoryProposals } from "./turn.memory.ts";
+import { readMemoryContext } from "./turn.memory.ts";
+import { attachAboutUserIds, recentDrafts, seedDrafts, toMemoryProposals } from "./turn.memory.drafts.ts";
 import { applyMemoryGates } from "./memory.gate.ts";
 import type { Impressions } from "./impressions.ts";
 import { impressionFact } from "./impressions.ts";
@@ -167,18 +168,34 @@ export class DefaultTurn implements Turn {
         if (gate.kind === "ok") {
           llmProposals.push(...first.proposals);
           narrative = first.text;
-          const gated = applyMemoryGates({
-            state,
-            actorId: req.actorId,
-            ownerId: mem.ownerId,
-            ...(mem.userId ? { userId: mem.userId } : {}),
+          // 记忆归属：多 NPC 场景每个在场 NPC 各记一份（#20）；0 NPC 时仍记在玩家名下（旧行为）
+          const units = mem.npcs.length > 0
+            ? mem.npcs.map((v) => ({ ownerId: v.npcId, recent: v.recent, ownedCount: v.ownedCount }))
+            : [{ ownerId: mem.ownerId, recent: mem.recent, ownedCount: mem.ownedCount }];
+          // 模型记忆草稿的 ownerId 是空串（由闸门按 owner 重建）；种子草稿已经带 ownerId
+          const baseDrafts = attachAboutUserIds([...seedDrafts(mem, state, req), ...first.memory], state);
+          // 最近对话排在模型记忆之后：配额满时让位的是工作记忆，不是模型自己的记忆
+          const recent = recentDrafts(mem, state, req, narrative);
+          const accepted: MemoryDraft[] = [];
+          for (const unit of units) {
             // about → aboutUserIds：canonize/印象靠它反查"这件事该告诉哪个账号"
-            drafts: attachAboutUserIds([...seedDrafts(mem, state, req), ...first.memory], state),
-            recent: mem.recent,
-            ownedCount: mem.ownedCount,
-          });
-          memoryDropped += gated.dropped.length;
-          memoryProposals = toMemoryProposals(gated.accepted);
+            const drafts = [
+              ...baseDrafts.filter((d) => d.ownerId === unit.ownerId || d.ownerId === ""),
+              ...recent.filter((d) => d.ownerId === unit.ownerId),
+            ];
+            const gated = applyMemoryGates({
+              state,
+              actorId: req.actorId,
+              ownerId: unit.ownerId,
+              ...(mem.userId ? { userId: mem.userId } : {}),
+              drafts,
+              recent: unit.recent,
+              ownedCount: unit.ownedCount,
+            });
+            memoryDropped += gated.dropped.length;
+            accepted.push(...gated.accepted);
+          }
+          memoryProposals = toMemoryProposals(accepted);
         } else {
           // 审核器故障：文本不下发、提案不采信（可能是被诱导的产物），模块提案照旧
           narrative = this.gate.policy.unavailableText;

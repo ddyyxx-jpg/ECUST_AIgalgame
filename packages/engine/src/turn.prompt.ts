@@ -74,19 +74,37 @@ export function buildTurnPrompt(
     "memory 只写你亲眼所见、亲耳所听的一句话（第一人称视角，不写全知信息、不写数值）；没有值得记的就给空数组。",
     "禁止编造未声明的属性键；只能使用 registry 中存在的属性。",
     "推进优先：玩家的行动没有带来新的世界状态变化时（例如只是环顾四周、站着不动、重复同一个动作），不要重复描写环境；让在场的 NPC 主动开口、给出新信息，或制造一个小事件。同一场景的第二次观察必须给出第一次没有的细节。",
+    "只有在场者能说话/行动：玩家提到不在场的人时，在场的 NPC 只能表示“不在这里/不清楚”，不得替不在场者回答、不得替其编造行动或台词。",
   ];
 
   const s15 = mem && mem.available && mem.permanent.length > 0
     ? [...lines(`这个世界已经知道的事（记忆格式 v${WORLD_MEM_VERSION}，编号 ${mem.permanent.map((h) => h.record.id).sort().join(",")}）：`, mem.permanent)]
     : [];
-  const s4 = npc ? [`当前对话对象：${npc.name}${npc.tags.length ? `（${npc.tags.join("、")}）` : ""}。`] : [];
+  const npcViews = mem?.npcs ?? [];
+  const s4 = npc
+    ? [`当前对话对象：${npc.name}${npc.tags.length ? `（${npc.tags.join("、")}）` : ""}。`]
+    : npcViews.length > 1
+      ? [`当前对话对象：在场的${npcViews.map((v) => v.name).join("、")}（只有在场者能回应）。`]
+      : [];
   const s5 = [
     `当前地点：${where?.name ?? "未知"}；第 ${state.clock.day} 天${PHASE_CN[state.clock.phase] ?? state.clock.phase}。`,
     present.length > 0 ? `在场的人：${present.join("、")}。` : "",
   ].filter((l) => l !== "");
   const s6 = valueLines(state, actorId, opts.registry);
-  const s7 = mem && mem.available ? lines("你（NPC）还记得更早以前的事：", mem.long) : [];
-  const s8 = mem && mem.available ? lines("你（NPC）还记得刚才的事：", mem.short) : [];
+  // 单 NPC 保持旧的“你（NPC）”标题（字节稳定、缓存不白费）；多 NPC 按人分段并标名字（#20）
+  const s7: string[] = [];
+  const s8: string[] = [];
+  if (mem && mem.available) {
+    if (mem.npcs.length > 1) {
+      for (const view of mem.npcs) {
+        s7.push(...lines(`${view.name}（NPC）还记得更早以前的事：`, view.long));
+        s8.push(...lines(`${view.name}（NPC）还记得刚才的事：`, view.short));
+      }
+    } else {
+      s7.push(...lines("你（NPC）还记得更早以前的事：", mem.long));
+      s8.push(...lines("你（NPC）还记得刚才的事：", mem.short));
+    }
+  }
 
   return [
     ...s1,

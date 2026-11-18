@@ -107,6 +107,7 @@ describe("记忆链端到端（复审门槛）", () => {
         profile: null,
         ownedCount: 0,
         recent: [],
+        npcs: [],
       },
     });
     expect(prompt).toContain("这个世界已经知道的事");

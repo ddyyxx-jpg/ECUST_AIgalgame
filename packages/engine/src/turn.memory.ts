@@ -11,16 +11,13 @@ import type {
   MemoryHit,
   MemoryProfile,
   MemoryRecord,
-  Phase,
-  Proposal,
   RoomId,
   TurnRequest,
   WorldState,
 } from "../../shared/src/index.ts";
 import type { EventSourcedMemory } from "./memory.ts";
 import { estimateTokens, worldRoomId } from "./memory.ts";
-import type { MemoryDraft } from "../../shared/src/index.ts";
-import { memoryDraftArgs } from "./memory.gate.ts";
+import { resolveUserId } from "./turn.memory.drafts.ts";
 
 /** 注入硬顶（docs/07 §3）：S1.5 + S7 + S8 合计不超过 1100 token */
 export const INJECT_BUDGET = 1100;
@@ -28,13 +25,19 @@ const PERMANENT_BUDGET = 200;
 const LONG_BUDGET = 700;
 const SHORT_BUDGET = 200;
 
-const PHASE_LABEL: Record<Phase, string> = {
-  morning: "早上",
-  noon: "中午",
-  afternoon: "下午",
-  evening: "傍晚",
-  night: "夜里",
-};
+
+/** 单个在场 NPC 的记忆视角：多 NPC 场景按人分组注入（issue #20） */
+export interface NpcMemory {
+  npcId: ActorId;
+  name: string;
+  long: MemoryHit[];
+  short: MemoryHit[];
+  profile: MemoryProfile | null;
+  /** 该 NPC 已有条数（配额给闸门用） */
+  ownedCount: number;
+  /** 去重用：该 NPC 最近的记录 */
+  recent: MemoryRecord[];
+}
 
 export interface MemoryContext {
   available: boolean;
@@ -53,16 +56,25 @@ export interface MemoryContext {
   ownedCount: number;
   /** 去重用：该 owner 最近的记录 */
   recent: MemoryRecord[];
+  /**
+   * 在场 NPC 各自的记忆（按 presentIds 顺序；0 个 NPC 时为空）。
+   * 单 NPC 时内容与上面的 long/short/profile/recent 一致（保留旧字段是为了兼容调用方）。
+   * 多 NPC 时上面三个字段不再代表某个 NPC，注入/写入都以这里为准。
+   */
+  npcs: NpcMemory[];
+}
+
+/** 场景里所有在场的 NPC（按 presentIds 顺序，保证提示词逐字节稳定） */
+export function presentNpcIds(state: WorldState, actorId: ActorId): ActorId[] {
+  return state.room.scene.presentIds.filter((id) => id !== actorId && state.entities[id]?.kind === "npc");
 }
 
 /**
  * 记忆持有者：场景里恰好一个 NPC → 它；否则玩家自己。
- * 这条规则刻意简单：多 NPC 场景下"谁记得"由导演层决定（P4 接对话），
- * 回合层不要猜。
+ * 多 NPC 场景的注入/写入按 presentNpcIds 分组（见 npcs），这条旧规则只用于兼容字段。
  */
 export function selectOwner(state: WorldState, actorId: ActorId): { ownerId: ActorId; npcId?: ActorId } {
-  const others = state.room.scene.presentIds.filter((id) => id !== actorId);
-  const npcs = others.filter((id) => state.entities[id]?.kind === "npc");
+  const npcs = presentNpcIds(state, actorId);
   if (npcs.length === 1) {
     const npcId = npcs[0]!;
     return { ownerId: npcId, npcId };
@@ -82,13 +94,100 @@ function takeWithin(hits: MemoryHit[], budget: number): MemoryHit[] {
   return out;
 }
 
-/** 读侧：世界层永久记忆 + 该 owner 的长期/短期记忆，按 id 排序保证提示词逐字节稳定（缓存命中） */
+function usedTokens(hits: readonly MemoryHit[]): number {
+  return hits.reduce((n, h) => n + estimateTokens(h.record.content) + 8, 0);
+}
+
+/** 多 NPC 时把一份预算平均分给每个在场 NPC，余数给靠前的（顺序固定 → 提示词稳定） */
+function splitBudget(total: number, n: number): number[] {
+  if (n <= 0) return [];
+  const base = Math.floor(total / n);
+  const rest = total - base * n;
+  return Array.from({ length: n }, (_, i) => base + (i < rest ? 1 : 0));
+}
+
+interface OwnerRead {
+  long: MemoryHit[];
+  short: MemoryHit[];
+  profile: MemoryProfile | null;
+  ownedCount: number;
+  recent: MemoryRecord[];
+}
+
+/** 读某个记忆所有者的长期/短期记忆（owner 视角的召回与配额事实） */
+async function readOwner(
+  memory: EventSourcedMemory,
+  state: WorldState,
+  req: TurnRequest,
+  ownerId: ActorId,
+  userId: Id | undefined,
+  nowTurn: number,
+  sceneTags: string[],
+  longBudget: number,
+  shortBudget: number,
+): Promise<OwnerRead> {
+  const long = await memory.recall({
+    roomId: req.roomId,
+    ownerId,
+    tiers: ["long"],
+    budgetTokens: longBudget,
+    nowTurn,
+    ...(userId ? { userId } : {}),
+    ...(sceneTags.length > 0 ? { tags: sceneTags } : {}),
+    about: [req.actorId],
+  });
+  const short = await memory.recall({
+    roomId: req.roomId,
+    ownerId,
+    tiers: ["short"],
+    budgetTokens: shortBudget,
+    nowTurn,
+    ...(userId ? { userId } : {}),
+    ...(sceneTags.length > 0 ? { tags: sceneTags } : {}),
+    about: [req.actorId],
+  });
+  const owned = memory.all(req.roomId).filter((r) => r.ownerId === ownerId && r.status !== "tombstoned");
+  const profile = userId ? await memory.profile(userId, ownerId, req.roomId) : null;
+  return {
+    long: takeWithin(long, longBudget),
+    short: takeWithin(short, shortBudget),
+    profile,
+    ownedCount: owned.length,
+    recent: [...owned].sort((a, b) => b.turn - a.turn || b.createdAt - a.createdAt).slice(0, 12),
+  };
+}
+
+/** 极端情况下（forced 记忆不占自身预算）可能超过 1100：从后往前的 short、再 long 裁掉尾部 */
+function trimToBudget(permanent: readonly MemoryHit[], npcs: NpcMemory[]): void {
+  let used = usedTokens(permanent) + npcs.reduce((n, v) => n + usedTokens(v.long) + usedTokens(v.short), 0);
+  for (let i = npcs.length - 1; i >= 0 && used > INJECT_BUDGET; i -= 1) {
+    const view = npcs[i]!;
+    while (used > INJECT_BUDGET && view.short.length > 0) {
+      const last = view.short.pop();
+      if (last) used -= estimateTokens(last.record.content) + 8;
+    }
+  }
+  for (let i = npcs.length - 1; i >= 0 && used > INJECT_BUDGET; i -= 1) {
+    const view = npcs[i]!;
+    while (used > INJECT_BUDGET && view.long.length > 0) {
+      const last = view.long.pop();
+      if (last) used -= estimateTokens(last.record.content) + 8;
+    }
+  }
+}
+
+/**
+ * 读侧：世界层永久记忆 + 每个在场 NPC 的长期/短期记忆。
+ * 多 NPC 场景不再退回玩家名下（issue #20 根因）；每段记忆都保留 owner 归属。
+ * 按 owner 顺序 / id 排序，保证提示词逐字节稳定（缓存命中）。
+ */
 export async function readMemoryContext(
   memory: EventSourcedMemory,
   state: WorldState,
   req: TurnRequest,
 ): Promise<MemoryContext> {
   const { ownerId, npcId } = selectOwner(state, req.actorId);
+  const npcIds = presentNpcIds(state, req.actorId);
   const worldId = state.room.worldId;
   const worldRoom = worldRoomId(worldId);
   const userId = resolveUserId(state, req);
@@ -96,118 +195,93 @@ export async function readMemoryContext(
   // 场景标签：地点名（提示词缓存无关，只影响召回打分）
   const loc = state.entities[state.room.scene.locId];
   const sceneTags = loc?.name ? [loc.name] : [];
-  const base = { worldId, worldRoom, ownerId, ownedCount: 0, recent: [] as MemoryRecord[] } as MemoryContext;
+  const base: MemoryContext = {
+    worldId,
+    worldRoom,
+    ownerId,
+    ownedCount: 0,
+    recent: [],
+    available: false,
+    permanent: [],
+    long: [],
+    short: [],
+    profile: null,
+    npcs: [],
+  };
   if (npcId) base.npcId = npcId;
   if (userId) base.userId = userId;
 
   try {
-    const permanent = await memory.recall({
-      roomId: worldRoom,
-      ownerId: "mem_world",
-      tiers: ["permanent"],
-      scope: "world",
-      worldId,
-      budgetTokens: PERMANENT_BUDGET,
-      nowTurn,
-      ...(userId ? { userId } : {}),
-      ...(npcId ? { about: [npcId] } : {}),
-    });
-    const long = await memory.recall({
-      roomId: req.roomId,
-      ownerId,
-      tiers: ["long"],
-      budgetTokens: LONG_BUDGET,
-      nowTurn,
-      ...(userId ? { userId } : {}),
-      ...(sceneTags.length > 0 ? { tags: sceneTags } : {}),
-      about: [req.actorId],
-    });
-    const short = await memory.recall({
-      roomId: req.roomId,
-      ownerId,
-      tiers: ["short"],
-      budgetTokens: SHORT_BUDGET,
-      nowTurn,
-      ...(userId ? { userId } : {}),
-      ...(sceneTags.length > 0 ? { tags: sceneTags } : {}),
-      about: [req.actorId],
-    });
-    const owned = memory.all(req.roomId).filter((r) => r.ownerId === ownerId && r.status !== "tombstoned");
-    const profile = userId ? await memory.profile(userId, ownerId, req.roomId) : null;
+    const permanent = takeWithin(
+      await memory.recall({
+        roomId: worldRoom,
+        ownerId: "mem_world",
+        tiers: ["permanent"],
+        scope: "world",
+        worldId,
+        budgetTokens: PERMANENT_BUDGET,
+        nowTurn,
+        ...(userId ? { userId } : {}),
+        // 单 NPC 时保留"这个世界关于他的话"的过滤；多 NPC 时世界层不偏向某个人
+        ...(npcId ? { about: [npcId] } : {}),
+      }),
+      PERMANENT_BUDGET,
+    );
 
-    const p = takeWithin(permanent, PERMANENT_BUDGET);
-    const l = takeWithin(long, LONG_BUDGET);
-    const s = takeWithin(short, SHORT_BUDGET);
-    // 三段合计再压一次：极端情况下（forced 记忆不占自身预算）可能超过 1100
-    let used = [...p, ...l, ...s].reduce((n, h) => n + estimateTokens(h.record.content) + 8, 0);
-    const trimmedShort = [...s];
-    while (used > INJECT_BUDGET && trimmedShort.length > 0) {
-      const last = trimmedShort.pop();
-      if (last) used -= estimateTokens(last.record.content) + 8;
+    // 没有 NPC：保持旧行为（玩家自己的记忆；注入段会因无 npcId 而用旧标题）
+    if (npcIds.length === 0) {
+      const one = await readOwner(memory, state, req, ownerId, userId, nowTurn, sceneTags, LONG_BUDGET, SHORT_BUDGET);
+      return {
+        ...base,
+        available: true,
+        permanent,
+        long: one.long,
+        short: one.short,
+        profile: one.profile,
+        ownedCount: one.ownedCount,
+        recent: one.recent,
+        npcs: [],
+      };
     }
+
+    const budgetLeft = Math.max(0, INJECT_BUDGET - usedTokens(permanent));
+    const longTotal = Math.floor((budgetLeft * LONG_BUDGET) / (LONG_BUDGET + SHORT_BUDGET));
+    const shortTotal = budgetLeft - longTotal;
+    const longBudgets = npcIds.length === 1 ? [LONG_BUDGET] : splitBudget(longTotal, npcIds.length);
+    const shortBudgets = npcIds.length === 1 ? [SHORT_BUDGET] : splitBudget(shortTotal, npcIds.length);
+
+    const npcs: NpcMemory[] = [];
+    for (let i = 0; i < npcIds.length; i += 1) {
+      const id = npcIds[i]!;
+      const one = await readOwner(
+        memory,
+        state,
+        req,
+        id,
+        userId,
+        nowTurn,
+        sceneTags,
+        longBudgets[i] ?? 0,
+        shortBudgets[i] ?? 0,
+      );
+      npcs.push({ npcId: id, name: state.entities[id]?.name ?? id, ...one });
+    }
+    trimToBudget(permanent, npcs);
+
+    // 单 NPC 时旧字段继续指向那个 NPC（对外兼容）；多 NPC 时旧字段不再代表某个人
+    const single = npcs.length === 1 ? npcs[0]! : undefined;
     return {
       ...base,
       available: true,
-      permanent: p,
-      long: l,
-      short: trimmedShort,
-      profile,
-      ownedCount: owned.length,
-      recent: [...owned].sort((a, b) => b.turn - a.turn || b.createdAt - a.createdAt).slice(0, 12),
+      permanent,
+      long: single ? single.long : [],
+      short: single ? single.short : [],
+      profile: single ? single.profile : null,
+      ownedCount: single ? single.ownedCount : 0,
+      recent: single ? single.recent : [],
+      npcs,
     };
   } catch {
-    return { ...base, available: false, permanent: [], long: [], short: [], profile: null };
+    return { ...base, available: false, permanent: [], long: [], short: [], profile: null, npcs: [] };
   }
-}
-
-/** 首轮种子：NPC 第一次见到玩家时，总要"记得"这件事，否则第一句话就穿帮 */
-export function seedDrafts(mem: MemoryContext, state: WorldState, req: TurnRequest): MemoryDraft[] {
-  if (!mem.available || !mem.npcId) return [];
-  // 只看**这个 NPC 自己**记得什么：世界层有 permanent（"换档后世界记得你"）不代表 NPC 认识玩家，
-  // 否则世界层一有内容，新 NPC 就永远不会种"第一次见到"（审阅 P1）
-  if (mem.profile !== null || mem.long.length + mem.short.length > 0) return [];
-  const me = state.entities[req.actorId];
-  const here = state.entities[state.room.scene.locId];
-  const draft: MemoryDraft = {
-    ownerId: mem.npcId,
-    content: `第 ${state.clock.day} 天${PHASE_LABEL[state.clock.phase]}，我在${here?.name ?? "这里"}第一次见到${me?.name ?? "这个人"}。`,
-    tags: ["初次见面", here?.name ?? "这里"],
-    salience: 4,
-    about: [req.actorId],
-    visibility: "private",
-    tier: "long",
-  };
-  if (mem.userId) draft.userId = mem.userId;
-  return [draft];
-}
-
-/**
- * 印象的反查键：把 about 里的实体映射到成员的账号（canonize 发布后按它投递"世界印象"）。
- * 没有 userId 的成员（未登录/单机）就留空 —— 宁可少投递，不要投错人。
- */
-export function attachAboutUserIds(drafts: readonly MemoryDraft[], state: WorldState): MemoryDraft[] {
-  return drafts.map((d) => {
-    const ids = (d.about ?? [])
-      .map((actorId) => state.room.members.find((m) => m.actorId === actorId)?.userId)
-      .filter((v): v is Id => typeof v === "string" && v.length > 0);
-    if (ids.length === 0) return d;
-    return { ...d, aboutUserIds: [...new Set(ids)].slice(0, 8) };
-  });
-}
-
-/** 写侧：草稿 → 12 原语里的 memory.write（只提议，落库仍归 Arbiter） */
-export function toMemoryProposals(drafts: readonly MemoryDraft[]): Proposal[] {
-  return drafts.map((d) => ({
-    op: "memory.write",
-    args: memoryDraftArgs(d),
-    reason: "记忆",
-    by: "engine.memory",
-  }));
-}
-
-/** 账号维度：请求显式给的优先；否则取房间成员上的绑定（P2 会把这条补齐） */
-export function resolveUserId(state: WorldState, req: TurnRequest): Id | undefined {
-  if (req.userId) return req.userId;
-  const member = state.room.members.find((m) => m.actorId === req.actorId);
-  return member?.userId;
 }
