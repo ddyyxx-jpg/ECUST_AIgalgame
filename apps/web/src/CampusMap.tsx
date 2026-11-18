@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MapScene, MapView } from "./api.ts";
 import { fetchGallery, muttersByNpcId } from "./api-gallery.ts";
+import type { GalleryNpc } from "./api-gallery.ts";
 
 const W = 6000;
 const H = 4500;
@@ -29,10 +30,34 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/** 图鉴拉取的一次结果：成功带 NPC 列表，失败无数据。 */
+export type GalleryOutcome = { ok: true; npcs: GalleryNpc[] } | { ok: false };
+
+/** 地图气泡状态：连同它所属的房间一起记，换房间时据此清空，避免串房泄露旧气泡。 */
+export interface BubbleState {
+  roomId: string;
+  mutters: Record<string, string>;
+}
+
+/**
+ * 纯函数：上一次气泡状态 + 本次图鉴加载事件 → 下一次气泡状态。
+ * - 加载开始（outcome=null）：换房间先清空上一房间的气泡；同房间（version 重拉）保留，避免闪烁；
+ * - 成功：只取图鉴里 met 且有 mutter 的 NPC（未认识不出气泡，issue #54）；
+ * - 失败：换房间保持空表；同房间保留上次成功值（图鉴失败不清空气泡）。
+ */
+export function nextBubbleState(prev: BubbleState, roomId: string, outcome: GalleryOutcome | null): BubbleState {
+  if (outcome?.ok) return { roomId, mutters: muttersByNpcId(outcome.npcs) };
+  // 加载开始或加载失败：换房间一律清空，同房间保留上次成功值
+  if (prev.roomId !== roomId) return { roomId, mutters: {} };
+  return prev;
+}
+
 export interface CampusMapProps {
   map: MapView | null;
   /** 当前房间：气泡台词从房间图鉴读取（只对 met=true 的 NPC 下发） */
   roomId: string;
+  /** 状态版本号：与 GalleryPanel 一致，解锁 NPC 后据此重拉图鉴气泡 */
+  version?: number;
   heroSrc: string;
   talkingTo: string;
   busy: boolean;
@@ -41,30 +66,44 @@ export interface CampusMapProps {
   onEnter: (sceneId: string) => void;
 }
 
-export default function CampusMap({ map, roomId, heroSrc, talkingTo, busy, onTalk, onEnter }: CampusMapProps) {
+export default function CampusMap({
+  map,
+  roomId,
+  version = 0,
+  heroSrc,
+  talkingTo,
+  busy,
+  onTalk,
+  onEnter,
+}: CampusMapProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
   const heroRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
   const [nearScene, setNearScene] = useState<MapScene | null>(null);
   const [nearNpc, setNearNpc] = useState<{ id: string; name: string } | null>(null);
-  /** 头顶气泡台词：只取房间图鉴里 met=true 的 NPC；拉不到图鉴就空表（不出气泡） */
-  const [mutters, setMutters] = useState<Record<string, string>>({});
+  /** 头顶气泡台词：只取房间图鉴里 met=true 的 NPC；换房间清空，图鉴失败保留上次成功值 */
+  const [bubbles, setBubbles] = useState<BubbleState>({ roomId: "", mutters: {} });
 
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId) {
+      setBubbles({ roomId: "", mutters: {} });
+      return;
+    }
     let alive = true;
+    // 换房间立即清空旧气泡（不串房泄露）；同房间 version 重拉保留上次成功值（不闪烁）
+    setBubbles((prev) => nextBubbleState(prev, roomId, null));
     fetchGallery(roomId)
       .then((gallery) => {
-        if (alive) setMutters(muttersByNpcId(gallery.npcs));
+        if (alive) setBubbles((prev) => nextBubbleState(prev, roomId, { ok: true, npcs: gallery.npcs }));
       })
       .catch(() => {
-        if (alive) setMutters({});
+        if (alive) setBubbles((prev) => nextBubbleState(prev, roomId, { ok: false }));
       });
     return () => {
       alive = false;
     };
-  }, [roomId]);
+  }, [roomId, version]);
 
   const posRef = useRef<{ x: number; y: number } | null>(null);
   const keysRef = useRef<Set<string>>(new Set());
@@ -270,7 +309,7 @@ export default function CampusMap({ map, roomId, heroSrc, talkingTo, busy, onTal
         {map.npcs.map((n) => {
           const isNear = nearNpc?.id === n.id;
           const isTalking = talkingTo === n.id;
-          const mutter = mutters[n.id];
+          const mutter = bubbles.mutters[n.id];
           return (
             <button
               type="button"

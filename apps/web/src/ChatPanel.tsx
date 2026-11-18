@@ -38,6 +38,8 @@ export interface ChatPanelProps {
   onPick: (text: string, target?: { id: string; name: string } | null) => void;
   /** 点左上角小地图：展开全屏地图选点 */
   roomId: string;
+  /** 状态版本号：与 GalleryPanel 一致，解锁 NPC 后据此重拉地图气泡 */
+  version?: number;
   onOpenMap: () => void;
   /** 当前开局身份（用于左上角显示自己的头像） */
   heroId: string;
@@ -64,6 +66,7 @@ export default function ChatPanel({
   suggestions,
   onPick,
   roomId,
+  version = 0,
   onOpenMap,
   heroId,
   onEnterScene,
@@ -168,6 +171,7 @@ export default function ChatPanel({
         <CampusMap
           map={map}
           roomId={roomId}
+          version={version}
           heroSrc={`/heroes/hero-${heroId}.png`}
           talkingTo={talking?.id ?? ""}
           busy={busy}
