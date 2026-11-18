@@ -236,6 +236,10 @@
 
 - 2026-11-17 ｜ `feat/map-ux` ｜ `cd12771` → `b11ad5a` → squash `69da448` ｜ feat+fix ｜ 地图交互打磨 + 图鉴 I2 收口（点选不出发/前往入口统一并切回对话/对话流跟随/标题页下沉；`GET /api/v1/registry` 只给声明；图鉴 registry 驱动、删 `trust/guard/mood` 字面键） ｜ 首版基线错误被请求修改（回退记忆接线），rebase 后复审通过；squash 合入 main ｜ tsc 0；26 文件/185 用例；8 项契约（3.1.0）；build:web 271.31 kB / gzip 86.66 kB ｜ issue #3 余项：`/state` 数值过滤、`self` 口径、`scenarios.ts` 数据化；分支在 fork，无法自动删
 
+### fix/auth-room-boundary（issue #37，待 PR）
+
+- 2026-11-18 ｜ `fix/auth-room-boundary` ｜ `278e004` ｜ fix ｜ issue #37：新增 `apps/server/src/room-existence.ts`（`roomExists` 只认 `store.listRooms()` 持久化事实、世界房间优先排除、listRooms 缺失/抛错 fail-closed），`/state`/`/events`/`/history`/`/gallery`/`/turns`/四个 map 端点统一前置存在性预检，未知房间返回 404 `E_ROOM_NOT_FOUND`，杜绝 snapshot 空投影写幽灵存档 ｜ 存在性只认持久化事实而非 snapshot 成功（后者正是根因）；存在性与授权分离，owner 校验不动；`E_ROOM_NOT_FOUND` 沿用既有实现码，不 bump 契约（docs/03 §7 与 shared ERROR_CODES 尚未登记，另行决策） ｜ tsc 0；38 文件/271 用例通过（新增 4）；check:contract 8/8（3.2.1） ｜ 未做：正式契约码登记（需 bump）；#33/#35 按用户指示暂缓，不碰 PR #19 及他人分支
+
 ### feat/gallery-view-scenarios（PR #12，已 squash 合并 `a643d36`）
 
 - 2026-11-17 ｜ `feat/gallery-view-scenarios` ｜ `a0d58ac` ｜ feat ｜ issue #3 收口：新增 `GET /api/v1/rooms/:roomId/gallery`（服务端按 registry 生成 `GalleryView`：public 精确值 / secret 只给低中高三分档且响应不含精确数 / self 对他人只给分档、文本降级「—」 / hidden 不出现 / 未遇见不给档案与读数 / world+未知房间 404）与 `GET /api/v1/scenarios`（`content/scenarios/{openings,npcs}.json` 数据化，坏文件降级空表）；web `GalleryPanel` 改为只渲染 `GalleryView`、删 `api-registry.ts` 与前端 33/66 阈值，`scenarios.ts` 改 fetch 且失败显示「无预设开局」；docs/03 §5.2.5/§5.2.6、docs/06 §7/§8 同步 ｜ 可见性与分档口径放服务端才能保证"响应不含精确数字"；文案进 JSON 才符合 I2/I3；新端点独立成 `view.routes.ts` 并在 routes.ts 末尾独立区块挂载，减少与并行分支的冲突 ｜ tsc 0；**28 文件 / 191 用例**（新增 gallery 3 + scenarios 3）；check:contract 8 项（3.1.0）；build:web 268.65 kB / gzip 84.89 kB；`grep -rnE "attrs\.(trust\|guard\|mood)" apps/web` 空；审阅后修：未知房间改由 `listRooms()` 判 404（补真实 FileStore 路径测试）、self/secret 缺 min/max 降级 masked、文档 `GalleryStat.value` 收窄为 number ｜ 未做：`/state` 原始数值通道过滤、`self` 的"看自己"图鉴视图（本版本不提供）
@@ -245,10 +249,6 @@
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `64f87b6` → squash `cad0cf1` ｜ merge ｜ PR #22 squash 合入 main（无需 rebase）；合并后 34 文件/237 用例 ｜ 首轮通过（2 nit），Codex P2（换场景后重试仍向旧 NPC 说话）修复后复核通过 ｜ tsc 0；8 项契约（3.2.0）；build 287.05 kB / gzip 90.90 kB ｜ 失败回合已流出叙事不回滚；无组件级测试
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `48d91d6` ｜ fix ｜ 点不在场 NPC 不再建立对话对象，改为「TA 不在这里（在「XX」）」+「前往 TA 所在地」（复用 `/map/travel`，到达后自动选中）；新增 `npc-presence.ts` 纯函数判定与测试；`turn.error/retryable` 透传，可重试时对话区给「重试」按钮，用新 `clientTurnId` 重发上次输入、不自动重试；docs/06 §7/§8 同步 ｜ 只在当前场景开聊才能保证「在场」语义；travel 成功要等 `view.position.locId` 到位再选中，避免被换场景清理 effect 覆盖；重试判定以服务端 `retryable` 为准、事件缺字段才回退契约 `RETRYABLE`，不自己维护错误码名单 ｜ tsc 0；34 文件 / 228 用例（新增 web 2 文件 13 例）；check:contract 8 项（3.2.0，未 bump）；build:web 286.13 kB / gzip 90.58 kB ｜ 与 PR #19（登录门/2D 地图）交互：本改动只在 ChatPanel/App 对话流与地图点击回调上，不改 MapView/路由；若 #19 改带 actorId 的 travel 调用签名需同步 `enterScene` 返回值 ｜ 未做：失败回合已流出的部分叙事不回滚（重试会追加新叙事）
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `6af5bd2` ｜ fix ｜ PR #22 评审 P2：换场景后重试仍向旧 NPC 发「对X说：…」。① `view.position.locId` 变化即清 `lastTurn`（`shouldDropRetryOnMove`），重试按钮可见时收掉并提示失效；② `retry` 提交前用当前 WorldState 复核目标在场（`targetStillInScene`：`scene.presentIds` 或 `located_in` 指向脚下），不在则禁用不请求 ｜ 只清旧重试、不动正常对话；复核与 `planNpcTalk` 共用同一套在场定义，避免两处口径漂移；首次拿到位置（prev 空）不算移动 ｜ tsc 0；34 文件 / 237 用例（web 22 例，新增 9）；check:contract 8/8；build:web 未回归 ｜ 未做：失败回合已流出的部分叙事不回滚（重试追加新叙事）
-
-### fix/auth-room-boundary（issue #37，待 PR）
-
-- 2026-11-18 ｜ `fix/auth-room-boundary` ｜ `278e004` ｜ fix ｜ issue #37：新增 `apps/server/src/room-existence.ts`（`roomExists` 只认 `store.listRooms()` 持久化事实、世界房间优先排除、listRooms 缺失/抛错 fail-closed），`/state`/`/events`/`/history`/`/gallery`/`/turns`/四个 map 端点统一前置存在性预检，未知房间返回 404 `E_ROOM_NOT_FOUND`，杜绝 snapshot 空投影写幽灵存档 ｜ 存在性只认持久化事实而非 snapshot 成功（后者正是根因）；存在性与授权分离，owner 校验不动；`E_ROOM_NOT_FOUND` 沿用既有实现码，不 bump 契约（docs/03 §7 与 shared ERROR_CODES 尚未登记，另行决策） ｜ tsc 0；38 文件/271 用例通过（新增 4）；check:contract 8/8（3.2.1） ｜ 未做：正式契约码登记（需 bump）；#33/#35 按用户指示暂缓，不碰 PR #19 及他人分支
 
 ### 历史分支（已合并 / 已删除，保留记录）
 
