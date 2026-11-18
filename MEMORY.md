@@ -156,6 +156,10 @@
 
 > 格式：`- 日期 ｜ 分支 ｜ 提交 ｜ 类型 ｜ 改了什么 ｜ 决策与理由 ｜ 验证 ｜ 遗留`
 
+### fix/map-event-mask（issue #53，PR #55）
+
+- 2026-11-18 ｜ `fix/map-event-mask` ｜ `9d2cbec` ｜ fix ｜ `view-names.ts` 新增 `maskTurnEvents`（snapshot → `unknownPlaceholders` → `maskNamesDeep`），`map.ts` 的 `travel()`/`tick()` 返回前对**整包响应**脱敏；新增 3 条地图出端口径测试，`docs/06` §4.2/§4.3 同步 ｜ 只遮 events 会从 `movedSummaries`（从 state 取未脱敏真名，map.ts:627）漏出真名，故整包遮掩；已知（`knows_name=true`）名不在占位表、不受影响；与 `/turns`、`/events`、`/state`、`/history` 共用掩码原语避免口径漂移；不 bump（派生视图行为修正） ｜ tsc 0；45 文件/315 用例通过（基线 44/312）；check:contract 8 项（3.4.0）；与 PR #56 合并集成 47 文件/320 用例全绿 ｜ 失败响应 ok:false 未遮（message 只含场景 id/名与错误码）；#33/#35 按用户指示忽略
+
 ### fix/turn-idempotency-only（issue #34，PR #50，已 squash 合并 `2c51028`）
 
 - 2026-11-18 ｜ `fix/turn-idempotency-only` ｜ `6f2ba4f` ｜ fix ｜ 基于 3.3.0 只移植 #34：幂等键改为 `JSON.stringify([roomId, actorId, clientTurnId])`，同 key 并发用 `inFlight` promise 串行并回放；`seen.set` + `maybeCompact` + `markDelivered` 全部移到 `yield turn.commit` **之前**，外层 try/finally 保证 break 时也释放锁 ｜ 上游 HTTP 消费者在 commit 处 break 生成器，yield 之后的记账不会执行（issue 根因）；只做 #34，不重复已被 PR #45 合并的 #39；进程内缓存不跨重启（需 EventLog + 契约变更） ｜ tsc 0；39 文件/283 用例通过（新增 4 条幂等）；check:contract 8 项（3.3.0） ｜ #33/#35 按用户指示暂缓；PR #46–#49 被并行合并的 #44/#45 supersede，另行关闭
