@@ -685,6 +685,7 @@ await runTurn(
             onRetry={retry}
             retryable={errRetryable}
             roomId={roomId}
+            version={stateRev}
             onOpenMap={() => setMapOpen(true)}
             heroId={scenario?.id ?? ""}
             onEnterScene={enterScene}
