@@ -425,10 +425,14 @@ describe("MapService · tick", () => {
   it("advance:true 推进一个 phase 并跑模块 tick", async () => {
     const f = await setup();
     f.modules.tickProposals = [{ op: "move.to", args: { actorId: "npc_lin", locId: "loc_canteen" }, reason: "假日程" }];
+    const seqBefore = f.store.seq(ROOM_ID);
     const res = await f.service.tick(ROOM_ID, { advance: true });
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.events.some((e) => e.type === "clock.advanced")).toBe(true);
+    // 时间推进与日程变更同批提交：两类事件都回来，且都进了 store。
+    expect(res.events.filter((e) => e.type === "clock.advanced")).toHaveLength(1);
+    expect(res.events.filter((e) => e.type === "actor.moved")).toHaveLength(1);
+    expect(f.store.seq(ROOM_ID)).toBe(seqBefore + res.events.length);
     expect(f.store.state(ROOM_ID).clock.phase).toBe("noon");
     expect(f.modules.tickedPhases).toEqual(["noon"]);
     expect(res.moved).toEqual([{ actorId: "npc_lin", name: "林夏", from: "loc_library", to: "loc_canteen" }]);
@@ -451,6 +455,66 @@ describe("MapService · tick", () => {
     const res = await f.service.tick(ROOM_ID, { advance: false });
     expect(res).toMatchObject({ ok: false, code: "E_ENTITY_MISSING" });
     expect(f.store.state(ROOM_ID).entities.npc_missing).toBeUndefined();
+  });
+
+  // issue #38：以下三条保证"失败响应 = 真实持久状态"，绝不出现半天没落地、时间已推进。
+  it("advance:true 模块提案失败时时间不推进，重试也不会累积推进（#38）", async () => {
+    const f = await setup();
+    f.modules.tickProposals = [{ op: "move.to", args: { actorId: "npc_missing", locId: "loc_canteen" }, reason: "坏日程" }];
+    const seqBefore = f.store.seq(ROOM_ID);
+    const dayBefore = f.store.state(ROOM_ID).clock.day;
+
+    const first = await f.service.tick(ROOM_ID, { advance: true });
+    expect(first).toMatchObject({ ok: false, code: "E_ENTITY_MISSING" });
+    expect(f.store.state(ROOM_ID).clock.phase).toBe("morning");
+    expect(f.store.state(ROOM_ID).clock.day).toBe(dayBefore);
+    expect(f.store.seq(ROOM_ID)).toBe(seqBefore);
+    expect(f.modules.tickedPhases).toEqual(["noon"]); // 目标是 next phase，但不是已落库的 phase
+
+    const retry = await f.service.tick(ROOM_ID, { advance: true });
+    expect(retry).toMatchObject({ ok: false, code: "E_ENTITY_MISSING" });
+    expect(f.store.state(ROOM_ID).clock.phase).toBe("morning");
+    expect(f.store.seq(ROOM_ID)).toBe(seqBefore);
+    expect(f.modules.tickedPhases).toEqual(["noon", "noon"]);
+  });
+
+  it("模块 tick 抛错时整批不落库（#38）", async () => {
+    const f = await setup();
+    const originalTick = f.modules.tick.bind(f.modules);
+    f.modules.tick = async () => {
+      throw new Error("module exploded");
+    };
+    const seqBefore = f.store.seq(ROOM_ID);
+    try {
+      const res = await f.service.tick(ROOM_ID, { advance: true });
+      expect(res).toMatchObject({ ok: false, code: "E_MODULE_FAULT" });
+      expect(f.store.state(ROOM_ID).clock.phase).toBe("morning");
+      expect(f.store.seq(ROOM_ID)).toBe(seqBefore);
+    } finally {
+      f.modules.tick = originalTick;
+    }
+  });
+
+  it("落盘失败时响应码与持久状态一致（#38）", async () => {
+    const f = await setup();
+    f.modules.tickProposals = [{ op: "move.to", args: { actorId: "npc_lin", locId: "loc_canteen" }, reason: "假日程" }];
+    const originalAppend = f.store.append.bind(f.store);
+    let appendCalls = 0;
+    f.store.append = (roomId, envs) => {
+      appendCalls += 1;
+      if (appendCalls === 1) throw new Error("disk full");
+      return originalAppend(roomId, envs);
+    };
+    const seqBefore = f.store.seq(ROOM_ID);
+    try {
+      const res = await f.service.tick(ROOM_ID, { advance: true });
+      expect(res).toMatchObject({ ok: false, code: "E_STORE_FAULT" });
+      expect(f.store.state(ROOM_ID).clock.phase).toBe("morning");
+      expect(f.store.seq(ROOM_ID)).toBe(seqBefore);
+      expect(appendCalls).toBe(1); // dryRun 不写 store，只有那一次合并 apply
+    } finally {
+      f.store.append = originalAppend;
+    }
   });
 });
 

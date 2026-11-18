@@ -231,41 +231,40 @@ export class MapService {
 
   // -------------------------------------------------------------- tick（不经过 Turn / LLM）
   async tick(roomId: string, opts: { advance?: boolean } = {}): Promise<TickResult> {
-    const events: Envelope[] = [];
-    let phase = (await this.deps.store.snapshot(roomId)).clock.phase;
+    const before = await this.deps.store.snapshot(roomId);
+    const phase = before.clock.phase;
+    const targetPhase = opts.advance ? nextPhase(phase) : phase;
 
-    if (opts.advance) {
-      const applied = await this.deps.arbiter.apply(
-        roomId,
-        [{ op: "time.advance", args: { phase: nextPhase(phase) }, reason: "地图 tick 推进时段", by: "tick" }],
-        this.cause(roomId, "tick"),
-      );
-      const rejected = applied.rejected[0];
-      if (!applied.ok || rejected) {
-        return fail(
-          rejected && isErrorCode(rejected.code) ? rejected.code : "E_MODULE_FAULT",
-          rejected?.detail ?? "time.advance 被拒绝",
-        );
-      }
-      events.push(...applied.events);
-      phase = applied.events.some((e) => e.type === "clock.advanced")
-        ? (await this.deps.store.snapshot(roomId)).clock.phase
-        : phase;
-    }
+    // 模块必须"看到"目标时段的世界（旧实现是先落库 time.advance 再算提案），
+    // 但这里只在内存里投影 clock、绝不写 store。语义镜像 time.advance{phase}：
+    // phase 回绕则 day+1、tick 归零（docs/03 §3 time.advance）。
+    const targetState: WorldState = opts.advance
+      ? {
+          ...before,
+          clock: {
+            ...before.clock,
+            day: before.clock.day + (PHASES.indexOf(targetPhase) <= PHASES.indexOf(phase) ? 1 : 0),
+            phase: targetPhase,
+            tick: 0,
+          },
+        }
+      : before;
 
-    const state = await this.deps.store.snapshot(roomId);
-    const actorId = playerActorId(state);
+    const actorId = playerActorId(targetState);
     let proposals: Proposal[];
     try {
       proposals = await this.deps.modules.tick(
-        this.moduleContext(roomId, actorId, `map.tick:${phase}`, state),
-        phase,
+        this.moduleContext(roomId, actorId, `map.tick:${targetPhase}`, targetState),
+        targetPhase,
       );
     } catch (e) {
+      // 模块抛错发生在任何写入之前：没有提交，响应 ok:false 与持久状态一致。
       return fail(codeOfError(e), e instanceof Error ? e.message : String(e));
     }
+
+    // dryRun 只覆盖模块提案：引擎 dryRun 用不可信的伪 cause，time.advance 会被当成 E_ILLEGAL_OP。
+    // 时间推进的完整校验由下面那次 atomic apply 的 simulate 完成。
     if (proposals.length > 0) {
-      // 先整批 dryRun：任何一条被拒就整批不落库，避免 NPC 半移动、坐标与镜头不一致
       const dry = await this.deps.arbiter.dryRun(roomId, proposals);
       const dryRejected = dry.rejected[0];
       if (!dry.ok || dryRejected) {
@@ -274,13 +273,29 @@ export class MapService {
           dryRejected?.detail ?? "tick 提案未通过 Arbiter 校验",
         );
       }
-      const applied = await this.deps.arbiter.apply(roomId, proposals, this.cause(roomId, "tick"));
+    }
+
+    // 时间推进与模块提案合并为同一批 atomic apply：要么全落库、要么全不落库。
+    // 旧实现先单独 apply(time.advance) 再 apply(模块提案)，后者失败会留下
+    // "时间已前进但日程没落地"的半成品，重试又推进一次（issue #38）。
+    const batch: Proposal[] = opts.advance
+      ? [
+          { op: "time.advance", args: { phase: targetPhase }, reason: "地图 tick 推进时段", by: "tick" },
+          ...proposals,
+        ]
+      : proposals;
+    const events: Envelope[] = [];
+    if (batch.length > 0) {
+      const applied = await this.deps.arbiter.apply(roomId, batch, this.cause(roomId, "tick"));
       const rejected = applied.rejected[0];
       if (!applied.ok || rejected) {
-        return fail(
-          rejected && isErrorCode(rejected.code) ? rejected.code : "E_MODULE_FAULT",
-          rejected?.detail ?? "tick 提案被 Arbiter 拒绝",
-        );
+        // 整批失败（含落盘失败 E_STORE_FAULT）时 store 未变更：ok:false 与持久状态一致。
+        const code = rejected && isErrorCode(rejected.code)
+          ? rejected.code
+          : applied.error && isErrorCode(applied.error.code)
+            ? applied.error.code
+            : "E_MODULE_FAULT";
+        return fail(code, rejected?.detail ?? applied.error?.message ?? "tick 提交被 Arbiter 拒绝");
       }
       events.push(...applied.events);
     }
