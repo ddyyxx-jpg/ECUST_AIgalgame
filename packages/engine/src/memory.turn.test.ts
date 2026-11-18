@@ -27,13 +27,15 @@ function env(seq: number, type: string, payload: unknown): Envelope {
   return { v: 1, id: `evt_seed_${seq}`, roomId: ROOM, seq, ts: 1000 + seq, actorId: "system", type, payload };
 }
 
-async function makeTurn(opts: { llm: MockLlm; limits?: Partial<ArbiterLimits>; memory?: EventSourcedMemory }) {
+async function makeTurn(opts: { llm: MockLlm; limits?: Partial<ArbiterLimits>; memory?: EventSourcedMemory; extraNpcIds?: string[] }) {
+  const extra = opts.extraNpcIds ?? [];
   const store = new EventSourcedStore({ worldId: "w1", locId: GATE });
   store.append(ROOM, [
     env(1, "entity.created", { entity: entity(GATE, "loc", "校门") }),
     env(2, "entity.created", { entity: entity(PLR, "plr", "我") }),
     env(3, "entity.created", { entity: entity(NPC, "npc", "林月", { guard: 10 }) }),
-    env(4, "scene.changed", { locId: GATE, presentIds: [PLR, NPC] }),
+    env(4, "scene.changed", { locId: GATE, presentIds: [PLR, NPC, ...extra] }),
+    ...extra.map((id, i) => env(5 + i, "entity.created", { entity: entity(id, "npc", "在场同学", { guard: 10 }) })),
   ]);
   const memory = opts.memory ?? new EventSourcedMemory();
   const arbiter = new DefaultArbiter({ store, registry: emptyRegistry(), memories: memory, ...(opts.limits ? { limits: opts.limits } : {}) });
@@ -144,5 +146,80 @@ describe("Turn × Memory（P1）", () => {
     const after = rebuilt.all(ROOM).map((r) => `${r.id}|${r.content}|${r.tier}`);
     expect(after).toEqual(before);
     expect(before.length).toBeGreaterThan(0);
+  });
+
+  it("业务提案修复成功后写修复版记忆（issue #39）：被拒版本的叙事/记忆不落库，工作记忆覆盖每个在场 NPC", async () => {
+    const rejectedNarrative = "第一版：他抢走了红书包，然后跑了。";
+    const rejectedMemory = "第一版记忆：他把红书包藏进了柜子";
+    const finalNarrative = "林月把蓝皮书递给我，笑着点点头。";
+    const finalMemory = "修复版记忆：我们约好明天在图书馆见";
+    const llm = new MockLlm({
+      responses: [
+        JSON.stringify({
+          narrative: rejectedNarrative,
+          dialogue: "第一版台词",
+          // 非法 op（12 个原语之外）→ Arbiter 拒绝 → 进入业务修复路径
+          proposals: [{ op: "attr.multiply", args: { entityId: PLR, key: "x.bad", delta: 1 } }],
+          memory: [{ content: rejectedMemory, salience: 4 }],
+        }),
+        JSON.stringify({
+          narrative: finalNarrative,
+          dialogue: "修复版台词",
+          proposals: [],
+          memory: [{ content: finalMemory, salience: 4 }],
+        }),
+      ],
+    });
+    const npc2 = "npc_zhao";
+    const { turn, store, memory } = await makeTurn({ llm, extraNpcIds: [npc2] });
+    const evs = await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "借我书", clientTurnId: "repair_memory" }));
+
+    expect(llm.calls).toBe(2);
+    expect(evs.at(-1)?.type).toBe("turn.commit");
+    const delta = evs.find((e) => e.type === "turn.delta");
+    const deltaText = delta && delta.type === "turn.delta" ? delta.text : "";
+    expect(deltaText).toContain(finalNarrative);
+    expect(deltaText).not.toContain(rejectedNarrative);
+
+    const written = (await store.events(ROOM, 0)).filter((e) => e.type === "memory.written");
+    expect(written.length).toBeGreaterThan(0);
+    const blobs = written.map((e) => JSON.stringify(e.payload));
+    expect(blobs.some((s) => s.includes(finalMemory))).toBe(true);
+    expect(blobs.some((s) => s.includes(rejectedMemory))).toBe(false);
+    expect(blobs.some((s) => s.includes(rejectedNarrative))).toBe(false);
+
+    for (const ownerId of [NPC, npc2]) {
+      const short = memory.all(ROOM).filter((r) => r.ownerId === ownerId && r.tier === "short");
+      expect(short.length).toBeGreaterThan(0);
+      expect(short.some((r) => r.content.includes(finalNarrative))).toBe(true);
+      expect(short.some((r) => r.content.includes(rejectedNarrative))).toBe(false);
+    }
+  });
+
+  it("修复后的记忆被拒：仍走两阶段裁决，行动照常提交（issue #39 保持降级语义）", async () => {
+    const llm = new MockLlm({
+      responses: [
+        JSON.stringify({
+          narrative: "第一版叙事",
+          dialogue: "",
+          proposals: [{ op: "attr.multiply", args: { entityId: PLR, key: "x.bad", delta: 1 } }],
+          memory: [],
+        }),
+        JSON.stringify({
+          narrative: "修复版叙事，玩家把伞还给了林月。",
+          dialogue: "谢谢。",
+          proposals: [],
+          memory: [{ content: "这是一段很长的记忆，故意超出仲裁上限", salience: 4 }],
+        }),
+      ],
+    });
+    // 闸门（200）放行、Arbiter（8）拒绝：修复批里的记忆 proposal 被拒 → 去掉记忆重提
+    const { turn, store } = await makeTurn({ llm, limits: { memoryContentMax: 8 } });
+    const evs = await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "还伞", clientTurnId: "repair_mem_reject" }));
+    expect(llm.calls).toBe(2);
+    expect(evs.at(-1)?.type).toBe("turn.commit");
+    const facts = evs.flatMap((e) => (e.type === "turn.facts" ? e.facts : []));
+    expect(facts.some((f) => f.includes("记忆写入被拒"))).toBe(true);
+    expect((await store.events(ROOM, 0)).some((e) => e.type === "memory.written")).toBe(false);
   });
 });
