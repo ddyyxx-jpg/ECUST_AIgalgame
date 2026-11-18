@@ -175,15 +175,31 @@ export class MapService {
     return { ok: true, map: await this.buildMapView(state, actorId ?? playerActorId(state)) };
   }
 
+  /**
+   * travel / tick 所有返回点的统一出站脱敏出口（issue #53 成功，#58 失败）。
+   *
+   * 成功整包交给 maskTurnEvents；失败响应（MapFail）同属出站视图，message / details
+   * 里的文本同样可能带未认识 NPC 真名，走同一层掩码。maskNamesDeep 只替换未认识
+   * NPC 真名，错误码 / 场景 id 不含人名，不会被误伤。早期失败可能拿不到快照，
+   * 此时 maskTurnEvents 回退到 store.snapshot；已有快照的调用点传入可省一次回放。
+   */
+  private async outbound<T extends TravelResult | TickResult>(
+    result: T,
+    roomId: string,
+    state?: WorldState,
+  ): Promise<T> {
+    return maskTurnEvents<T>(roomId, result, this.deps.store, this.deps.appearance, state);
+  }
+
   // -------------------------------------------------------------- 移动（turn 跑完整流程，skipLLM）
   async travel(roomId: string, actorId: string | undefined, locId: string): Promise<TravelResult> {
     const { refs } = await this.content.sceneRefs();
     const target = refs.get(locId);
-    if (!target) return fail("E_SCENE_NOT_FOUND", `场景 ${locId} 不存在`);
+    if (!target) return this.outbound(fail("E_SCENE_NOT_FOUND", `场景 ${locId} 不存在`), roomId);
     // 规划/在建点只用于地图展示：不能进入，也不触发懒安装
     if (target.scene.status !== "built") {
       const label = target.scene.status === "planned" ? "规划中，尚未建成" : "在建，暂不可进入";
-      return fail("E_FORBIDDEN", `${target.scene.name}${label}`);
+      return this.outbound(fail("E_FORBIDDEN", `${target.scene.name}${label}`), roomId);
     }
 
     const state = await this.deps.store.snapshot(roomId);
@@ -191,11 +207,11 @@ export class MapService {
     if (target.origin === "user") {
       // 已发布场景每次进入都做一次幂等安装：实体可能已 live 但缺边（上次半途失败），要能补齐
       const installFail = await this.installScene(roomId, locId, refs, 0);
-      if (installFail) return installFail;
+      if (installFail) return this.outbound(installFail, roomId, state);
     } else if (!isLive(state, locId)) {
       // canon 新场景首次进入时才懒安装（老场景在建房时已 seed）
       const installFail = await this.installScene(roomId, locId, refs, 0);
-      if (installFail) return installFail;
+      if (installFail) return this.outbound(installFail, roomId, state);
     }
 
     const events: TurnEvent[] = [];
@@ -216,22 +232,22 @@ export class MapService {
         if (event.type === "turn.commit") break;
       }
     } catch (e) {
-      return fail(codeOfError(e), e instanceof Error ? e.message : String(e));
+      return this.outbound(fail(codeOfError(e), e instanceof Error ? e.message : String(e)), roomId, state);
     }
-    if (failure) return failure;
+    if (failure) return this.outbound(failure, roomId, state);
 
     const after = await this.deps.store.snapshot(roomId);
     // 模块对"不可达"会返回 ok:true + 空 proposals，而 Arbiter 部分应用也返回 ok:true；
     // 只看 turn 事件会把"没走动"当成到达。以移动后的权威位置做最终校验。
     const actorLoc = after.links.find((l) => l.kind === "located_in" && l.from === actor)?.to;
     if (after.room.scene.locId !== locId && actorLoc !== locId) {
-      return fail("E_NOT_ADJACENT", `从当前位置无法到达 ${locId}`);
+      return this.outbound(fail("E_NOT_ADJACENT", `从当前位置无法到达 ${locId}`), roomId, after);
     }
     const map = await this.buildMapView(after, actor);
     const scene = this.buildSceneDetail(target, after, refs, npcLocations(after));
-    // 出站脱敏（issue #53）：turn 事件可能带未认识 NPC 真名（turn.delta/facts/patch），
-    // 与 /turns /events /state /history 同口径后再下发；用 after 快照省一次事件日志回放。
-    return maskTurnEvents<TravelResult>(roomId, { ok: true, scene, events, map }, this.deps.store, this.deps.appearance, after);
+    // 出站脱敏（issue #53 成功 / #58 失败）：统一走 outbound，成功整包、失败只遮文本，
+    // 与 /turns /events /state /history 同口径；用 after 快照省一次事件日志回放。
+    return this.outbound<TravelResult>({ ok: true, scene, events, map }, roomId, after);
   }
 
   // -------------------------------------------------------------- tick（不经过 Turn / LLM）
@@ -248,7 +264,7 @@ export class MapService {
         phase,
       );
     } catch (e) {
-      return fail(codeOfError(e), e instanceof Error ? e.message : String(e));
+      return this.outbound(fail(codeOfError(e), e instanceof Error ? e.message : String(e)), roomId, state);
     }
 
     // issue #38：time.advance 与模块提案必须合成**同一批**提交。旧实现先单独提交时间推进，
@@ -266,10 +282,10 @@ export class MapService {
         const dry = await this.deps.arbiter.dryRun(roomId, proposals);
         const dryRejected = dry.rejected[0];
         if (!dry.ok || dryRejected) {
-          return fail(
+          return this.outbound(fail(
             dryRejected && isErrorCode(dryRejected.code) ? dryRejected.code : "E_MODULE_FAULT",
             dryRejected?.detail ?? "tick 提案未通过 Arbiter 校验",
-          );
+          ), roomId, state);
         }
       }
       // apply 默认 atomic：dryRun 与 apply 之间若有竞争/落盘失败，整批回滚（含 time.advance）。
@@ -282,26 +298,20 @@ export class MapService {
             : applied.error && isErrorCode(applied.error.code)
               ? applied.error.code
               : "E_MODULE_FAULT";
-          return fail(code, rejected?.detail ?? applied.error?.message ?? "tick 提案未提交");
+          return this.outbound(fail(code, rejected?.detail ?? applied.error?.message ?? "tick 提案未提交"), roomId, state);
         }
         events.push(...applied.events);
       } catch (e) {
         // 兜底未预期异常；语义与 E_STORE_FAULT 一致：整批未提交
-        return fail(codeOfError(e), e instanceof Error ? e.message : String(e));
+        return this.outbound(fail(codeOfError(e), e instanceof Error ? e.message : String(e)), roomId, state);
       }
     }
 
     const after = await this.deps.store.snapshot(roomId);
     const map = await this.buildMapView(after, actorId);
-    // 出站脱敏（issue #53）：apply 的 envelopes 与 moved 摘要都要过同一层掩码，
-    // 否则 tick 响应会从 payload/state 里漏出未认识 NPC 真名。
-    return maskTurnEvents<TickResult>(
-      roomId,
-      { ok: true, events, moved: movedSummaries(events, after), map },
-      this.deps.store,
-      this.deps.appearance,
-      after,
-    );
+    // 出站脱敏（issue #53 成功 / #58 失败）：apply 的 envelopes 与 moved 摘要都要过
+    // 同一层掩码，否则 tick 响应会从 payload/state 里漏出未认识 NPC 真名。
+    return this.outbound<TickResult>({ ok: true, events, moved: movedSummaries(events, after), map }, roomId, after);
   }
 
   // -------------------------------------------------------------- 场景对话（npc.scene 导演）
