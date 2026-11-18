@@ -93,6 +93,7 @@ npm run replay -- --file data/rooms/<room>.jsonl   # 回放事件日志，查 se
 - **审核**：审核模型必须独立于叙事模型（不同模型/端点），代码里无默认模型名；缺配置即放行并告警。
 - **契约**：接口名/op/事件/错误码只在 [docs/03-接口总表.md](docs/03-接口总表.md)；改语义先改 03 并 bump 版本，再改代码。12 个 op 是闭集。
 - **权限角色**：`packages/engine` 是引擎核心——**引擎改动需项目所有者批准**，不能自行修改；`content/canon/**` 与 `docs/v1/**` 只读。完整权限分级与 AI 协作规则见 [AGENTS.md §3](AGENTS.md)。
+- **部署**：当前仅支持单实例；多实例/多副本禁止共同写同一 `data/` 目录，备份/升级需停写窗口，运维检查清单见 [docs/10-部署与一致性边界.md](docs/10-部署与一致性边界.md)（issue #40）。
 - **已知临时债**：前端图鉴/开局数据仍有 issue #3 的临时债，下次涉及前端/图鉴的合并前收口（详见 [MEMORY.md](MEMORY.md) §3.3）。
 
 ---
@@ -111,6 +112,8 @@ npm run replay -- --file data/rooms/<room>.jsonl   # 回放事件日志，查 se
 | [docs/05-内容边界与AI推演.md](docs/05-内容边界与AI推演.md) | canon/soft/x 三档、AI 能生成什么、转正与回收 |
 | [docs/06-地图模块.md](docs/06-地图模块.md) | 地图模块设计：内容数据、travel、草案状态机、前端 |
 | [docs/07-记忆模块方案.md](docs/07-记忆模块方案.md) · [docs/08-引擎改动要求-记忆模块.md](docs/08-引擎改动要求-记忆模块.md) | 记忆子系统设计稿与引擎改动交接单（已落地，现状见 MEMORY 快照） |
+| [docs/09-存档与会话恢复方案.md](docs/09-存档与会话恢复方案.md) | 存档索引、回合历史、会话恢复 MVP：数据格式、恢复流程、已知限制 |
+| [docs/10-部署与一致性边界.md](docs/10-部署与一致性边界.md) | **部署/运维必读**：仅支持单实例、多实例禁止共写 `data/`、备份与升级停写窗口、运维检查清单（issue #40） |
 | [docs/schemas/v2/](docs/schemas/v2/) | JSON Schema（机器可校验副本，与 `docs/03` 严格对应） |
 | [docs/prompts/](docs/prompts/) | 提示词模板（带 `PROMPT_VERSION`） |
 | [CHANGELOG.md](CHANGELOG.md) | 按合并日期记录版本变化；当前操作手册不在这里 |
