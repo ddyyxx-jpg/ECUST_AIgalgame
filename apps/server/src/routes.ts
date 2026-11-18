@@ -14,6 +14,10 @@ import { isSafeRoomId } from "../../../packages/engine/src/store.ts";
 import { EMPTY_SCENARIOS } from "./scenarios.ts";
 import type { ScenarioCatalog } from "./scenarios.ts";
 import { registerViewRoutes } from "./view.routes.ts";
+import { isWorldRoom, requireExistingRoom, roomNotFound } from "./room-existence.ts";
+
+/** 保留原有导出：其它模块/测试从 routes.ts 取世界房间判定 */
+export { isWorldRoom } from "./room-existence.ts";
 
 export interface AppDeps {
   store: Store;
@@ -76,16 +80,6 @@ export function userIdOf(req: FastifyRequest, deps: AppDeps, body?: { userId?: s
   const fromBody = body?.userId;
   const id = (header ?? fromBody ?? deps.devUser ?? "").trim();
   return id === "" ? undefined : id.slice(0, 64);
-}
-
-const WORLD_ROOM_PREFIX = "room_world_";
-
-/**
- * 世界层房间（room_world_<worldId>）是永久记忆的存储房间，**没有成员、不能进**。
- * 不拦住的话，客户端可以 GET 它的完整事件流，把"这个世界知道的事"连同 sourceRefs/隐私扫描细节全读走（审阅 P1）。
- */
-export function isWorldRoom(roomId: string): boolean {
-  return roomId.startsWith(WORLD_ROOM_PREFIX);
 }
 
 /** 管理员令牌统一从 x-admin-token 头取；校验在 MapService/草案引擎里做 */
@@ -221,17 +215,18 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
 
   app.get("/api/v1/rooms/:roomId/state", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
-    if (isWorldRoom(roomId)) return reply.code(404).send({ error: "E_ROOM_NOT_FOUND" });
+    // #37：snapshot 对未知房间返回空投影，存在性必须先看持久化的房间列表
+    if (!(await requireExistingRoom(reply, deps.store, roomId))) return;
     try {
       return await deps.store.snapshot(roomId);
     } catch {
-      return reply.code(404).send({ error: "E_ROOM_NOT_FOUND" });
+      return roomNotFound(reply, "事件日志不可读");
     }
   });
 
   app.get("/api/v1/rooms/:roomId/events", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
-    if (isWorldRoom(roomId)) return reply.code(404).send({ error: "E_ROOM_NOT_FOUND" });
+    if (!(await requireExistingRoom(reply, deps.store, roomId))) return;
     const q = req.query as { fromSeq?: string; limit?: string };
     const from = Number(q.fromSeq ?? 0);
     const limit = Math.min(Number(q.limit ?? 200), 200);
@@ -242,7 +237,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */
   app.post("/api/v1/rooms/:roomId/turns", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
-    if (isWorldRoom(roomId)) return reply.code(404).send({ code: "E_ROOM_NOT_FOUND", message: "世界层房间不接受回合" });
+    // 存在性在 SSE 头之前判：未知房间不能开流，更不能让 Turn 写出幽灵事件
+    if (!(await requireExistingRoom(reply, deps.store, roomId, { worldMessage: "世界层房间不接受回合" }))) return;
     const body = (req.body ?? {}) as { actorId?: string; input?: string; clientTurnId?: string; userId?: string; options?: Record<string, unknown> };
     if (!body.actorId || !body.input || !body.clientTurnId) {
       return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "actorId/input/clientTurnId 必填" });
@@ -326,28 +322,34 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   });
 
   // ---------------------------------------------------------------- 地图（docs/06 §4）
-  app.get("/api/v1/rooms/:roomId/map", (req, reply) => {
+  // #37：四个地图端点共用房间存在性预检——MapService 的 snapshot 同样会把
+  // 未知房间当空世界，tick/travel 还会经 Arbiter 落库，必须在进 service 前挡住。
+  app.get("/api/v1/rooms/:roomId/map", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (!(await requireExistingRoom(reply, deps.store, roomId))) return;
     const q = req.query as { actorId?: string };
     return safe(reply, () => deps.map.getMap(roomId, q.actorId));
   });
 
-  app.post("/api/v1/rooms/:roomId/map/travel", (req, reply) => {
+  app.post("/api/v1/rooms/:roomId/map/travel", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (!(await requireExistingRoom(reply, deps.store, roomId))) return;
     const parsed = TravelBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) return schemaError(zodMessage(parsed.error));
     return safe(reply, () => deps.map.travel(roomId, parsed.data.actorId, parsed.data.locId));
   });
 
-  app.post("/api/v1/rooms/:roomId/map/tick", (req, reply) => {
+  app.post("/api/v1/rooms/:roomId/map/tick", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (!(await requireExistingRoom(reply, deps.store, roomId))) return;
     const parsed = TickBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) return schemaError(zodMessage(parsed.error));
     return safe(reply, () => deps.map.tick(roomId, parsed.data));
   });
 
-  app.post("/api/v1/rooms/:roomId/map/dialogue", (req, reply) => {
+  app.post("/api/v1/rooms/:roomId/map/dialogue", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (!(await requireExistingRoom(reply, deps.store, roomId))) return;
     const parsed = DialogueBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) return schemaError(zodMessage(parsed.error));
     return safe(reply, () =>

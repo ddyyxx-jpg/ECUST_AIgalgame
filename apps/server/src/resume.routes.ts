@@ -9,6 +9,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { WorldState } from "../../../packages/shared/src/contract/types.ts";
 import type { AppDeps } from "./routes.ts";
+import { roomExists, roomNotFound } from "./room-existence.ts";
 
 /** 从 routes.ts 注入，避免 routes ↔ resume.routes 的运行时循环依赖 */
 export interface ResumeRouteHelpers {
@@ -45,13 +46,16 @@ export function registerResumeRoutes(app: FastifyInstance, deps: AppDeps, helper
       return reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "世界层房间没有可恢复的对话历史" });
     }
 
+    // 存在性先于权限：snapshot 对未知房间返回空投影，不能拿它当"房间存在"（#37）
+    if (!(await roomExists(deps.store, roomId))) return roomNotFound(reply);
+
     // 权限：本房成员可读。老房间（3.1 之前建房、成员表没有 userId）退化为"可读"，
     // 与 /state 的开放程度一致；世界层房间已在上面挡掉。
     let state: WorldState;
     try {
       state = await deps.store.snapshot(roomId);
     } catch {
-      return reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "房间不存在或事件日志不可读" });
+      return roomNotFound(reply, "事件日志不可读");
     }
     const owners = state.room.members.flatMap((member) => (member.userId ? [member.userId] : []));
     const userId = userIdOf(req, deps);
