@@ -167,6 +167,7 @@ export default function ChatPanel({
       <div className="world-shell">
         <CampusMap
           map={map}
+          roomId={roomId}
           heroSrc={`/heroes/hero-${heroId}.png`}
           talkingTo={talking?.id ?? ""}
           busy={busy}

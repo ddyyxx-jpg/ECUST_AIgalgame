@@ -13,8 +13,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MapScene, MapView } from "./api.ts";
-import { fetchNpcProfiles } from "./scenarios.ts";
-import type { NpcProfile } from "./scenarios.ts";
+import { fetchGallery, muttersByNpcId } from "./api-gallery.ts";
 
 const W = 6000;
 const H = 4500;
@@ -32,6 +31,8 @@ function clamp(v: number, lo: number, hi: number): number {
 
 export interface CampusMapProps {
   map: MapView | null;
+  /** 当前房间：气泡台词从房间图鉴读取（只对 met=true 的 NPC 下发） */
+  roomId: string;
   heroSrc: string;
   talkingTo: string;
   busy: boolean;
@@ -40,30 +41,30 @@ export interface CampusMapProps {
   onEnter: (sceneId: string) => void;
 }
 
-export default function CampusMap({ map, heroSrc, talkingTo, busy, onTalk, onEnter }: CampusMapProps) {
+export default function CampusMap({ map, roomId, heroSrc, talkingTo, busy, onTalk, onEnter }: CampusMapProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
   const heroRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
   const [nearScene, setNearScene] = useState<MapScene | null>(null);
   const [nearNpc, setNearNpc] = useState<{ id: string; name: string } | null>(null);
-  /** NPC 公开档案（头顶气泡台词）：内容数据由服务端下发，拉不到就不出气泡 */
-  const [profiles, setProfiles] = useState<Record<string, NpcProfile>>({});
+  /** 头顶气泡台词：只取房间图鉴里 met=true 的 NPC；拉不到图鉴就空表（不出气泡） */
+  const [mutters, setMutters] = useState<Record<string, string>>({});
 
   useEffect(() => {
+    if (!roomId) return;
     let alive = true;
-    fetchNpcProfiles()
-      .then((list) => {
-        if (!alive) return;
-        const map: Record<string, NpcProfile> = {};
-        for (const p of list) map[p.id] = p;
-        setProfiles(map);
+    fetchGallery(roomId)
+      .then((gallery) => {
+        if (alive) setMutters(muttersByNpcId(gallery.npcs));
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (alive) setMutters({});
+      });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [roomId]);
 
   const posRef = useRef<{ x: number; y: number } | null>(null);
   const keysRef = useRef<Set<string>>(new Set());
@@ -269,7 +270,7 @@ export default function CampusMap({ map, heroSrc, talkingTo, busy, onTalk, onEnt
         {map.npcs.map((n) => {
           const isNear = nearNpc?.id === n.id;
           const isTalking = talkingTo === n.id;
-          const mutter = profiles[n.id]?.mutter;
+          const mutter = mutters[n.id];
           return (
             <button
               type="button"

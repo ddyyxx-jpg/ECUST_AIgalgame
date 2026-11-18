@@ -45,6 +45,8 @@ export interface GalleryNpc {
   role?: string;
   traits?: string[];
   line?: string;
+  /** 仅 met 时下发：地图头顶气泡的一句台词（来自 §5.2.6 的 NPC 档案） */
+  mutter?: string;
   /** 仅 met 时有内容；未遇见 = [] */
   stats: GalleryStat[];
 }
@@ -152,7 +154,14 @@ export function buildGalleryView({ roomId, state, registry, profiles, appearance
         met,
         present,
         ...(met && npcLoc !== "" ? { locName: state.entities[npcLoc]?.name ?? npcLoc } : {}),
-        ...(profile !== undefined ? { role: profile.role, traits: profile.traits, line: profile.line } : {}),
+        ...(profile !== undefined
+          ? {
+              role: profile.role,
+              traits: profile.traits,
+              line: profile.line,
+              ...(profile.mutter !== undefined ? { mutter: profile.mutter } : {}),
+            }
+          : {}),
         stats: met ? statsOf(e, decls) : [],
       };
     });

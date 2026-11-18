@@ -58,7 +58,7 @@ describe("loadScenarios", () => {
 });
 
 describe("GET /api/v1/scenarios", () => {
-  it("原样下发开局与 NPC 档案；空目录时返回空数组", async () => {
+  it("下发开局与 NPC 公开字段（id/appearance）；空目录时返回空数组", async () => {
     const scenarios = {
       openings: [{ id: "transfer", name: "转学生", role: "插班生", tagline: "t", opening: ["p1"], hint: "h" }],
       npcs: [{ id: "npc_zhou", role: "主席", traits: ["掌控欲强"], line: "l" }],
@@ -73,7 +73,12 @@ describe("GET /api/v1/scenarios", () => {
 
     const res = await app.inject({ method: "GET", url: "/api/v1/scenarios" });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, ...scenarios });
+    // /scenarios 是公开端点：只收窄下发 id + appearance（issue #54），完整档案走 /gallery
+    expect(res.json()).toEqual({
+      ok: true,
+      openings: scenarios.openings,
+      npcs: [{ id: "npc_zhou" }],
+    });
 
     const emptyApp = Fastify();
     registerViewRoutes(emptyApp, {

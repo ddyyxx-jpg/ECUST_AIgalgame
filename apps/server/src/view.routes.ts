@@ -8,6 +8,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Registry, RoomId, Store, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import { buildGalleryView } from "./gallery.ts";
 import type { ScenarioCatalog } from "./scenarios.ts";
+import { toPublicNpcEntries } from "./scenarios.ts";
 
 /** 与 routes.ts 的 isWorldRoom 同口径：世界层房间不是玩家房间，不对外提供玩家视图 */
 const WORLD_ROOM_PREFIX = "room_world_";
@@ -33,11 +34,11 @@ function notFound(reply: FastifyReply) {
 
 export function registerViewRoutes(app: FastifyInstance, deps: ViewRouteDeps): void {
   // ---------------------------------------------------------------- 开局剧本（内容数据，§5.2.6）
-  /** 只读内容下发：开局文案 + NPC 公开档案；前端不再硬编码（issue #3） */
+  /** 只读内容下发：开局文案 + NPC 公开字段（id/appearance）；完整档案只在 /gallery 且 met 时给（issue #54） */
   app.get("/api/v1/scenarios", async () => ({
     ok: true,
     openings: deps.scenarios.openings,
-    npcs: deps.scenarios.npcs,
+    npcs: toPublicNpcEntries(deps.scenarios.npcs),
   }));
 
   // ---------------------------------------------------------------- 图鉴（服务端 View，§5.2.5）

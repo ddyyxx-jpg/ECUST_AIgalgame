@@ -28,6 +28,8 @@ export interface GalleryNpc {
   role?: string;
   traits?: string[];
   line?: string;
+  /** 仅 met 时下发：地图头顶气泡台词（服务端从 NPC 档案取） */
+  mutter?: string;
   stats: GalleryStat[];
 }
 
@@ -36,6 +38,18 @@ export interface GalleryView {
   player: { actorId: string; locId: string };
   npcs: GalleryNpc[];
   counts: { met: number; total: number; locs: number };
+}
+
+/**
+ * 地图气泡只认图鉴里已认识（met）的 NPC：未认识时服务端根本不下发 mutter。
+ * 拉不到图鉴时调用方拿到空表 → 不出气泡（issue #54）。
+ */
+export function muttersByNpcId(npcs: GalleryNpc[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const npc of npcs) {
+    if (npc.met && npc.mutter) out[npc.id] = npc.mutter;
+  }
+  return out;
 }
 
 export async function fetchGallery(roomId: string): Promise<GalleryView> {

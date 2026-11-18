@@ -40,6 +40,23 @@ export const NpcProfileSchema = z.object({
 });
 export type NpcProfile = z.infer<typeof NpcProfileSchema>;
 
+/**
+ * `GET /api/v1/scenarios` 对外只暴露公开字段（地图气泡/占位名够用，issue #54）。
+ * 完整档案（role/traits/line/mutter）只在房间图鉴 `/gallery` 且 met=true 时下发。
+ */
+export interface PublicNpcEntry {
+  id: string;
+  appearance?: string;
+}
+
+/** 下发前收窄为公开字段：绝不把角色档案带出这个全局公开端点 */
+export function toPublicNpcEntries(npcs: NpcProfile[]): PublicNpcEntry[] {
+  return npcs.map((npc) => ({
+    id: npc.id,
+    ...(npc.appearance !== undefined ? { appearance: npc.appearance } : {}),
+  }));
+}
+
 export interface ScenarioCatalog {
   openings: Scenario[];
   npcs: NpcProfile[];
