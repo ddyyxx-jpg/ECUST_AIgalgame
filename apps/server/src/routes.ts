@@ -3,10 +3,12 @@
  * 不含业务规则；游戏层拒绝一律 HTTP 200 + {ok:false,code,message}，500 只表示未预期异常。
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { Memory, MemoryRecord, Registry, Store, Turn, TurnEvent } from "../../../packages/shared/src/contract/types.ts";
+import type { Memory, MemoryRecord, Registry, Store, Turn, TurnEvent, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
 import type { LlmSettings } from "./settings.ts";
+import { maskNamesDeep, unknownPlaceholders } from "./view-names.ts";
+import { isAskNameInput, namesIntroducedIn } from "./name-unlock.ts";
 import type { SaveIndex } from "./saves.ts";
 import type { TurnHistory } from "./turn-history.ts";
 import { registerResumeRoutes } from "./resume.routes.ts";
@@ -24,6 +26,10 @@ export interface AppDeps {
   settings: LlmSettings;
   /** 注册表（属性声明）；/api/v1/registry 给前端按数据渲染面板用（I2） */
   registry: Registry;
+  /** npcId → 外貌描述（content/scenarios/npcs.json 的 appearance）：未认识时的占位名 */
+  appearance?: Map<string, string>;
+  /** 解锁"玩家知道了这些 NPC 的名字"（回合文本里对方自报姓名后调用，见 name-unlock.ts） */
+  learnNpcNames?(roomId: string, npcIds: string[]): Promise<void>;
   /** 读取账号维度的私忆档案（GET /api/v1/me）；记忆是日志投影，这里只读 */
   memory: Memory & { all(roomId: string): MemoryRecord[]; get?(memoryId: string): MemoryRecord | undefined };
   createRoom(mode: "solo" | "coop", userId?: string): Promise<{ roomId: string; actorId: string }>;
@@ -243,7 +249,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const { roomId } = req.params as { roomId: string };
     if (!(await roomGate(roomId, reply))) return reply;
     try {
-      return await deps.store.snapshot(roomId);
+      const snapshot = await deps.store.snapshot(roomId);
+      // 原始快照里带着实体真名：未认识的人必须在这里也脱敏，否则"服务端不下发真名"
+      // 只是口号——新建房间就能从 /state 看光所有 NPC（审阅 P0-1）。
+      return maskNamesDeep(snapshot, unknownPlaceholders(snapshot, deps.appearance));
     } catch {
       return reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "房间不存在或事件日志不可读" });
     }
@@ -256,14 +265,24 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const from = Number(q.fromSeq ?? 0);
     const limit = Math.min(Number(q.limit ?? 200), 200);
     const events = await deps.store.events(roomId, from, limit);
-    return { events, lastSeq: events.length ? events[events.length - 1]!.seq : from };
+    // 历史回放同样脱敏：旧回合的叙事里可能带着尚未认识的人的真名
+    const placeholders = unknownPlaceholders(await deps.store.snapshot(roomId), deps.appearance);
+    return { events: maskNamesDeep(events, placeholders), lastSeq: events.length ? events[events.length - 1]!.seq : from };
   });
 
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */
   app.post("/api/v1/rooms/:roomId/turns", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
     if (!(await roomGate(roomId, reply))) return reply;
-    const body = (req.body ?? {}) as { actorId?: string; input?: string; clientTurnId?: string; userId?: string; options?: Record<string, unknown> };
+    const body = (req.body ?? {}) as {
+      actorId?: string;
+      input?: string;
+      clientTurnId?: string;
+      userId?: string;
+      /** 这次行动在跟哪个 NPC 说话（前端点 NPC 时给）：用于提示词换真名 + 问名字后解锁谁 */
+      targetNpcId?: string;
+      options?: Record<string, unknown>;
+    };
     if (!body.actorId || !body.input || !body.clientTurnId) {
       return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "actorId/input/clientTurnId 必填" });
     }
@@ -275,18 +294,77 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     });
     try {
       const userId = userIdOf(req, deps, body as { userId?: string });
+      // 玩家点的是某个 NPC：前端会把"对一位陌生的同学说：…"写进行动语义，
+      // 服务端在这里把占位名换成真名（只影响喂给模型的 input，不影响下发给玩家的显示），
+      // 否则模型看到"一位陌生的同学"根本不知道在跟谁说话，回答必然驴唇不对马嘴。
+      const snapshotForInput = await deps.store.snapshot(roomId);
+      const target = body.targetNpcId ? snapshotForInput.entities[body.targetNpcId] : undefined;
+      // 只有"目标此刻就在玩家所在场景"才允许实名化：不在场的人不能借这次行动被解锁/点名（P1-4）
+      const targetPresent = target !== undefined && snapshotForInput.room.scene.presentIds.includes(target.id);
+      // 前端写进来的目标名可能是外貌占位名，统一换成真名再喂模型
+      const promptInput =
+        target && target.kind === "npc" && targetPresent
+          ? body.input.replace(/(?:一位|另一位|第[三四五六七八九十]位)?陌生的同学/gu, target.name)
+          : body.input;
     const it = deps.turn.run({
       roomId,
       actorId: body.actorId,
-      input: body.input,
+      input: promptInput,
       clientTurnId: body.clientTurnId,
       options: body.options as never,
       ...(userId ? { userId } : {}),
     });
+      // 叙事/台词里模型会写出 NPC 真名（"严守一：嗯？…"）。不认识的人要遮成占位名，但
+      // **必须按本回合结束后的状态判断**：玩家这一回合问「你叫什么」，NPC 回答"我叫林静"，
+      // 此时已经认识——遮住反而会出现"陌生人自我介绍"这种荒谬结果。
+      // 所以先收齐事件，再用最终 patch 的 state 算一次名单，然后统一写出。
+      const events: TurnEvent[] = [];
       for await (const ev of it as AsyncIterable<TurnEvent>) {
-        sseWrite(reply.raw, ev.type, ev);
+        events.push(ev);
         if (ev.type === "turn.commit" || ev.type === "turn.error") break;
       }
+      let finalState: WorldState | undefined;
+      for (const ev of events) {
+        const state = (ev as { state?: WorldState }).state;
+        if (ev.type === "turn.patch" && state) finalState = state;
+      }
+      // 「玩家知道了谁的名字」两条确定性来源：
+      //   ① 这次行动有明确对话对象（targetNpcId）且玩家在问名字 → 解锁该 NPC（唯一、可判、不靠猜文本）；
+      //   ② 没有对象时（自由输入）退回台词判定：台词内容里自报姓名才算，旁白提到不算。
+      //
+      // 硬约束（审阅 P1-3/P1-4）：
+      // - 只有回合真的提交（turn.commit）才解锁——失败回合不落状态；
+      // - 目标必须此刻在玩家所在场景（presentIds）里——不在场的人解锁不了。
+      const committed = events.some((ev) => ev.type === "turn.commit");
+      if (deps.learnNpcNames && committed) {
+        const snapshot = finalState ?? (await deps.store.snapshot(roomId));
+        const npcs = Object.values(snapshot.entities).filter((e) => e.kind === "npc" && e.status === "active");
+        const learnedIds = new Set<string>();
+        const presentIds = new Set(snapshot.room.scene.presentIds);
+        if (body.targetNpcId && isAskNameInput(body.input)) {
+          const targetNpc = snapshot.entities[body.targetNpcId];
+          if (targetNpc && targetNpc.kind === "npc" && presentIds.has(targetNpc.id)) learnedIds.add(targetNpc.id);
+        }
+        if (!body.targetNpcId) {
+          const speech = events
+            .flatMap((ev) => {
+              const d = ev as { type?: string; field?: string; text?: string; facts?: string[] };
+              if (d.type === "turn.delta" && typeof d.text === "string") return [d.text];
+              if (d.type === "turn.facts" && Array.isArray(d.facts)) return d.facts;
+              return [];
+            })
+            .join("\n");
+          for (const npc of namesIntroducedIn(speech, npcs)) {
+            if (presentIds.has(npc.id)) learnedIds.add(npc.id);
+          }
+        }
+        if (learnedIds.size > 0) {
+          await deps.learnNpcNames(roomId, [...learnedIds]);
+          finalState = await deps.store.snapshot(roomId);
+        }
+      }
+      const placeholders = unknownPlaceholders(finalState ?? (await deps.store.snapshot(roomId)), deps.appearance);
+      for (const ev of events) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, placeholders));
     } catch (e) {
       sseWrite(reply.raw, "turn.error", { type: "turn.error", code: "E_UPSTREAM", message: String(e), retryable: true });
     } finally {
@@ -295,7 +373,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     return reply;
   });
 
-  // ---------------------------------------------------------------- 世界层永久记忆（docs/08 §9.3，管理员）
+  /** 世界层永久记忆（docs/08 §9.3，管理员） */
   app.post("/api/v1/admin/canonize/run", async (req, reply) => {
     if (!deps.canonize) return reply.code(404).send({ ok: false, code: "E_FORBIDDEN", message: "canonize 未启用" });
     if (!adminTokenOf(req.headers) || adminTokenOf(req.headers) !== (deps.adminToken ?? "")) {
@@ -415,5 +493,6 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     },
     registry: deps.registry,
     scenarios: deps.scenarios ?? EMPTY_SCENARIOS,
+    appearance: deps.appearance,
   });
 }

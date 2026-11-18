@@ -23,6 +23,8 @@ export interface ViewRouteDeps {
   };
   registry: Registry;
   scenarios: ScenarioCatalog;
+  /** npcId → 外貌描述（未认识时的占位名） */
+  appearance?: Map<string, string>;
 }
 
 function notFound(reply: FastifyReply) {
@@ -61,7 +63,7 @@ export function registerViewRoutes(app: FastifyInstance, deps: ViewRouteDeps): v
     }
     return {
       ok: true,
-      gallery: buildGalleryView({ roomId, state, registry: deps.registry, profiles: deps.scenarios.npcs }),
+      gallery: buildGalleryView({ roomId, state, registry: deps.registry, profiles: deps.scenarios.npcs, appearance: deps.appearance }),
     };
   });
 }

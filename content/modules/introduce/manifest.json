@@ -1,0 +1,20 @@
+{
+  "id": "introduce",
+  "name": "自我介绍",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "dependsOn": [],
+  "capabilities": {
+    "intents": ["introduce.self"],
+    "tools": [],
+    "triggers": [],
+    "views": [],
+    "contentFiles": [],
+    "keywords": ["我叫", "我的名字", "名字叫", "名字是", "叫我", "自我介绍一下", "你叫什么", "怎么称呼", "贵姓", "你是哪位"]
+  },
+  "priority": 30,
+  "costWeight": 0,
+  "budget": { "maxLlmCallsPerRoomHour": 0, "maxTokensPerTurn": 0 },
+  "limits": { "proposalsPerTurn": 8, "maxArrayItems": 20 },
+  "entryLocations": []
+}

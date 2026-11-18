@@ -145,11 +145,13 @@ export async function runTurn(
   input: string,
   clientTurnId: string,
   h: TurnStreamHandlers,
+  /** 这次行动在跟哪个 NPC 说话（可选）：服务端据此在提示词里换成真名，并决定"问名字后解锁谁" */
+  targetNpcId?: string,
 ): Promise<void> {
   const r = await fetch(`/api/v1/rooms/${roomId}/turns`, {
     method: "POST",
     headers: { ...jsonHeaders, ...userHeaders(), accept: "text/event-stream" },
-    body: JSON.stringify({ actorId, input, clientTurnId }),
+    body: JSON.stringify({ actorId, input, clientTurnId, ...(targetNpcId ? { targetNpcId } : {}) }),
   });
   if (!r.ok || !r.body) {
     h.onError?.(`HTTP_${r.status}`, await r.text().catch(() => ""));

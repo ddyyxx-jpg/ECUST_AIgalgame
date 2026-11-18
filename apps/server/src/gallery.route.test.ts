@@ -62,6 +62,8 @@ function world(): WorldState {
         dread: 5,
         mood: "平静",
         coord_x: 1200,
+        // 一级认识口径：知道名字才算认识（docs/06 §7）；本用例验证"已认识"的读数口径
+        knows_name: true,
       }),
       npc_b: entity("npc_b", "npc", "马骁", { stamina: 20, guard: 12, trust: 5 }),
     },

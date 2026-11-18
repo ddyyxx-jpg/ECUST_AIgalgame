@@ -11,6 +11,7 @@ import type {
   WorldState,
 } from "../../../packages/shared/src/contract/types.ts";
 import type { NpcProfile } from "./scenarios.ts";
+import { displayNameOf, knowsNameOf, unknownPlaceholders } from "./view-names.ts";
 
 export type Band = "低" | "中" | "高";
 
@@ -60,6 +61,8 @@ export interface GalleryInput {
   state: WorldState;
   registry: Registry;
   profiles: NpcProfile[];
+  /** npcId → 外貌描述：未认识时用作占位名（content/scenarios/npcs.json 的 appearance） */
+  appearance?: Map<string, string>;
 }
 
 /** secret 数值三等分：t≤1/3 低、t≤2/3 中、否则高（与 docs/03 §5.2.5 一致） */
@@ -126,11 +129,12 @@ function locOf(state: WorldState, npcId: string): string {
   return state.links.find((l) => l.kind === "located_in" && l.from === npcId)?.to ?? "";
 }
 
-export function buildGalleryView({ roomId, state, registry, profiles }: GalleryInput): GalleryView {
+export function buildGalleryView({ roomId, state, registry, profiles, appearance }: GalleryInput): GalleryView {
   const playerLoc = state.room.scene.locId;
   const presentIds = new Set(state.room.scene.presentIds);
   const profileOf = new Map(profiles.map((p) => [p.id, p]));
   const decls = registry.attrs("npc");
+  const placeholders = unknownPlaceholders(state, appearance);
 
   const npcs: GalleryNpc[] = Object.values(state.entities)
     .filter((e) => e.kind === "npc" && e.status === "active")
@@ -138,11 +142,13 @@ export function buildGalleryView({ roomId, state, registry, profiles }: GalleryI
     .map((e) => {
       const npcLoc = locOf(state, e.id);
       const present = presentIds.has(e.id);
-      const met = present || (npcLoc !== "" && npcLoc === playerLoc);
+      // 一级判定：只有知道名字才算"认识"（knows_name）。同处一地、被看见都不算——
+      // 否则开局 NPC 都在你面前，"图鉴"一进游戏就全解锁，也就不存在"陌生人"了。
+      const met = knowsNameOf(e);
       const profile = met ? profileOf.get(e.id) : undefined;
       return {
         id: e.id,
-        name: e.name,
+        name: displayNameOf(e, placeholders),
         met,
         present,
         ...(met && npcLoc !== "" ? { locName: state.entities[npcLoc]?.name ?? npcLoc } : {}),

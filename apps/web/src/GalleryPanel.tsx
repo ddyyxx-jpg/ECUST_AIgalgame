@@ -106,11 +106,12 @@ function NpcCard({ npc }: { npc: GalleryNpc }) {
   );
 }
 
-export default function GalleryPanel({ roomId }: { roomId: string }) {
+export default function GalleryPanel({ roomId, version = 0 }: { roomId: string; version?: number }) {
   const [gallery, setGallery] = useState<GalleryView | null>(null);
   const [err, setErr] = useState("");
 
-  // 服务端是读数的唯一来源；切回图鉴（组件重挂载）或换房间时重新拉
+  // 服务端是读数的唯一来源：切回图鉴（重挂载）、换房间、或世界状态推进（version）时重新拉，
+  // 这样"刚认识某个 NPC"不需要玩家手动刷新页面。
   useEffect(() => {
     let alive = true;
     setGallery(null);
@@ -125,7 +126,7 @@ export default function GalleryPanel({ roomId }: { roomId: string }) {
     return () => {
       alive = false;
     };
-  }, [roomId]);
+  }, [roomId, version]);
 
   if (!gallery) {
     return (

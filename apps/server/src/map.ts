@@ -35,6 +35,7 @@ import {
 import type { MapFail, SceneDialogue, SceneLink, SceneRef, SceneStatus, SceneTemplate } from "./map.data.ts";
 import { DraftEngine } from "./map.drafts.ts";
 import type { DraftListResult, DraftResult, PublishResult } from "./map.drafts.ts";
+import { displayNameOf, knowsNameOf, unknownPlaceholders } from "./view-names.ts";
 
 // ---------------------------------------------------------------- 对外视图（docs/06 §4）
 export interface MapViewLink {
@@ -108,6 +109,8 @@ export interface MapServiceDeps {
   contentDir: string;
   dataDir: string;
   adminToken: string;
+  /** npcId → 外貌描述（content/scenarios/npcs.json 的 appearance）：未认识时用作占位名 */
+  appearance?: Map<string, string>;
   now?: () => number;
 }
 
@@ -325,6 +328,7 @@ export class MapService {
     }
     // 不强制 NPC 与玩家同场景：AI 生成的场景对话可能是"门后的声音/电话/留言"，
     // 强校验会让生成内容几乎永远不可用；玩家必须在场这一点已在上面校验。
+    const placeholders = unknownPlaceholders(state, this.deps.appearance);
 
     const spec: DialogueSpec = {
       roomId,
@@ -334,7 +338,7 @@ export class MapService {
         sceneId,
         dialogueId,
         npcId: npc.id,
-        npcName: npc.name,
+        npcName: displayNameOf(npc, placeholders),
         lines: dialogue.lines,
       },
       maxTurns: Math.min(8, dialogue.lines.length),
@@ -350,7 +354,10 @@ export class MapService {
         done = step.done;
       }
       await this.deps.dialogue.close(session.id, "scene dialogue");
-      return { ok: true, npc: { id: npc.id, name: npc.name }, lines, sessionId: session.id };
+      // 还不认识（不知道名字）：先补一句"陌生人"开场，NPC 不会假装熟络，
+      // 而是问怎么称呼；玩家随后在对话流里自述名字，由 introduce 模块落 knows_name 与记忆。
+      const opener = knowsNameOf(npc) ? [] : [`（他看了你一眼，显然不认识你）「同学，你是？怎么称呼？」`];
+      return { ok: true, npc: { id: npc.id, name: displayNameOf(npc, placeholders) }, lines: [...opener, ...lines], sessionId: session.id };
     } catch (e) {
       return fail(codeOfError(e), e instanceof Error ? e.message : String(e));
     }
@@ -360,6 +367,7 @@ export class MapService {
   private async buildMapView(state: WorldState, actorId: string): Promise<MapView> {
     const { world, published, refs } = await this.content.sceneRefs();
     const npcLoc = npcLocations(state);
+    const placeholders = unknownPlaceholders(state, this.deps.appearance);
     const scenes = [...refs.values()].map((ref) => this.buildScene(ref, state, refs, npcLoc));
     const npcItems = Object.values(state.entities)
       .filter((e) => e.kind === "npc" && e.status !== "tombstoned")
@@ -374,7 +382,7 @@ export class MapService {
           : typeof attrX === "number" && typeof attrY === "number"
             ? { x: attrX, y: attrY }
             : { x: 0, y: 0 };
-        return { id: e.id, name: e.name, locId, ...base };
+        return { id: e.id, name: displayNameOf(e, placeholders), locId, ...base };
       });
     // 同场景多个 NPC 的坐标可能完全相同；按 id 排序做确定性小偏移，纯展示，不写状态。
     const byLoc = new Map<string, typeof npcItems>();

@@ -124,7 +124,9 @@ const VALID_SCENE = JSON.stringify({
 });
 
 function entity(id: string, kind: Entity["kind"], name: string, canon: boolean): Entity {
-  return { id, kind, name, attrs: {}, tags: [], origin: canon ? "seed" : "system", canon, status: "active", createdAt: 0, updatedAt: 0 };
+  // NPC 默认"已认识"：本文件验证坐标/对话等地图行为，不认识口径见 gallery.knows.test.ts
+  const attrs: Entity["attrs"] = kind === "npc" ? { knows_name: true } : {};
+  return { id, kind, name, attrs, tags: [], origin: canon ? "seed" : "system", canon, status: "active", createdAt: 0, updatedAt: 0 };
 }
 
 /** 只实现 MapService 用到的那部分模块能力，避免测试依赖真 map 模块 */
