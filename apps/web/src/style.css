@@ -793,3 +793,12 @@ dl { margin:0; } .row { display:flex; justify-content:space-between; font-size:1
 .save-main strong { font-size:15px; }
 .save-main .muted { font-size:12px; }
 .save-room { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; opacity:.7; }
+
+/* 回合失败：可重试时错误条里给「重试」按钮（issue #21-3，手动重试、不自动重发） */
+.err { display:flex; align-items:center; gap:10px; }
+.err .retry { margin-left:auto; padding:4px 12px; }
+/* 点了不在场的 NPC：只说明 + 一键前往，不建立对话（issue #21-1，场景隔离） */
+.scene-notice { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:10px 18px 0; padding:8px 12px; border:1px solid #3a4a6b; background:#141a26; color:#c6d2ea; border-radius:8px; font-size:13px; }
+.scene-notice.unlocatable { border-color:#5a4a2b; background:#241f14; color:#e6d3a3; }
+.scene-notice .btn { padding:4px 12px; }
+.scene-notice .notice-err { color:#ff9aa8; font-style:normal; }

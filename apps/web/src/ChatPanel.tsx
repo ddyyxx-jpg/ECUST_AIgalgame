@@ -11,8 +11,14 @@ import CampusMap from "./CampusMap.tsx";
 import MiniMap from "./MiniMap.tsx";
 import { getMap } from "./api.ts";
 import type { MapView } from "./api.ts";
+import { planNpcTalk } from "./npc-presence.ts";
 import { phaseLabel } from "./ui.ts";
 import type { Line, LineKind } from "./ui.ts";
+
+/** 点了一个不在场的 NPC：只给说明与「前往」，不建立对话 */
+type BlockedNpc =
+  | { kind: "elsewhere"; id: string; name: string; locId: string; locName: string; error?: string }
+  | { kind: "unlocatable"; id: string; name: string; reason: string };
 
 export interface ChatPanelProps {
   state: WorldState | null;
@@ -35,10 +41,13 @@ export interface ChatPanelProps {
   onOpenMap: () => void;
   /** 当前开局身份（用于左上角显示自己的头像） */
   heroId: string;
-  /** 走到点位旁：静默同步世界状态（不往对话流里刷字） */
-  onEnterScene: (locId: string) => void;
+  /** 走到点位旁：静默同步世界状态（不往对话流里刷字）；返回是否真的到达 */
+  onEnterScene: (locId: string) => Promise<{ ok: boolean; message?: string }>;
   /** 点击对话区 = 跳过打字动画 */
   onSkipLog: () => void;
+  /** 上一回合失败且服务端标记可重试：重发最后一次玩家输入 */
+  onRetry: () => void;
+  retryable: boolean;
 }
 
 export default function ChatPanel({
@@ -59,8 +68,14 @@ export default function ChatPanel({
   heroId,
   onEnterScene,
   onSkipLog,
+  onRetry,
+  retryable,
 }: ChatPanelProps) {
   const [talking, setTalking] = useState<{ id: string; name: string } | null>(null);
+  const [blocked, setBlocked] = useState<BlockedNpc | null>(null);
+  /** 「前往 TA 所在地」成功后，等位置真的切过去再选中这个人（避免被换场景的清理 effect 覆盖） */
+  const [pendingTalk, setPendingTalk] = useState<{ id: string; name: string; locId: string } | null>(null);
+  const [travelling, setTravelling] = useState(false);
   const [map, setMap] = useState<MapView | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
   // 是否"跟着最新一条走"：玩家往上翻历史时不打扰，回到底部附近后自动恢复跟随
@@ -86,6 +101,14 @@ export default function ChatPanel({
     setTalking(null);
   }, [pos?.locId]);
 
+  // 「前往 TA 所在地」：travel 成功会推进 pos.locId，等它到位再选中目标 NPC
+  useEffect(() => {
+    if (!pendingTalk || pos?.locId !== pendingTalk.locId) return;
+    setTalking({ id: pendingTalk.id, name: pendingTalk.name });
+    setPendingTalk(null);
+    setBlocked(null);
+  }, [pos?.locId, pendingTalk]);
+
   // 地图数据：每次换地点重拉一次，顺便更新 NPC 的实时位置
   useEffect(() => {
     if (!roomId) return;
@@ -100,6 +123,43 @@ export default function ChatPanel({
     };
   }, [roomId, pos?.locId]);
 
+  /**
+   * 点 NPC（issue #21-1）：只有和玩家同场景的人才打开对话；
+   * 在别处的人不建立对话对象，改为提示 + 一键前往（复用地图 travel）。
+   */
+  const talkTo = (id: string, fallbackName: string) => {
+    if (busy || !map) return;
+    // 刚进房间还没跑过回合时 view.position 可能为空：以服务端地图的 player.locId 兜底，
+    // 否则同场景的人会被误判成"在别处"。
+    const currentLocId = pos?.locId || map.player.locId || "";
+    const plan = planNpcTalk(map.npcs, map.scenes, id, fallbackName, currentLocId);
+    if (plan.kind === "present") {
+      setBlocked(null);
+      setTalking({ id: plan.npc.id, name: plan.npc.name || fallbackName });
+      return;
+    }
+    setTalking(null);
+    if (plan.kind === "unlocatable") {
+      setBlocked({ kind: "unlocatable", id, name: plan.name, reason: plan.reason });
+      return;
+    }
+    setBlocked({ kind: "elsewhere", id, name: plan.npc.name || fallbackName, locId: plan.locId, locName: plan.locName });
+  };
+
+  const goToBlocked = async () => {
+    if (!blocked || blocked.kind !== "elsewhere" || travelling || busy) return;
+    const target = blocked;
+    setTravelling(true);
+    setBlocked({ ...target, error: undefined });
+    const res = await onEnterScene(target.locId);
+    setTravelling(false);
+    if (!res.ok) {
+      setBlocked({ ...target, error: res.message ?? "无法到达" });
+      return;
+    }
+    setPendingTalk({ id: target.id, name: target.name, locId: target.locId });
+  };
+
   const stats = (Object.values(panels ?? {})[0] ?? []).slice(0, 4);
 
   return (
@@ -110,7 +170,7 @@ export default function ChatPanel({
           heroSrc={`/heroes/hero-${heroId}.png`}
           talkingTo={talking?.id ?? ""}
           busy={busy}
-          onTalk={(id, name) => setTalking({ id, name })}
+          onTalk={talkTo}
           onEnter={onEnterScene}
         />
 
@@ -219,7 +279,37 @@ export default function ChatPanel({
           {busy && !typing && <p className="line system">…</p>}
         </div>
 
-        {err && <div className="err">{err}</div>}
+        {blocked && (
+          <div className={`scene-notice${blocked.kind === "unlocatable" ? " unlocatable" : ""}`}>
+            <span>
+              {blocked.kind === "unlocatable"
+                ? `${blocked.name} 不在这里，而且${blocked.reason}，所以没法直接找过去。`
+                : `${blocked.name} 不在这里（现在在「${blocked.locName}」）。`}
+            </span>
+            {blocked.kind === "elsewhere" && (
+              <button type="button" className="btn" onClick={() => void goToBlocked()} disabled={busy || travelling}>
+                {travelling ? "正在前往…" : "前往 TA 所在地"}
+              </button>
+            )}
+            {blocked.kind === "elsewhere" && blocked.error && (
+              <em className="notice-err">前往失败：{blocked.error}</em>
+            )}
+            <button type="button" className="btn ghost" onClick={() => setBlocked(null)} disabled={travelling}>
+              知道了
+            </button>
+          </div>
+        )}
+
+        {err && (
+          <div className="err">
+            <span>{err}</span>
+            {retryable && (
+              <button type="button" className="btn retry" onClick={onRetry} disabled={busy}>
+                重试
+              </button>
+            )}
+          </div>
+        )}
 
         {suggestions.length > 0 && (
           <div className="suggestions">

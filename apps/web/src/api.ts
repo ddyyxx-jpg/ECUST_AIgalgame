@@ -49,7 +49,7 @@ export interface TurnStreamHandlers {
   onPatch?: (state: WorldState, ops: unknown[]) => void;
   onUi?: (view: ViewPatch) => void;
   onCommit?: (seq: number) => void;
-  onError?: (code: string, message: string) => void;
+  onError?: (code: string, message: string, retryable?: boolean) => void;
 }
 
 /**
@@ -187,7 +187,7 @@ function dispatch(ev: TurnEvent, _event: string, h: TurnStreamHandlers): void {
     case "turn.ui": h.onUi?.(ev.view); break;
     case "turn.commit": h.onCommit?.(ev.seq); break;
     case "turn.error":
-    case "turn.rejected": h.onError?.(ev.code, ev.message); break;
+    case "turn.rejected": h.onError?.(ev.code, ev.message, ev.retryable); break;
     default: break;
   }
 }

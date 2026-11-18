@@ -13,6 +13,7 @@ import { turnSuggestions } from "./suggestions.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
 import type { TypeItem } from "./typewriter.ts";
+import { explainTurnError, isRetryableTurnError } from "./turn-error.ts";
 import { errorMessage, phaseLabel } from "./ui.ts";
 import type { Line, LineKind } from "./ui.ts";
 
@@ -49,6 +50,10 @@ export default function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string>("");
+  /** 本次回合失败是否值得重试：由 turn.error/retryable 决定（issue #21-3） */
+  const [errRetryable, setErrRetryable] = useState(false);
+  /** 最近一次玩家行动：重试时原样再发（新的 clientTurnId），不重复打印玩家行 */
+  const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null } | null>(null);
   /** 全屏地图层：点对话页左上角的小地图打开 */
   const [mapOpen, setMapOpen] = useState(false);
   const [saves, setSaves] = useState<SaveEntry[]>([]);
@@ -287,10 +292,13 @@ export default function App() {
    * travel 会返回权威地图，必须拿它把 `view.position` 一起推进：
    * 位置视图只在回合 SSE 的 onUi 里更新，光刷 state 的话 HUD / 小地图 / 快捷选项
    * 会停在旧地点，直到玩家再说一句话为止。
+   *
+   * 返回是否真的到达：点「前往 TA 所在地」要据此决定是选中 NPC 还是报错；
+   * 普通走动（WASD/地图点）忽略返回值，不把失败弹到对话流里。
    */
   const enterScene = useCallback(
-    async (locId: string) => {
-      if (!roomId || !actorId) return;
+    async (locId: string): Promise<{ ok: boolean; message?: string }> => {
+      if (!roomId || !actorId) return { ok: false, message: "还没进入房间" };
       try {
         const res = await travel(roomId, actorId, locId);
         setView((v) => ({
@@ -303,58 +311,90 @@ export default function App() {
           },
         }));
         void fetchState(roomId).then(setState).catch(() => undefined);
-      } catch {
-        // 已经在原地 / 点位未建成：忽略即可，不影响走动
+        return { ok: true };
+      } catch (e) {
+        // 已经在原地 / 点位未建成 / 不可达：交给调用方决定要不要提示
+        return { ok: false, message: errorMessage(e) };
       }
     },
     [actorId, roomId],
   );
 
-  /** 发一回合。`raw` 用于快捷建议：点一下就等于把这句话说出来，不必先填进输入框。 */
-  const send = useCallback(async (raw?: string, targetNpc?: { id: string; name: string } | null) => {
-    const base = (raw ?? input).trim();
-    if (!base || busy || !roomId || !actorId) return;
-    // 选了对话对象就把目标写进行动语义：契约里 TurnRequest 没有 target 字段，
-    // 否则两个不同 NPC 收到同一句"你好"时，服务端分不清在跟谁说话。
-    const text = targetNpc ? `对${targetNpc.name}说：${base}` : base;
-    const tw = getTw();
-    // 玩家急着说下一句：先把手上的字放完（包括上一回合还没打完的叙事）
-    if (tw.typing) tw.skip();
-    setBusy(true);
-    setErr("");
-    setInput("");
-    push("player", text);
-    const clientTurnId = `${Date.now()}_${++turnSeq.current}`;
-    tw.setTurnEnded(false);
-    try {
-      await runTurn(roomId, actorId, text, clientTurnId, {
-        onDelta: (field, chunk) => {
-          if (field !== "narrative") return;
-          tw.feed(chunk);
-        },
-        // 模块的 facts 是玩家唯一能"看见世界动了"的地方（Mock 模式下尤其重要）
-        onFacts: (facts) => {
-          const rows = facts.filter((f) => f.trim().length > 0);
-          if (rows.length === 0) return;
-          const key = rows.join("\n");
-          if (key === lastFacts.current) return; // 与上一回合完全相同：不再重复刷屏
-          lastFacts.current = key;
-          tw.enqueue(rows.map((f) => ({ kind: "fact" as LineKind, text: f })));
-        },
-        onPatch: (s) => setState(s),
-        onUi: (v) => setView((old) => ({ ...old, ...v })),
-        onError: (code, message) => setErr(`${code}: ${message}`),
-      });
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      tw.setTurnEnded(true);
-      setBusy(false);
-      void fetchState(roomId).then(setState).catch(() => undefined);
-      // 回合提交后存档游标由服务端推进；这里刷新列表，回标题时时间戳是新的
-      void refreshSaves();
-    }
-  }, [actorId, busy, input, push, roomId]);
+  /**
+   * 发一回合。`echo=false` 用于「重试」：不重复把玩家那句话打进日志、不清空输入框；
+   * clientTurnId 每次都是新 id，所以重试是一条全新的回合（幂等键由服务端回合表管）。
+   */
+  const dispatchTurn = useCallback(
+    async (raw: string, targetNpc: { id: string; name: string } | null, echo: boolean) => {
+      const base = raw.trim();
+      if (!base || busy || !roomId || !actorId) return;
+      // 选了对话对象就把目标写进行动语义：契约里 TurnRequest 没有 target 字段，
+      // 否则两个不同 NPC 收到同一句"你好"时，服务端分不清在跟谁说话。
+      const text = targetNpc ? `对${targetNpc.name}说：${base}` : base;
+      lastTurn.current = { text: base, target: targetNpc };
+      const tw = getTw();
+      // 玩家急着说下一句：先把手上的字放完（包括上一回合还没打完的叙事）
+      if (tw.typing) tw.skip();
+      setBusy(true);
+      setErr("");
+      setErrRetryable(false);
+      if (echo) {
+        setInput("");
+        push("player", text);
+      }
+      const clientTurnId = `${Date.now()}_${++turnSeq.current}`;
+      tw.setTurnEnded(false);
+      try {
+        await runTurn(roomId, actorId, text, clientTurnId, {
+          onDelta: (field, chunk) => {
+            if (field !== "narrative") return;
+            tw.feed(chunk);
+          },
+          // 模块的 facts 是玩家唯一能"看见世界动了"的地方（Mock 模式下尤其重要）
+          onFacts: (facts) => {
+            const rows = facts.filter((f) => f.trim().length > 0);
+            if (rows.length === 0) return;
+            const key = rows.join("\n");
+            if (key === lastFacts.current) return; // 与上一回合完全相同：不再重复刷屏
+            lastFacts.current = key;
+            tw.enqueue(rows.map((f) => ({ kind: "fact" as LineKind, text: f })));
+          },
+          onPatch: (s) => setState(s),
+          onUi: (v) => setView((old) => ({ ...old, ...v })),
+          onError: (code, message, retryable) => {
+            setErr(explainTurnError(code, message));
+            setErrRetryable(isRetryableTurnError(code, retryable));
+          },
+        });
+      } catch (e) {
+        // 传输层/网络错误：可稍后再试，但不自动重发（避免重复扣费 / 重复回合）
+        setErr(`${errorMessage(e)}（网络问题可稍后再试）`);
+        setErrRetryable(false);
+      } finally {
+        tw.setTurnEnded(true);
+        setBusy(false);
+        void fetchState(roomId).then(setState).catch(() => undefined);
+        // 回合提交后存档游标由服务端推进；这里刷新列表，回标题时时间戳是新的
+        void refreshSaves();
+      }
+    },
+    [actorId, busy, push, roomId, refreshSaves],
+  );
+
+  /** 发新回合（快捷建议把 `raw` 传进来就等于说出这句话，不必先填输入框） */
+  const send = useCallback(
+    (raw?: string, targetNpc?: { id: string; name: string } | null) => {
+      void dispatchTurn(raw ?? input, targetNpc ?? null, true);
+    },
+    [dispatchTurn, input],
+  );
+
+  /** 重试上一回合：失败（尤其 E_LLM_FORMAT）时对话区出现按钮，不自动重试 */
+  const retry = useCallback(() => {
+    const last = lastTurn.current;
+    if (!last) return;
+    void dispatchTurn(last.text, last.target, false);
+  }, [dispatchTurn]);
 
   if (screen === "title") {
     return (
@@ -456,10 +496,12 @@ export default function App() {
             // 每回合结束（字打完、且不在等回复）都给建议；等回复时先收起，免得发旧选项
             suggestions={!busy && sceneSettled ? nextActions : []}
             onPick={(text, target) => void send(text, target)}
+            onRetry={retry}
+            retryable={errRetryable}
             roomId={roomId}
             onOpenMap={() => setMapOpen(true)}
             heroId={scenario?.id ?? ""}
-            onEnterScene={(locId) => void enterScene(locId)}
+            onEnterScene={enterScene}
             onSkipLog={() => getTw().skip()}
           />
         )}
