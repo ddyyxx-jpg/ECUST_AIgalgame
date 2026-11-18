@@ -211,6 +211,8 @@
 
 - 2026-11-18 ｜ `fix/memory-context` ｜ `49d20ce` ｜ feat ｜ 多 NPC 记忆按人注入（`MemoryContext.npcs[]`，S1.5 之外预算 1100 均分，S7/S8 按人分段标名）+ 每回合把「玩家输入+叙事摘要」写成每个在场 NPC 的 short 工作记忆（`memory.write`，排在模型记忆之后，配额满时让位）+ S1 增「只有在场者能说话/行动，不得替不在场者回答」；`PROMPT_VERSION 2026-11-17.3 → 2026-11-18.1`；`docs/07` §4.1/§4.2、`docs/prompts/CHANGELOG.md` ｜ #20 根因：`turn.memory.selectOwner` 在多 NPC 场景把 owner 退回玩家，两个在场 NPC 的私忆整段不进 S7/S8（与 docs/07 §4 的承诺矛盾，判为 bug）；单 NPC/0 NPC 保持旧行为，写入按 owner 各过闸门、每 NPC 每回合仍 ≤3 条 ｜ 修前新测试 7 failed / 1 passed；修后 tsc 0、33 文件/223 用例、check:contract 8/8（3.2.0 未变） ｜ 待 PR 合并；已知：同一事件会分别写入各 NPC 私忆（有意，内容重复）、`speakers` 仍 `[]`、最近对话对下一回合才出现的不在场者不可见
 
+- 2026-11-18 ｜ `fix/memory-context` ｜ `88aef4d` ｜ fix ｜ Codex P2 修复：①「最近对话」工作记忆写新条前先 tombstone 旧条（`memory.write status=tombstoned, supersedes`），每 owner 只留最新 1 条；`ownedCount` 与闸门 G6 排除工作记忆（`WORKING_MEMORY_TAG` 豁免 G3/G4/G6），`sessionCap=30` 只约束情节记忆；② `LlmProduct` 追加 `narrative`/`dialogue`（`text` 语义不变），工作记忆分别取 30/70/90 字、总 ≤200，叙事写满不再丢台词；`docs/07` §4.2 与 G6 行同步 ｜ 理由：工作记忆每回合 1 条会把 30 条上限填满并挤掉模型记忆（P2-1）；只取拼接文本截 100 字会整段丢掉「明早 8 点见」这类台词（P2-2）；不给工作记忆单开配额字段，用标签豁免 + 滚动替换保持改动面最小，`archived` 容量回收留给后续 issue ｜ 新增 `memory.gate.test.ts` 3 例；`memory.multinpc.test.ts` 增滚动替换/台词保留/连续 31 轮；更新 2 处旧预期；tsc 0、34 文件/229 用例、check:contract 8/8（3.2.0 未变）；`PROMPT_VERSION` 未改（提示词文案没动） ｜ 已知：`archived` 仍计入情节记忆配额（`compact` 未接线，后续 issue）；修复前积累的多条旧工作记忆会在首次写入时一次性 tombstone
+
 ### feature/campus-map-v0.2
 
 - 2026-11-17 ｜ `feature/campus-map-v0.2` ｜ `b509d48` ｜ feat ｜ 真实底图 + 33 点位三态与缩放选点；服务端 status/category/image、travel 拦非 built、canon 懒安装；docs/02/06、README、MEMORY 同步 ｜ 地图要“看得见找得到”，未建成点位只能看不能进；数据驱动（status 在 world_map.json），不改引擎 ｜ tsc 0；14 文件/117 用例；8 项契约 ｜ 首轮打回：docs/03 MapView 未同步、docs/06:56/:154 与实现矛盾、`.tmp-map/` 未忽略
