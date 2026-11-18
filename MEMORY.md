@@ -246,6 +246,10 @@
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `48d91d6` ｜ fix ｜ 点不在场 NPC 不再建立对话对象，改为「TA 不在这里（在「XX」）」+「前往 TA 所在地」（复用 `/map/travel`，到达后自动选中）；新增 `npc-presence.ts` 纯函数判定与测试；`turn.error/retryable` 透传，可重试时对话区给「重试」按钮，用新 `clientTurnId` 重发上次输入、不自动重试；docs/06 §7/§8 同步 ｜ 只在当前场景开聊才能保证「在场」语义；travel 成功要等 `view.position.locId` 到位再选中，避免被换场景清理 effect 覆盖；重试判定以服务端 `retryable` 为准、事件缺字段才回退契约 `RETRYABLE`，不自己维护错误码名单 ｜ tsc 0；34 文件 / 228 用例（新增 web 2 文件 13 例）；check:contract 8 项（3.2.0，未 bump）；build:web 286.13 kB / gzip 90.58 kB ｜ 与 PR #19（登录门/2D 地图）交互：本改动只在 ChatPanel/App 对话流与地图点击回调上，不改 MapView/路由；若 #19 改带 actorId 的 travel 调用签名需同步 `enterScene` 返回值 ｜ 未做：失败回合已流出的部分叙事不回滚（重试会追加新叙事）
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `6af5bd2` ｜ fix ｜ PR #22 评审 P2：换场景后重试仍向旧 NPC 发「对X说：…」。① `view.position.locId` 变化即清 `lastTurn`（`shouldDropRetryOnMove`），重试按钮可见时收掉并提示失效；② `retry` 提交前用当前 WorldState 复核目标在场（`targetStillInScene`：`scene.presentIds` 或 `located_in` 指向脚下），不在则禁用不请求 ｜ 只清旧重试、不动正常对话；复核与 `planNpcTalk` 共用同一套在场定义，避免两处口径漂移；首次拿到位置（prev 空）不算移动 ｜ tsc 0；34 文件 / 237 用例（web 22 例，新增 9）；check:contract 8/8；build:web 未回归 ｜ 未做：失败回合已流出的部分叙事不回滚（重试追加新叙事）
 
+### fix/turn-idempotency-memory（issues #34 + #39，待 PR）
+
+- 2026-11-18 ｜ `fix/turn-idempotency-memory` ｜ `a056277` ｜ fix ｜ #34：幂等键改为 `JSON.stringify([roomId, actorId, clientTurnId])`，同 key 并发用 per-key in-flight promise 串行；`seen.set` + impressions.markDelivered 移到 `yield turn.commit` **之前**，HTTP 在 commit 处 break 生成器仍完成记账（外层 try/finally 保证释放锁） ｜ seen 注册必须在 yield 前，否则 break 跳过（issue 根因）；进程内缓存无法跨重启恢复（事件日志无持久回合标记、零提案回合无痕），需 EventLog/契约变更，故只文档化边界 ｜ #39：抽 `takeLlmProduct()` 让首问与业务修复成功后走同一"最终产物→记忆→提案"收口，修复用修复版、被拒第一版不落库；`applyBatch` 复用记忆被拒两阶段降级，重置计数避免双写 ｜ 事件顺序/原子性/共享预算不变 ｜ tsc 0；38 文件/273 用例通过（新增 4 幂等 + 2 修复记忆）；check:contract 8/8（3.2.1） ｜ 未做：跨重启幂等（需契约变更）；失败回合不缓存，同 key 并发在失败期间仍会各自重试
+
 ### 历史分支（已合并 / 已删除，保留记录）
 
 - 2026-11-16 ｜ `feature/map-module @ 362df4a` ｜ 已合并（`95eb27d..362df4a` ff，后随 main 进入 `3112f79`）；远端分支已删
