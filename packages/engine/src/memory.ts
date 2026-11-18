@@ -23,12 +23,19 @@ import type {
   MemoryTier,
   RoomId,
 } from "../../shared/src/index.ts";
+import { isWorkingMemory } from "./memory.gate.ts";
 
 const W = { tag: 0.45, recency: 0.25, salience: 0.2, relation: 0.1 };
 const THRESHOLD = 0.35;
 const CHARS_PER_TOKEN = 4;
-/** 压缩阈值：超过就把最旧最不重要的 1/3 归档（归档不进 prompt，但还能被检索） */
-const COMPACT_AFTER = 60;
+/**
+ * 压缩阈值：超过就把最旧最不重要的 1/3 归档（归档不进 prompt/配额，但记录仍留在日志里）。
+ * issue #42：必须低于闸门 sessionCap=30，否则写满 30 条后再也触发不到压缩，
+ * 长期房间就永久失去情节记忆写入能力。20 留出约 10 条的缓冲。
+ */
+const COMPACT_AFTER = 20;
+/** 限频：同一 room 每 N 条记忆写入才检查一次压缩，避免每条事件都全表排序 */
+const COMPACT_SCAN_EVERY = 10;
 
 /**
  * token 估算：CJK 按 1 字 = 1 token、其余按 4 字 = 1 token（保守上界）。
@@ -73,6 +80,8 @@ export class EventSourcedMemory implements Memory {
   private readonly byId = new Map<Id, MemoryRecord>();
   /** roomId → 已 ingest 到的 seq（增量同步用） */
   private readonly syncedSeq = new Map<RoomId, number>();
+  /** roomId → 距上次压缩检查的写入条数（issue #42：限频，不产事件、不调模型） */
+  private readonly writesSinceCompact = new Map<RoomId, number>();
   private testSeq = 0;
 
   /**
@@ -84,6 +93,7 @@ export class EventSourcedMemory implements Memory {
     for (const rec of list) this.byId.delete(rec.id);
     this.byRoom.set(roomId, []);
     this.syncedSeq.delete(roomId);
+    this.writesSinceCompact.delete(roomId);
     this.sync(roomId, envs);
   }
 
@@ -140,6 +150,9 @@ export class EventSourcedMemory implements Memory {
       const list = this.byRoom.get(roomId) ?? [];
       list.push(record);
       this.byRoom.set(roomId, list);
+      // issue #42：提交后 ingest 时低频触发压缩，归档老记忆以回收 G6 配额。
+      // 永久层是世界级 canon，不能被自动归档（否则"世界记得你"会丢），只压缩 short/long。
+      if (status !== "tombstoned" && record.tier !== "permanent") this.maybeCompact(roomId, record.ownerId);
       return;
     }
     if (env.type === "memory.tombstoned") {
@@ -258,14 +271,36 @@ export class EventSourcedMemory implements Memory {
     return profile;
   }
 
-  async compact(roomId: RoomId, ownerId: ActorId): Promise<{ impressions: number; archived: number }> {
+  /**
+   * 自动压缩（issue #42）：ingest / rebuild 后按 room 限频调用。
+   * 纯内存投影：不产事件、不写状态、不调模型；归档标记不持久化，
+   * 重建时按同样的确定性规则重新归档（salience 升序 → createdAt 升序）。
+   */
+  private maybeCompact(roomId: RoomId, ownerId: ActorId): void {
+    const since = (this.writesSinceCompact.get(roomId) ?? 0) + 1;
+    if (since < COMPACT_SCAN_EVERY) {
+      this.writesSinceCompact.set(roomId, since);
+      return;
+    }
+    this.writesSinceCompact.set(roomId, 0);
+    this.compactSync(roomId, ownerId);
+  }
+
+  private compactSync(roomId: RoomId, ownerId: ActorId): { impressions: number; archived: number } {
     const list = this.byRoom.get(roomId) ?? [];
-    const mine = list.filter((m) => m.ownerId === ownerId && !m.archived && m.status !== "tombstoned");
+    // 工作记忆每回合滚动，永远只有最新一条有效，不能归档（否则读侧召回会丢掉它）
+    const mine = list.filter(
+      (m) => m.ownerId === ownerId && !m.archived && m.status !== "tombstoned" && !isWorkingMemory(m),
+    );
     if (mine.length <= COMPACT_AFTER) return { impressions: 0, archived: 0 };
     mine.sort((a, b) => a.salience - b.salience || a.createdAt - b.createdAt);
     const take = Math.floor(mine.length / 3);
     for (const m of mine.slice(0, take)) m.archived = true;
     return { impressions: mine.length, archived: take };
+  }
+
+  async compact(roomId: RoomId, ownerId: ActorId): Promise<{ impressions: number; archived: number }> {
+    return this.compactSync(roomId, ownerId);
   }
 
   /** 世界层/私忆通用：按 id 取（canonize 幂等与不可变校验用） */

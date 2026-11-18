@@ -37,8 +37,31 @@ export const DEFAULT_MEMORY_GATES: MemoryGateLimits = {
  */
 export const WORKING_MEMORY_TAG = "最近对话";
 
+/**
+ * 读侧识别（历史兼容）：已落库的记录只有 tags 可用，所以仍按标签判断。
+ * 写侧豁免不再看标签（issue #36）：模型也可以填 tags，标签不是可信信号。
+ */
 export function isWorkingMemory(r: { tags?: readonly string[] }): boolean {
   return (r.tags ?? []).includes(WORKING_MEMORY_TAG);
+}
+
+/**
+ * 写侧可信标记：Symbol 不能由 JSON / 模型输出携带，只有 recentDrafts() 通过
+ * markEngineWorkingMemory() 设置。闸门据此豁免 G3/G4/G6（issue #36）。
+ * 不进 shared 契约、不进 Proposal.args，因此不需要 bump 契约版本。
+ */
+const ENGINE_WORKING_MEMORY = Symbol("engineWorkingMemory");
+type TrustedDraft = MemoryDraft & { [ENGINE_WORKING_MEMORY]?: true };
+
+/** 只供引擎写侧调用：把一条由 recentDrafts() 构造的草稿标记为可信工作记忆 */
+export function markEngineWorkingMemory(draft: MemoryDraft): MemoryDraft {
+  const marked: TrustedDraft = { ...draft };
+  marked[ENGINE_WORKING_MEMORY] = true;
+  return marked;
+}
+
+function isEngineWorkingMemory(draft: MemoryDraft): boolean {
+  return (draft as TrustedDraft)[ENGINE_WORKING_MEMORY] === true;
 }
 
 export type MemoryDropReason =
@@ -150,7 +173,12 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
       dropped.push({ reason: "permanent_forbidden", detail: "permanent 只能由 canonize 产生" });
       continue;
     }
-    const tags = [...new Set((raw.tags ?? []).map((t) => t.trim()).filter(Boolean))].slice(0, 4);
+    const trustedWorking = isEngineWorkingMemory(raw);
+    // #36：模型草稿带"最近对话"标签不获得任何豁免；标签一并剥离，
+    // 免得写出的情节记忆在读侧被 isWorkingMemory 误认成工作记忆（历史数据仍按标签识别）。
+    const tags = [...new Set((raw.tags ?? []).map((t) => t.trim()).filter(Boolean))]
+      .filter((t) => trustedWorking || t !== WORKING_MEMORY_TAG)
+      .slice(0, 4);
     const about = [...new Set(raw.about ?? [])];
     let salience = typeof raw.salience === "number" ? Math.min(5, Math.max(1, Math.round(raw.salience))) : 3;
     const visibility = raw.visibility ?? "private";
@@ -179,7 +207,8 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
     // ---------- 工作记忆（最近对话）：引擎侧滚动替换，跳过 G3/G4/G6 ----------
     // 工作记忆每回合都写、内容天然相近；若走去重会被旧条拦下，走配额会被情节记忆或模型记忆挤掉。
     // 写侧在提交前已把该 owner 的旧工作记忆 tombstone（见 turn.memory.drafts.ts），只保留最新一条。
-    if (tags.includes(WORKING_MEMORY_TAG)) {
+    // #36：豁免只认写侧的可信 Symbol 标记；标签是模型可填的，不能作为依据。
+    if (trustedWorking) {
       const draft: MemoryDraft = { ownerId: input.ownerId, content, tags, salience, about, visibility, tier };
       if (input.userId) draft.userId = input.userId;
       if (raw.aboutUserIds && raw.aboutUserIds.length > 0) draft.aboutUserIds = raw.aboutUserIds;

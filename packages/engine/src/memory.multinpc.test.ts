@@ -296,7 +296,11 @@ describe("多 NPC 记忆注入（issue #20）", () => {
       expect(working).toHaveLength(1);
       expect(working[0]!.content).toContain("第 31 回合");
       const plot = all.filter((r) => !r.tags.includes("最近对话") && r.status !== "tombstoned");
-      expect(plot.length).toBe(30); // 1 条既有 + 29 条模型记忆，达到 sessionCap 后不再增长
+      // issue #42：compact 已接线，归档不占 G6 配额 → 31 轮后仍在写（不再冻结在 30 条）
+      expect(plot.length).toBeGreaterThan(30);
+      expect(plot.some((r) => r.archived)).toBe(true);
+      expect(plot.filter((r) => !r.archived).length).toBeLessThanOrEqual(30);
+      expect(plot.some((r) => r.content.includes("第 31 次"))).toBe(true);
     }
   });
 });

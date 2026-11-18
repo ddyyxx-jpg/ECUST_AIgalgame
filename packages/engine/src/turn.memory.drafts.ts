@@ -5,7 +5,7 @@
 import type { Id, MemoryRecord, Phase, Proposal, TurnRequest, WorldState } from "../../shared/src/index.ts";
 import type { MemoryDraft } from "../../shared/src/index.ts";
 import type { MemoryContext } from "./turn.memory.ts";
-import { memoryDraftArgs, WORKING_MEMORY_TAG } from "./memory.gate.ts";
+import { markEngineWorkingMemory, memoryDraftArgs, WORKING_MEMORY_TAG } from "./memory.gate.ts";
 
 const PHASE_LABEL: Record<Phase, string> = {
   morning: "早上",
@@ -111,7 +111,9 @@ export function recentDrafts(
       tier: "short",
     };
     if (mem.userId) draft.userId = mem.userId;
-    return draft;
+    // #36：只有这里产出的草稿带引擎内部可信标记，闸门据此豁免 G3/G4/G6。
+    // 模型草稿无法携带 Symbol（zod 会剥掉未知字段），因此伪造标签不再能绕过配额。
+    return markEngineWorkingMemory(draft);
   });
   return { drafts, tombstones };
 }

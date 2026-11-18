@@ -34,7 +34,7 @@ export interface NpcMemory {
   long: MemoryHit[];
   short: MemoryHit[];
   profile: MemoryProfile | null;
-  /** 该 NPC 已有条数（配额给闸门用；**不含**工作记忆，PR #24 P2-1） */
+  /** 该 NPC 已有条数（配额给闸门用；**不含**工作记忆与归档，PR #24 P2-1 / issue #42） */
   ownedCount: number;
   /** 去重用：该 NPC 最近的记录 */
   recent: MemoryRecord[];
@@ -152,8 +152,9 @@ async function readOwner(
   });
   const owned = memory.all(req.roomId).filter((r) => r.ownerId === ownerId && r.status !== "tombstoned");
   const profile = userId ? await memory.profile(userId, ownerId, req.roomId) : null;
-  // 工作记忆是"最近对话"的滚动副本，不算情节记忆的 sessionCap（PR #24 P2-1）
-  const plotOnly = owned.filter((r) => !isWorkingMemory(r));
+  // 工作记忆是"最近对话"的滚动副本，不算情节记忆的 sessionCap（PR #24 P2-1）；
+  // archived 是 compact 归档掉的旧记忆（issue #42），也不该继续占 30 条硬顶，否则长房间永久停写。
+  const plotOnly = owned.filter((r) => !isWorkingMemory(r) && !r.archived);
   const working = owned
     .filter(isWorkingMemory)
     .sort((a, b) => b.turn - a.turn || b.createdAt - a.createdAt);

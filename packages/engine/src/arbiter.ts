@@ -255,6 +255,9 @@ export class DefaultArbiter {
       }
       const args = proposal.args ?? {};
       const key = typeof args.key === "string" ? args.key : "";
+      // xWritesPerTurn 只数 x. 属性的 attr 写入（issue #41 的预算口径）：
+      // memory.write（含引擎工作记忆的 tombstone + 新写）走 memSeq、不产 attr 事件，
+      // 因此双 NPC 每回合 4 次工作记忆写永远不会挤掉 x. 区那 8 条额度；硬上限仍只约束 x. 写。
       const isXWrite = (op === "attr.delta" || op === "attr.set") && key.startsWith("x.");
       const ctx = {
         state,

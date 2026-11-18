@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import type { Envelope, Entity, MemoryDraft, MemoryRecord } from "../../shared/src/index.ts";
 import { EventSourcedStore } from "./store.ts";
-import { applyMemoryGates, WORKING_MEMORY_TAG } from "./memory.gate.ts";
+import { applyMemoryGates, markEngineWorkingMemory, WORKING_MEMORY_TAG } from "./memory.gate.ts";
 
 const ROOM = "room_g";
 const PLR = "plr_self";
@@ -36,7 +36,15 @@ function makeState() {
 const state = makeState();
 
 function workingDraft(content = "刚才玩家说「明早见」，林静点头。"): MemoryDraft {
-  return { ownerId: "", content, tags: [WORKING_MEMORY_TAG, "图书馆"], salience: 3, about: [PLR], visibility: "private", tier: "short" };
+  // #36：可信标记只有引擎写侧（recentDrafts）能设置，测试也走同一个 helper
+  return markEngineWorkingMemory({
+    ownerId: "", content, tags: [WORKING_MEMORY_TAG, "图书馆"], salience: 3, about: [PLR], visibility: "private", tier: "short",
+  });
+}
+
+/** #36 复现：模型把工作记忆标签塞进 memory[] 草稿 */
+function forgedWorkingDraft(content = "伪造的最近对话", tags: string[] = [WORKING_MEMORY_TAG]): MemoryDraft {
+  return { ownerId: "", content, tags, salience: 3, about: [PLR], visibility: "private", tier: "long" };
 }
 
 function plotDraft(content = "他答应帮我占座", tags = ["占座"]): MemoryDraft {
@@ -80,5 +88,51 @@ describe("memory.gate × 工作记忆配额（PR #24 P2-1）", () => {
     const r = gate([workingDraft("刚才玩家说「明早见」，林静点头。")], 5, recent);
     expect(r.accepted).toHaveLength(1);
     expect(r.dropped).toHaveLength(0);
+  });
+});
+
+describe("memory.gate × 可信边界（issue #36）", () => {
+  it("模型伪造「最近对话」标签：ownedCount=30 时 5 条全部因配额被丢，不再全部通过", () => {
+    const forged = Array.from({ length: 5 }, (_, i) => forgedWorkingDraft(`伪造的最近对话 ${i}`));
+    const r = gate(forged, 30);
+    expect(r.accepted).toHaveLength(0);
+    expect(r.dropped).toHaveLength(5);
+    expect(r.dropped.every((d) => d.reason === "quota")).toBe(true);
+  });
+
+  it("伪造标签也绕不过 G3 去重与 writePerTurn=3", () => {
+    const recent: MemoryRecord[] = [{
+      id: "mem_recent", roomId: ROOM, ownerId: LIN,
+      content: "伪造的最近对话", tags: [WORKING_MEMORY_TAG], salience: 3,
+      about: [PLR], visibility: "private", tier: "short", status: "current", turn: 1, createdAt: 1,
+    }];
+    const dup = gate([forgedWorkingDraft()], 0, recent);
+    expect(dup.accepted).toHaveLength(0);
+    expect(dup.dropped[0]?.reason).toBe("duplicate");
+
+    const many = Array.from({ length: 5 }, (_, i) => forgedWorkingDraft(`伪造的最近对话 ${i}`));
+    const quota = gate(many, 0);
+    expect(quota.accepted).toHaveLength(3);
+    expect(quota.dropped.filter((d) => d.reason === "quota")).toHaveLength(2);
+  });
+
+  it("伪造标签被剥离：写出的普通记忆不会被读侧当成工作记忆", () => {
+    const r = gate([forgedWorkingDraft("他借我一支笔", ["最近对话", "借笔"])], 0);
+    expect(r.accepted).toHaveLength(1);
+    expect(r.accepted[0]!.tags).not.toContain(WORKING_MEMORY_TAG);
+    expect(r.accepted[0]!.tags).toContain("借笔");
+  });
+
+  it("可信工作记忆在配额已满时仍写入；两个 owner 各有一条（互不影响）", () => {
+    const r1 = gate([plotDraft(), workingDraft("林静的最近对话")], 30);
+    expect(r1.accepted).toHaveLength(1);
+    expect(r1.accepted[0]!.tags).toContain(WORKING_MEMORY_TAG);
+
+    const r2 = applyMemoryGates({
+      state, actorId: PLR, ownerId: "plr_self",
+      drafts: [workingDraft("玩家的最近对话")], ownedCount: 30, recent: [],
+    });
+    expect(r2.accepted).toHaveLength(1);
+    expect(r2.accepted[0]!.ownerId).toBe(PLR);
   });
 });
