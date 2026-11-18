@@ -35,7 +35,7 @@ import {
 import type { MapFail, SceneDialogue, SceneLink, SceneRef, SceneStatus, SceneTemplate } from "./map.data.ts";
 import { DraftEngine } from "./map.drafts.ts";
 import type { DraftListResult, DraftResult, PublishResult } from "./map.drafts.ts";
-import { displayNameOf, knowsNameOf, unknownPlaceholders } from "./view-names.ts";
+import { displayNameOf, knowsNameOf, maskTurnEvents, unknownPlaceholders } from "./view-names.ts";
 
 // ---------------------------------------------------------------- 对外视图（docs/06 §4）
 export interface MapViewLink {
@@ -229,7 +229,9 @@ export class MapService {
     }
     const map = await this.buildMapView(after, actor);
     const scene = this.buildSceneDetail(target, after, refs, npcLocations(after));
-    return { ok: true, scene, events, map };
+    // 出站脱敏（issue #53）：turn 事件可能带未认识 NPC 真名（turn.delta/facts/patch），
+    // 与 /turns /events /state /history 同口径后再下发；用 after 快照省一次事件日志回放。
+    return maskTurnEvents<TravelResult>(roomId, { ok: true, scene, events, map }, this.deps.store, this.deps.appearance, after);
   }
 
   // -------------------------------------------------------------- tick（不经过 Turn / LLM）
@@ -290,12 +292,16 @@ export class MapService {
     }
 
     const after = await this.deps.store.snapshot(roomId);
-    return {
-      ok: true,
-      events,
-      moved: movedSummaries(events, after),
-      map: await this.buildMapView(after, actorId),
-    };
+    const map = await this.buildMapView(after, actorId);
+    // 出站脱敏（issue #53）：apply 的 envelopes 与 moved 摘要都要过同一层掩码，
+    // 否则 tick 响应会从 payload/state 里漏出未认识 NPC 真名。
+    return maskTurnEvents<TickResult>(
+      roomId,
+      { ok: true, events, moved: movedSummaries(events, after), map },
+      this.deps.store,
+      this.deps.appearance,
+      after,
+    );
   }
 
   // -------------------------------------------------------------- 场景对话（npc.scene 导演）

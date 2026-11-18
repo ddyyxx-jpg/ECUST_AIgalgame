@@ -7,7 +7,7 @@
  *   「一位陌生的同学」导致分不清谁在说话；
  * - 玩家在对话里问名字/对方自报姓名后，服务端把他的 `knows_name` 置 true 并写记忆。
  */
-import type { Entity, WorldState } from "../../../packages/shared/src/contract/types.ts";
+import type { Entity, Store, WorldState } from "../../../packages/shared/src/contract/types.ts";
 
 /** 第一个未认识的人 */
 export const UNKNOWN_NPC_NAME = "一位陌生的同学";
@@ -70,4 +70,25 @@ export function maskNamesDeep<T>(value: T, placeholders: Map<string, string>): T
     return out as unknown as T;
   }
   return value;
+}
+
+/**
+ * 出站视图负载的统一脱敏出口（issue #53）：snapshot → unknownPlaceholders → maskNamesDeep。
+ *
+ * /turns(SSE)、/events、/state、/history 各自内联了这三步；地图 travel/tick 原先直接回传
+ * turn.run / arbiter.apply 的 events，绕过这层就会泄露未认识 NPC 真名。统一走这里，避免
+ * 掩码规则在调用点重复实现而与一级认识口径漂移。
+ *
+ * 泛型 T 允许传单条事件、事件数组，或 travel/tick 的整个结果对象（把 moved 摘要、scene
+ * 台词里的真名一并遮掉）；state 可选，调用方已取过快照时传入可省一次事件日志回放。
+ */
+export async function maskTurnEvents<T>(
+  roomId: string,
+  payload: T,
+  store: Pick<Store, "snapshot">,
+  appearance?: Map<string, string>,
+  state?: WorldState,
+): Promise<T> {
+  const base = state ?? (await store.snapshot(roomId));
+  return maskNamesDeep(payload, unknownPlaceholders(base, appearance));
 }
