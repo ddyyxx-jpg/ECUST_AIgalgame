@@ -222,6 +222,25 @@ describe("额度对账端点", () => {
     await app.close();
   });
 
+  it("并发结案：一个 200、一个 409，内存状态与成功响应一致", async () => {
+    const { app, deps } = await makeApp();
+    const { userId } = await registerPlayer(app, "alice");
+    deps.ledger.reserve({ userId, roomId: "room_x", clientTurnId: "c1", dailyLimit: null, actionsEnabled: true });
+    deps.ledger.transition("c1", "unconfirmed");
+
+    const [a, b] = await Promise.all([
+      app.inject({ method: "POST", url: "/api/v1/admin/quota/c1/resolve", headers: { ...ADMIN, ...ORIGIN }, payload: { resolution: "committed", committedSeq: 8 } }),
+      app.inject({ method: "POST", url: "/api/v1/admin/quota/c1/resolve", headers: { ...ADMIN, ...ORIGIN }, payload: { resolution: "failed" } }),
+    ]);
+    const ok = [a, b].find((r) => r.statusCode === 200);
+    const conflict = [a, b].find((r) => r.statusCode === 409);
+    expect(ok).toBeDefined();
+    expect(conflict).toBeDefined();
+    expect((conflict!.json() as { code: string }).code).toBe("E_ILLEGAL_OP");
+    expect(deps.ledger.get("c1")?.state).toBe((ok!.json() as { entry: { state: string } }).entry.state);
+    await app.close();
+  });
+
   it("只允许结案 unconfirmed：running/committed → 409 E_ILLEGAL_OP", async () => {
     const { app, deps } = await makeApp();
     const { userId } = await registerPlayer(app, "alice");

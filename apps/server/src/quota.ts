@@ -78,6 +78,8 @@ export type ResolveResult =
 export class TurnLedger {
   private readonly entries = new Map<string, LedgerEntry>();
   private chain: Promise<unknown> = Promise.resolve();
+  /** 结案/对账的"检查状态 → 落盘 → 更新内存"必须整体串行，否则并发请求会互相覆盖 */
+  private decisionChain: Promise<unknown> = Promise.resolve();
   private skippedFromLoad = 0;
 
   constructor(private readonly filePath: string) {}
@@ -217,17 +219,53 @@ export class TurnLedger {
 
   /** 管理员人工对账：**仅** `unconfirmed` 可结案；running/committed 不可被覆盖（复审 P2） */
   async resolve(query: TurnScope | string, resolution: "committed" | "failed", committedSeq?: number): Promise<ResolveResult> {
-    const key = typeof query === "string" ? this.uniqueKey(query) : scopeKey(query);
-    const entry = key ? this.entries.get(key) : undefined;
-    if (!key || !entry) return { ok: false, code: "E_REF_NOT_FOUND", message: "没有该行动记录" };
-    if (entry.state !== "unconfirmed") {
-      return { ok: false, code: "E_ILLEGAL_OP", message: `仅待核对（unconfirmed）可结案，当前状态 ${entry.state}` };
-    }
+    return this.decide(async () => {
+      const key = typeof query === "string" ? this.uniqueKey(query) : scopeKey(query);
+      const entry = key ? this.entries.get(key) : undefined;
+      if (!key || !entry) return { ok: false, code: "E_REF_NOT_FOUND", message: "没有该行动记录" };
+      if (entry.state !== "unconfirmed") {
+        return { ok: false, code: "E_ILLEGAL_OP", message: `仅待核对（unconfirmed）可结案，当前状态 ${entry.state}` };
+      }
+      return this.writeSettlement(key, entry, resolution, { committedSeq });
+    });
+  }
+
+  /**
+   * 历史自动对账：与人工结案共用同一串行队列和状态转换规则。
+   * 已 committed 幂等返回；仅 unconfirmed/running/reserved 且历史确有提交事实时推进到 committed。
+   */
+  async reconcileCommitted(query: TurnScope, extra: { turnId?: string; committedSeq?: number } = {}): Promise<ResolveResult> {
+    return this.decide(async () => {
+      const key = scopeKey(query);
+      const entry = this.entries.get(key);
+      if (!entry) return { ok: false, code: "E_REF_NOT_FOUND", message: "没有该行动记录" };
+      if (entry.state === "committed") return { ok: true, entry };
+      if (entry.state !== "unconfirmed" && entry.state !== "running" && entry.state !== "reserved") {
+        return { ok: false, code: "E_ILLEGAL_OP", message: `当前状态 ${entry.state} 不能按历史对账结案` };
+      }
+      return this.writeSettlement(key, entry, "committed", extra);
+    });
+  }
+
+  /** 同一账本的结案决策串行执行（不阻塞普通回合 transition 的写队列） */
+  private decide<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.decisionChain.then(fn);
+    this.decisionChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /** 先落盘再改内存：写失败时保持原状态，调用方返回 E_STORE_FAULT 供重试 */
+  private async writeSettlement(
+    key: string,
+    entry: LedgerEntry,
+    resolution: "committed" | "failed",
+    extra: { turnId?: string; committedSeq?: number } = {},
+  ): Promise<ResolveResult> {
     const next: LedgerEntry = {
       ...entry, state: resolution, settledAt: Date.now(),
-      ...(resolution === "committed" && committedSeq !== undefined ? { committedSeq } : {}),
+      ...(resolution === "committed" && extra.committedSeq !== undefined ? { committedSeq: extra.committedSeq } : {}),
+      ...(extra.turnId ? { turnId: extra.turnId } : {}),
     };
-    // 先落盘再确认：append 失败时内存保持 unconfirmed，管理员可重试；不能先改内存再"报告成功"
     try {
       await this.append(next);
     } catch {

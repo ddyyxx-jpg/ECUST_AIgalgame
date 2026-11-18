@@ -87,6 +87,42 @@ describe("TurnLedger 状态机", () => {
     expect(l.get("c1")?.state).toBe("unconfirmed");
   });
 
+  it("并发人工结案只首个成功，第二个状态冲突；重载结果与首次一致", async () => {
+    const file = path.join(tempDir("galgame-quota-resolve-race-"), "ledger.jsonl");
+    const l1 = new TurnLedger(file);
+    l1.reserve({ ...base, clientTurnId: "c1" });
+    l1.transition("c1", "unconfirmed");
+    await l1.flush();
+
+    const [first, second] = await Promise.all([
+      l1.resolve("c1", "committed", 21),
+      l1.resolve("c1", "failed"),
+    ]);
+    expect(first).toMatchObject({ ok: true, entry: { state: "committed", committedSeq: 21 } });
+    expect(second).toMatchObject({ ok: false, code: "E_ILLEGAL_OP" });
+
+    const l2 = new TurnLedger(file);
+    await l2.load();
+    expect(l2.get("c1")).toMatchObject({ state: "committed", committedSeq: 21 });
+  });
+
+  it("历史自动对账与人工结案共用状态规则：幂等 committed、不覆盖 failed", async () => {
+    const l = ledger();
+    l.reserve({ ...base, clientTurnId: "c1" });
+    l.transition("c1", "unconfirmed");
+    const reconciled = await l.reconcileCommitted({ userId: "u_a", roomId: "room_x", clientTurnId: "c1" }, { turnId: "t1", committedSeq: 7 });
+    expect(reconciled).toMatchObject({ ok: true, entry: { state: "committed", turnId: "t1", committedSeq: 7 } });
+    // 再次对账幂等，不追加冲突状态
+    expect(await l.reconcileCommitted({ userId: "u_a", roomId: "room_x", clientTurnId: "c1" })).toMatchObject({ ok: true, entry: { state: "committed" } });
+    // 已 committed 不能再被人工改为 failed
+    expect(await l.resolve("c1", "failed")).toMatchObject({ ok: false, code: "E_ILLEGAL_OP" });
+
+    l.reserve({ ...base, clientTurnId: "c2" });
+    l.transition("c2", "failed");
+    expect(await l.reconcileCommitted({ userId: "u_a", roomId: "room_x", clientTurnId: "c2" })).toMatchObject({ ok: false, code: "E_ILLEGAL_OP" });
+    expect(l.get("c2")?.state).toBe("failed");
+  });
+
   it("每日额度上限 → E_RATE_LIMITED；null 不限；总开关关闭 → E_RATE_LIMITED", () => {
     const l = ledger();
     expect(l.reserve({ ...base, clientTurnId: "c1", dailyLimit: 1 }).ok).toBe(true);

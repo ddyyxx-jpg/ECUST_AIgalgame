@@ -575,7 +575,7 @@ const access = await guardRoom(req, reply, deps, roomId, userIdOf);
       const line = (await deps.history.readAll(roomId)).find(
         (l) => l.clientTurnId === clientTurnId && l.userId === userId && l.actorId === entry.actorId,
       );
-      if (line) deps.ledger?.transition(scope, "committed", { turnId: line.turnId, committedSeq: line.committedSeq });
+      if (line) await deps.ledger?.reconcileCommitted(scope, { turnId: line.turnId, committedSeq: line.committedSeq });
     }
     const current = (scope ? deps.ledger?.get(scope) : undefined) ?? entry;
     return { ok: true, state: current.state, ...(current.turnId ? { turnId: current.turnId } : {}), ...(current.committedSeq !== undefined ? { committedSeq: current.committedSeq } : {}) };
