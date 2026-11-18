@@ -6,7 +6,7 @@
 import { useState, type FormEvent } from "react";
 import { login, register } from "./api-auth.ts";
 import type { AuthStatus, AuthUser } from "./api-auth.ts";
-import { httpFailMessage } from "./http.ts";
+import { authFailMessage } from "./http.ts";
 
 type Mode = "login" | "register";
 
@@ -46,7 +46,7 @@ export default function AuthScreen({ status, notice, onAuthed, onVisitor }: Auth
         mode === "login" ? await login(name, password) : await register(name, password, inviteCode.trim());
       onAuthed(user);
     } catch (err) {
-      setError(httpFailMessage(err));
+      setError(authFailMessage(err));
     } finally {
       setBusy(false);
     }

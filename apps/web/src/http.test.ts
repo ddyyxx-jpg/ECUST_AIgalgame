@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GameError, HttpError, apiFetch, httpFailMessage, isUnauthorized, onUnauthorized, request, setVisitorId, unwrap } from "./http.ts";
+import { GameError, HttpError, apiFetch, authFailMessage, httpFailMessage, isUnauthorized, onUnauthorized, request, setVisitorId, unwrap } from "./http.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -37,6 +37,15 @@ describe("request / HttpError（HTTP 错误分类）", () => {
     await request("gallery", "/api/v1/rooms/r/gallery").catch(() => undefined);
     await request("login", "/api/v1/auth/login").catch(() => undefined);
     expect(seen).toEqual(["expired"]);
+  });
+});
+
+describe("authFailMessage（登录/注册页优先展示服务端 message）", () => {
+  it("401/403/429 保留服务端人话，5xx 折叠为统一提示", () => {
+    expect(authFailMessage(new HttpError(401, "用户名或密码错误"))).toBe("用户名或密码错误");
+    expect(authFailMessage(new HttpError(403, "注册未开放"))).toBe("注册未开放");
+    expect(authFailMessage(new HttpError(429, "尝试过于频繁，请稍后再试"))).toBe("尝试过于频繁，请稍后再试");
+    expect(authFailMessage(new HttpError(503, "boom"))).toBe("服务端暂时不可用");
   });
 });
 

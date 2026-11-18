@@ -24,6 +24,7 @@ import type { ScenarioCatalog } from "./scenarios.ts";
 import { registerViewRoutes } from "./view.routes.ts";
 import { adminTokenOf, guardRoom } from "./room-guard.ts";
 import { AdminTokenGate, type TokenVerdict } from "./admin-token.ts";
+import { isStoreFault } from "./store-fault.ts";
 
 export interface AppDeps {
   store: Store;
@@ -148,6 +149,15 @@ async function safe(reply: FastifyReply, fn: () => Promise<unknown>): Promise<un
 }
 
 export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
+  // 未预期异常兜底：存储故障统一 503 E_STORE_FAULT 并脱敏（不把 fs 路径回显给客户端），
+  // 其余 500 E_MODULE_FAULT；业务拒绝不经过这里。
+  app.setErrorHandler((error, _req, reply) => {
+    console.error("[server] unhandled route error", error);
+    if (isStoreFault(error)) {
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "存储读写失败，请稍后重试" });
+    }
+    return reply.code(500).send({ ok: false, code: "E_MODULE_FAULT", message: "服务器内部错误" });
+  });
   // 所有 admin-token 入口共用同一份失败计数：routes 守卫、room-guard、admin 端点都从这里取
   const adminGate = deps.adminGate ?? new AdminTokenGate(deps.adminToken ?? "");
   deps.adminGate = adminGate;
@@ -187,7 +197,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const path = (req.url ?? "").split("?")[0] ?? "";
     if (!path.startsWith("/api/")) return;
     if (path.startsWith("/api/v1/auth/") || PUBLIC_PATHS.has(path)) return;
-    if ((path.startsWith("/api/v1/admin/") || path.startsWith("/api/v1/settings/") || path.startsWith("/api/v1/map/drafts"))) {
+    if ((path.startsWith("/api/v1/admin/") || path.startsWith("/api/v1/settings/") || path.startsWith("/api/v1/map/drafts") || path.startsWith("/api/v1/rooms/"))) {
       const verdict = adminVerdict(req);
       if (verdict.blocked) return tooManyAdminAttempts(reply, verdict.retryAfterMs);
       if (verdict.ok) return;
@@ -350,13 +360,18 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   /** 玩家档案（记忆的派生视图，不写状态）：私忆只按 userId+ownerId 过滤后返回 */
   app.get("/api/v1/me", async (req, reply) => {
     const q = req.query as { roomId?: string; actorId?: string };
-    const userId = userIdOf(req, deps);
     if (!q.roomId || !q.actorId) return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "roomId/actorId 必填" });
+    // 先定账号口径（缺身份是 schema 错），再走房间存在性 + 成员授权；
+    // 否则非成员能借 `/me` 读到旧档/世界层房间的派生记忆（复审 P2）。
+    const userId = userIdOf(req, deps);
     if (!userId) {
       return deps.auth?.required
         ? reply.code(401).send({ ok: false, code: "E_UNAUTHORIZED", message: "请先登录" })
         : reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "缺少 X-User-Id（或 GALGAME_DEV_USER）" });
     }
+    if (!(await roomGate(q.roomId, reply))) return reply;
+    const access = await guardRoom(req, reply, deps, q.roomId, userIdOf);
+    if (!access) return reply;
     const profile = await deps.memory.profile(userId, q.actorId, q.roomId);
     let impressionCount = 0;
     let pendingImpressions: unknown[] = [];

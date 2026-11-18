@@ -171,6 +171,7 @@ describe("房间授权（issue #33，强制登录模式）", () => {
     });
     expect(second.statusCode).toBe(429);
     expect((second.json() as { code: string }).code).toBe("E_RATE_LIMITED");
+    expect(second.headers["retry-after"]).toBeDefined();
     await app.close();
   });
 
@@ -189,6 +190,14 @@ describe("房间授权（issue #33，强制登录模式）", () => {
     });
     expect(admin.statusCode).toBe(200);
 
+    // token-only 运维通道：无会话也必须能进（guardRoom 的 token 例外不能被登录门挡住）
+    const tokenOnly = await app.inject({
+      method: "GET",
+      url: `/api/v1/rooms/${legacy.roomId}/state`,
+      headers: { "x-admin-token": "dev-admin" },
+    });
+    expect(tokenOnly.statusCode).toBe(200);
+
     const badToken = await app.inject({
       method: "GET",
       url: `/api/v1/rooms/${legacy.roomId}/state`,
@@ -197,6 +206,25 @@ describe("房间授权（issue #33，强制登录模式）", () => {
     expect(badToken.statusCode).toBe(403);
     await app.close();
   });
+  it("房间列表读取故障 → 503 E_STORE_FAULT，不折叠成 404/500", async () => {
+    const deps = await createApp(testConfig());
+    (deps.store as unknown as { listRooms: () => Promise<string[]> }).listRooms = async () => {
+      throw Object.assign(new Error("EACCES: /secret/rooms"), { code: "EACCES" });
+    };
+    const app = Fastify();
+    registerRoutes(app, deps);
+    const cookie = await register(app, "alice");
+
+    const state = await app.inject({ method: "GET", url: "/api/v1/rooms/room_x/state", headers: { cookie } });
+    expect(state.statusCode).toBe(503);
+    expect((state.json() as { code: string }).code).toBe("E_STORE_FAULT");
+    expect(state.body).not.toContain("/secret");
+
+    const gallery = await app.inject({ method: "GET", url: "/api/v1/rooms/room_x/gallery", headers: { cookie } });
+    expect(gallery.statusCode).toBe(503);
+    await app.close();
+  });
+
   it("存档读取故障 → 503 E_STORE_FAULT，不折叠成 404（也不触发任何写）", async () => {
     const { deps, app } = await makeApp();
     const cookieA = await register(app, "alice");

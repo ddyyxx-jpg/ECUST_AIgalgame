@@ -53,8 +53,10 @@ export function registerViewRoutes(app: FastifyInstance, deps: ViewRouteDeps): v
     let rooms: RoomId[];
     try {
       rooms = await deps.store.listRooms();
-    } catch {
-      return notFound(reply);
+    } catch (e) {
+      // listRooms 失败是存储故障，不是"房间不存在"；折叠成 404 会让客户端误清房间指针
+      console.error("[view] 读取房间列表失败", e);
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "房间列表读取失败，请稍后重试" });
     }
     if (!rooms.includes(roomId)) return notFound(reply);
 

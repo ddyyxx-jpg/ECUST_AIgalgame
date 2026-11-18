@@ -60,6 +60,9 @@ export async function guardRoom(
         ? deps.adminGate.check(token, req.ip)
         : { ok: tokenEquals(token, deps.adminToken ?? "") };
     if (verdict.blocked) {
+      if (verdict.retryAfterMs && verdict.retryAfterMs > 0) {
+        reply.header("retry-after", String(Math.max(1, Math.ceil(verdict.retryAfterMs / 1000))));
+      }
       reply.code(429).send({ ok: false, code: "E_RATE_LIMITED", message: "管理员鉴权失败次数过多，请稍后再试" });
       return null;
     }

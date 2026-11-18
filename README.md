@@ -62,7 +62,7 @@ export GALGAME_AUDIT_API_KEY=...
 
 - **访客进入**：`GALGAME_AUTH_REQUIRED=0`（默认）时，标题页提供「以访客身份进入（本地开发）」，无需登录/邀请码。
 - **完整注册**：设 `GALGAME_AUTH_REQUIRED=1` + `GALGAME_INVITE_CODE=<邀请码>`，注册页填该码即可（共享码可重复用，适合组内测试）。反代部署还需 `GALGAME_PUBLIC_ORIGIN=<浏览器地址栏的源>`（CSRF 校验）与 `GALGAME_TRUST_PROXY=1`（按真实 IP 限流）。
-- **管理员 / 一次性邀请**：停服后跑 `GALGAME_ADMIN_PASSWORD=<密码> npx tsx scripts/admin-init.ts <用户名>` 建管理员；管理端点见 [docs/03 §5.2.9](docs/03-接口总表.md)，部署细节见 [deploy/README.md](deploy/README.md)。
+- **管理员 / 一次性邀请**：停服后跑 `GALGAME_ADMIN_PASSWORD=<密码> npx tsx scripts/admin-init.ts <用户名>` 建管理员（已存在账号需该账号当前密码才能提权）；管理端点见 [docs/03 §5.2.9](docs/03-接口总表.md)，部署细节见 [deploy/README.md](deploy/README.md)。
 
 账号数据在 `data/auth/auth.json`（单进程串行写，损坏 fail-fast 不覆盖）；登录态只在 Cookie，清 localStorage 不影响账号。
 

@@ -155,7 +155,8 @@ export class TurnHistory {
     if (known.has(key)) return;
     const file = this.fileFor(line.roomId);
     await mkdir(path.dirname(file), { recursive: true });
-    await appendFile(file, `${JSON.stringify(line)}\n`, "utf8");
+    // 每条记录前先写换行：上次崩溃/短写留下的半截尾行不会粘住这条新历史
+    await appendFile(file, `\n${JSON.stringify(line)}\n`, "utf8");
     known.add(key);
   }
 

@@ -306,10 +306,14 @@ export class AuthStore {
     });
   }
 
-  /** 本地初始化首个管理员（scripts/admin-init.ts，停服后运行）：存在则提权，不存在则创建 */
+  /** 本地初始化首个管理员（scripts/admin-init.ts，停服后运行）：存在则校验密码后提权，不存在则创建 */
   async ensureAdmin(username: string, password?: string): Promise<Account> {
     const existing = this.findUser(username);
     if (existing) {
+      // 防止开放注册期间管理员用户名被抢注后，本地脚本裸提权给陌生人
+      if (!password || !(await verifyPassword(password, existing.passwordHash))) {
+        throw new Error("提权现有账号需要该账号当前密码");
+      }
       const promoted = await this.setUserRole(existing.userId, "admin");
       return promoted ?? existing;
     }

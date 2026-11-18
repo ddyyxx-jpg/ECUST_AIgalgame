@@ -97,6 +97,19 @@ export function isUnauthorized(e: unknown): boolean {
   return false;
 }
 
+/**
+ * 登录/注册页专用：服务端已经给了"用户名或密码错误/注册未开放/尝试过于频繁"这类人话，
+ * 优先原样展示；只有 5xx 才折叠成统一提示，避免 401 被误写成"登录已失效"。
+ */
+export function authFailMessage(e: unknown): string {
+  if (e instanceof HttpError) {
+    if (e.status >= 500) return "服务端暂时不可用";
+    const message = e.message.trim();
+    if (message) return message;
+  }
+  return httpFailMessage(e);
+}
+
 /** 任意异常 → 用户可读提示；网络异常（fetch 抛 TypeError）单独归类 */
 export function httpFailMessage(e: unknown): string {
   if (isUnauthorized(e)) return STATUS_HINTS[401];

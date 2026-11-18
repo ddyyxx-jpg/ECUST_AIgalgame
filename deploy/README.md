@@ -116,4 +116,4 @@ curl -k -X POST https://<公网IP>/api/v1/rooms \
 
 - **访客进入**：`GALGAME_AUTH_REQUIRED=0` 时，前端标题页提供「以访客身份进入（本地开发）」，无需登录/邀请码；旧 `X-User-Id` 兜底仍可用。`GET /api/v1/auth/status` 公开返回 `{required, registrationOpen}`，前端据此决定是否显示登录/注册。
 - **完整注册流程**：设 `GALGAME_AUTH_REQUIRED=1` + `GALGAME_INVITE_CODE=<邀请码>`，注册页填该邀请码即可（环境变量邀请码可重复使用，适合组内测试）。
-- **一次性邀请 / 管理员**：停服后跑 `GALGAME_ADMIN_PASSWORD=<密码> npx tsx scripts/admin-init.ts <用户名>` 建管理员（单写者，务必先停服）；管理员登录后用 `POST /api/v1/admin/invites` 签发一次性邀请（默认 1 次 / 7 天），`POST /api/v1/admin/users/:userId/reset-credential` 签发重置凭证。`registrationOpen` 可在 `PUT /api/v1/admin/settings` 关闭。
+- **一次性邀请 / 管理员**：停服后跑 `GALGAME_ADMIN_PASSWORD=<密码> npx tsx scripts/admin-init.ts <用户名>` 建管理员；用户名已存在时，密码必须是该账号当前密码（校验通过才提权，防止抢注裸提权）（单写者，务必先停服）；管理员登录后用 `POST /api/v1/admin/invites` 签发一次性邀请（默认 1 次 / 7 天），`POST /api/v1/admin/users/:userId/reset-credential` 签发重置凭证。`registrationOpen` 可在 `PUT /api/v1/admin/settings` 关闭。

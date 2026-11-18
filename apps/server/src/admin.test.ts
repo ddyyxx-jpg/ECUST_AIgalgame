@@ -260,6 +260,24 @@ describe("额度对账端点", () => {
   });
 });
 
+describe("存储故障脱敏", () => {
+  it("管理写路由存储故障 → 503 E_STORE_FAULT，不回显 fs 路径", async () => {
+    const { app, deps } = await makeApp();
+    deps.auth.store.updateSettings = async () => {
+      const err = Object.assign(new Error("EACCES: /secret/auth.json"), { code: "EACCES" });
+      throw err;
+    };
+    const res = await app.inject({
+      method: "PUT", url: "/api/v1/admin/settings", headers: { ...ADMIN, ...ORIGIN },
+      payload: { defaultDailyTurns: 3 },
+    });
+    expect(res.statusCode).toBe(503);
+    expect((res.json() as { code: string }).code).toBe("E_STORE_FAULT");
+    expect(res.body).not.toContain("/secret");
+    await app.close();
+  });
+});
+
 describe("P1-1 设置守卫 / 建议11 health 脱敏", () => {
   it("settings：普通玩家会话 403，admin-token 200（反代下不靠本机 IP）", async () => {
     const { app } = await makeApp();

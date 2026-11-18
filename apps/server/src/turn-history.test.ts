@@ -3,6 +3,7 @@
  * 断言结构与游标，不断言叙事文案——文案由模型生成，不可断言。
  */
 import { describe, expect, it } from "vitest";
+import { writeFile } from "node:fs/promises";
 import Fastify from "fastify";
 import { tempDir } from "@galgame/testkit";
 import type { Store, Turn, TurnEvent } from "../../../packages/shared/src/index.ts";
@@ -98,6 +99,26 @@ describe("TurnHistory", () => {
     await history.append(line);
     await history.append({ ...line, narrative: "重放出来的另一份叙事" });
     expect(await history.readAll("room_x")).toHaveLength(1);
+  });
+
+  it("半截尾行不会吞掉下一条历史追加", async () => {
+    const dir = tempDir("galgame-history-tail-");
+    const history = new TurnHistory(dir);
+    await writeFile(history.fileFor("room_x"), '{"formatVersion":1,"roomId":', "utf8");
+    await history.append({
+      formatVersion: 1,
+      roomId: "room_x",
+      turnId: "t1",
+      committedSeq: 1,
+      actorId: "plr_self",
+      input: "hi",
+      narrative: "n",
+      speakers: [],
+      facts: [],
+      createdAt: 1,
+    });
+    const lines = await history.readAll("room_x");
+    expect(lines.map((line) => line.turnId)).toEqual(["t1"]);
   });
 
   it("同 turnId 不同角色各自保留（去重作用域与引擎一致）", async () => {
