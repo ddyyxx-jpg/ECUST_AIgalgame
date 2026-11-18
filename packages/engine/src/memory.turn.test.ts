@@ -145,4 +145,39 @@ describe("Turn × Memory（P1）", () => {
     expect(after).toEqual(before);
     expect(before.length).toBeGreaterThan(0);
   });
+
+  it("#39：业务提案被拒、repair 成功后仍要用修复版产物写记忆", async () => {
+    const llm = new MockLlm({
+      responses: [
+        // 首版：提案引用不存在的实体 → Arbiter 拒绝 → 触发一次 repair
+        JSON.stringify({
+          narrative: "首版叙事：他把伞递给我。",
+          dialogue: "首版台词",
+          proposals: [{ op: "attr.delta", args: { entityId: "npc_ghost", key: "guard", delta: 1 }, reason: "坏提案" }],
+          memory: [{ content: "首版记忆不该落库", tags: ["测试"], salience: 3 }],
+        }),
+        // 修复版：提案合法，记忆应按这一版写
+        JSON.stringify({
+          narrative: "修复版叙事：他把伞还给了我。",
+          dialogue: "修复版台词：明天见。",
+          proposals: [],
+          memory: [{ content: "修复后应该记住的事", tags: ["还伞"], salience: 4 }],
+        }),
+      ],
+    });
+    const { turn, store, memory } = await makeTurn({ llm });
+    const evs = await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "还你伞", clientTurnId: "c1" }));
+    expect(llm.calls).toBe(2);
+    expect(evs.at(-1)?.type).toBe("turn.commit");
+    const delta = evs.find((e) => e.type === "turn.delta");
+    expect(delta && "text" in delta ? delta.text : "").toContain("修复版");
+    const written = (await store.events(ROOM, 0)).filter((e) => e.type === "memory.written");
+    const contents = written.map((e) => (e.payload as { content?: string }).content ?? "");
+    expect(contents.some((c) => c.includes("修复后应该记住的事"))).toBe(true);
+    expect(contents.some((c) => c.includes("首版记忆"))).toBe(false);
+    // 工作记忆也必须来自修复版台词（旧实现 repair 分支漏写记忆，整回合 memory.written=0）
+    const working = memory.all(ROOM).filter((r) => r.tags.includes("最近对话") && r.status !== "tombstoned");
+    expect(working).toHaveLength(1);
+    expect(working[0]!.content).toContain("修复版台词");
+  });
 });

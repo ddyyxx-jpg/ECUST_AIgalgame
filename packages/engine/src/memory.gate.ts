@@ -63,6 +63,13 @@ export interface MemoryGateInput {
   ownerId: ActorId;
   userId?: Id;
   drafts: readonly MemoryDraft[];
+  /**
+   * 引擎内部可信的工作记忆草稿（"最近对话"）。
+   * 只由 turn.memory.drafts 在引擎内构造，**不来自模型输出**；因此可以跳过 G3/G4/G6。
+   * 模型草稿即使伪造 tags=[WORKING_MEMORY_TAG] 也进不了这里——它们走上面的 drafts，
+   * 且标签会被清洗掉（#36：信任边界必须是代码结构，不是一条字符串）。
+   */
+  workingDrafts?: readonly MemoryDraft[];
   /** 同 owner 的近期记忆（去重用；不需要全量） */
   recent: readonly MemoryRecord[];
   /** 同 owner 在本 room 已有的条数（配额用） */
@@ -113,7 +120,9 @@ export function coerceMemoryDrafts(raw: unknown): { drafts: MemoryDraft[]; inval
     }
     const v = parsed.data;
     const draft: MemoryDraft = { ownerId: "", content: v.content.trim() };
-    if (v.tags) draft.tags = v.tags;
+    // "最近对话"是引擎内部工作记忆的保留标签：模型输入里即便带了也要清洗掉，
+    // 否则读侧 isWorkingMemory 会把它误认成可信工作记忆（#36）。
+    if (v.tags) draft.tags = v.tags.filter((t) => t.trim() !== WORKING_MEMORY_TAG);
     if (v.salience !== undefined) draft.salience = v.salience;
     if (v.about) draft.about = v.about;
     if (v.visibility) draft.visibility = v.visibility;
@@ -131,11 +140,14 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
   const dropped: MemoryDrop[] = [];
 
   if (!owner) {
-    for (const d of input.drafts) dropped.push({ reason: "owner_absent", detail: `记忆所有者 ${input.ownerId} 不存在` });
+    for (const _ of [...input.drafts, ...(input.workingDrafts ?? [])]) {
+      dropped.push({ reason: "owner_absent", detail: `记忆所有者 ${input.ownerId} 不存在` });
+    }
     return { accepted, dropped };
   }
 
-  // 同一回合内的配额是"每 owner"，所以 accepted 长度就是已用量
+  // 同一回合内的配额是"每 owner"，所以 accepted 里情节记忆的条数就是已用量。
+  // 工作记忆只走下面的可信通道，**不**计入 written（#36 / #41）。
   let written = 0;
 
   for (const raw of input.drafts) {
@@ -150,7 +162,8 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
       dropped.push({ reason: "permanent_forbidden", detail: "permanent 只能由 canonize 产生" });
       continue;
     }
-    const tags = [...new Set((raw.tags ?? []).map((t) => t.trim()).filter(Boolean))].slice(0, 4);
+    // 保留标签只由引擎内部加盖；模型/种子草稿带了这个 tag 也清洗掉，不能借此绕过 G3/G4/G6
+    const tags = [...new Set((raw.tags ?? []).map((t) => t.trim()).filter((t) => t !== "" && t !== WORKING_MEMORY_TAG))].slice(0, 4);
     const about = [...new Set(raw.about ?? [])];
     let salience = typeof raw.salience === "number" ? Math.min(5, Math.max(1, Math.round(raw.salience))) : 3;
     const visibility = raw.visibility ?? "private";
@@ -176,17 +189,6 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
       continue;
     }
 
-    // ---------- 工作记忆（最近对话）：引擎侧滚动替换，跳过 G3/G4/G6 ----------
-    // 工作记忆每回合都写、内容天然相近；若走去重会被旧条拦下，走配额会被情节记忆或模型记忆挤掉。
-    // 写侧在提交前已把该 owner 的旧工作记忆 tombstone（见 turn.memory.drafts.ts），只保留最新一条。
-    if (tags.includes(WORKING_MEMORY_TAG)) {
-      const draft: MemoryDraft = { ownerId: input.ownerId, content, tags, salience, about, visibility, tier };
-      if (input.userId) draft.userId = input.userId;
-      if (raw.aboutUserIds && raw.aboutUserIds.length > 0) draft.aboutUserIds = raw.aboutUserIds;
-      accepted.push(draft);
-      continue;
-    }
-
     // ---------- G3 去重（与自己近期的记忆比；相似就丢掉新的，避免同一件事记十遍） ----------
     const dup = input.recent.find(
       (r) => r.ownerId === input.ownerId && r.status !== "tombstoned" && trigramSimilarity(r.content, content) > limits.similarity,
@@ -203,7 +205,7 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
     // ---------- G4 重要度下限（玩家相关的记忆至少 4：不能因为模型给 1 就从记忆里消失） ----------
     if (about.includes(input.actorId) || visibility === "public") salience = Math.max(salience, 4);
 
-    // ---------- G6 配额 ----------
+    // ---------- G6 配额（只约束情节记忆；工作记忆走可信通道，不占这里） ----------
     if (written >= limits.writePerTurn) {
       dropped.push({ reason: "quota", detail: `每回合最多写 ${limits.writePerTurn} 条` });
       continue;
@@ -220,6 +222,47 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
     if (raw.aboutUserIds && raw.aboutUserIds.length > 0) draft.aboutUserIds = raw.aboutUserIds;
     // contentHash 只属于永久层（世界层幂等键）；回合内只写 short/long，id 由回合序号派生。
     // 按内容哈希给私忆生成 id 会让"同一句话被两个玩家/两个房间记住"撞 id 并静默丢条（审阅 P1）。
+    accepted.push(draft);
+  }
+
+  // ---------- 工作记忆（引擎内部可信通道，#36） ----------
+  // 信任边界是**调用方式**而不是内容：只有 input.workingDrafts 能进来，模型草稿永远走上面的
+  // drafts 路径（标签会被清掉）。工作记忆每回合一条、内容天然相近，若走 G3 会被旧条拦住，
+  // 若走 G6 会挤占模型/情节记忆的 3/30 配额，因此这里只做形状/归属/秘密检查。
+  for (const raw of input.workingDrafts ?? []) {
+    const content = (raw.content ?? "").trim();
+    if (content.length === 0 || content.length > limits.contentMax) {
+      dropped.push({ reason: "shape", detail: `content 长度须在 1~${limits.contentMax}` });
+      continue;
+    }
+    if (raw.tier === "permanent") {
+      dropped.push({ reason: "permanent_forbidden", detail: "permanent 只能由 canonize 产生" });
+      continue;
+    }
+    // 引擎侧强制加回保留标签：即使调用方忘了，读侧也能认出它是工作记忆
+    const tags = [...new Set([WORKING_MEMORY_TAG, ...(raw.tags ?? []).map((t) => t.trim()).filter(Boolean)])].slice(0, 4);
+    const about = [...new Set(raw.about ?? [])];
+    if (!present.has(input.ownerId)) {
+      dropped.push({ reason: "owner_absent", detail: `${input.ownerId} 不在场，不该记得这一刻` });
+      continue;
+    }
+    if (about.some((id) => !present.has(id))) {
+      dropped.push({ reason: "about_absent", detail: "记忆里提到了不在场的人" });
+      continue;
+    }
+    const visibility = raw.visibility ?? "private";
+    if (visibility === "secret") {
+      dropped.push({ reason: "secret_forbidden", detail: "叙事层不能写 secret 记忆" });
+      continue;
+    }
+    const secretLine = input.state.plots.find((p) => p.status === "active" && p.forbidReveal && content.includes(p.forbidReveal));
+    if (secretLine) {
+      dropped.push({ reason: "secret_forbidden", detail: `内容直说了 plot ${secretLine.id} 的禁语` });
+      continue;
+    }
+    const draft: MemoryDraft = { ownerId: input.ownerId, content, tags, salience: 3, about, visibility, tier: "short" };
+    if (input.userId) draft.userId = input.userId;
+    if (raw.aboutUserIds && raw.aboutUserIds.length > 0) draft.aboutUserIds = raw.aboutUserIds;
     accepted.push(draft);
   }
 

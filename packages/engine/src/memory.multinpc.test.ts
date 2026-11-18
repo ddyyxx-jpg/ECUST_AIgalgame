@@ -296,7 +296,73 @@ describe("多 NPC 记忆注入（issue #20）", () => {
       expect(working).toHaveLength(1);
       expect(working[0]!.content).toContain("第 31 回合");
       const plot = all.filter((r) => !r.tags.includes("最近对话") && r.status !== "tombstoned");
-      expect(plot.length).toBe(30); // 1 条既有 + 29 条模型记忆，达到 sessionCap 后不再增长
+      // #42：被 compact 归档的情节记忆不再占 sessionCap，所以第 31 轮仍能写新记忆（配额不被冻结）。
+      // 活跃情节记忆硬顶仍是 30；归档条数不计入。
+      expect(plot.filter((r) => !r.archived).length).toBeLessThanOrEqual(30);
+      expect(plot.length).toBeGreaterThan(30);
+      expect(plot.some((r) => r.content.includes("第 31 次"))).toBe(true);
+    }
+  });
+
+  it("#41：8 条 x 区写入 + 双 NPC 记忆同回合仍能提交（memory.write 不占 xWritesPerTurn）", async () => {
+    const memory = new EventSourcedMemory();
+    const xOps = Array.from({ length: 8 }, (_, i) => ({
+      op: "attr.delta",
+      args: { entityId: PLR, key: `x.flag${i + 1}`, delta: 1 },
+      reason: "x 区写入回归",
+    }));
+    const llm = new MockLlm({
+      responses: [JSON.stringify({
+        narrative: "林静点头。",
+        dialogue: "好。",
+        proposals: xOps,
+        // 双 NPC 场景：这条模型记忆会按 owner 各写一份，再加种子/工作记忆/滚动 tombstone
+        memory: [{ content: "林静和白晓通都记得明天占座", tags: ["占座"], salience: 4 }],
+      })],
+    });
+    const { turn, store } = await makeTurn({ llm, memory });
+    const evs = await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "记下八条", clientTurnId: "c1" }));
+    expect(evs.at(-1)?.type).toBe("turn.commit");
+    const state = store.state(ROOM);
+    for (let i = 1; i <= 8; i += 1) {
+      expect(state.entities[PLR]?.attrs[`x.flag${i}`]).toBe(1);
+    }
+    const written = (await store.events(ROOM, 0)).filter((e) => e.type === "memory.written");
+    expect(written.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("#42：连续 45 轮后记忆仍持续更新（compact 归档不占 sessionCap）", async () => {
+    const memory = new EventSourcedMemory();
+    const responses: string[] = [];
+    for (let i = 1; i <= 45; i += 1) {
+      responses.push(reply([{ content: `第 ${i} 次约定：帮他占座`, tags: ["占座"], salience: 3 }], `第 ${i} 天，林静在图书馆整理书架。`));
+    }
+    const llm = new MockLlm({ responses });
+    const { turn, store } = await makeTurn({ llm, memory });
+    for (let i = 1; i <= 45; i += 1) {
+      const evs = await collect(turn.run({ roomId: ROOM, actorId: PLR, input: `第 ${i} 回合`, clientTurnId: `c${i}` }));
+      expect(evs.at(-1)?.type).toBe("turn.commit");
+    }
+    const all = memory.all(ROOM);
+    expect(all.some((r) => r.archived)).toBe(true); // >40 轮后确实触发过归档
+    for (const owner of [LIN, BAI]) {
+      const plot = all.filter((r) => r.ownerId === owner && !r.tags.includes("最近对话") && r.status !== "tombstoned");
+      // archived 不占 sessionCap：活跃情节记忆硬顶 30，但归档后配额释放，第 42 次仍写得进去
+      expect(plot.filter((r) => !r.archived).length).toBeLessThanOrEqual(30);
+      expect(plot.some((r) => r.content.includes("第 42 次"))).toBe(true);
+      const working = all.filter((r) => r.ownerId === owner && r.tags.includes("最近对话") && r.status !== "tombstoned");
+      expect(working).toHaveLength(1);
+      expect(working[0]!.content).toContain("第 45 回合");
+    }
+    // 重启（新进程从同一事件日志重建）：archived 不在日志里，必须被确定性重算出来，
+    // 否则配额会被"已归档但忘了"的记忆冻结。
+    const rebuilt = new EventSourcedMemory();
+    rebuilt.sync(ROOM, await store.events(ROOM, 0));
+    const rebuiltAll = rebuilt.all(ROOM);
+    expect(rebuiltAll.some((r) => r.archived)).toBe(true);
+    for (const owner of [LIN, BAI]) {
+      const live = rebuiltAll.filter((r) => r.ownerId === owner && !r.tags.includes("最近对话") && r.status !== "tombstoned" && !r.archived);
+      expect(live.length).toBeLessThanOrEqual(30);
     }
   });
 });

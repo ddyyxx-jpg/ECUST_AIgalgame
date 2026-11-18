@@ -34,13 +34,14 @@ import type { TurnJson } from "./turn.parse.ts";
 import { AuditGate } from "./audit.gate.ts";
 import { createTurnBudget, type DefaultArbiter } from "./arbiter.ts";
 import type { EventSourcedMemory } from "./memory.ts";
-import type { MemoryDraft } from "../../shared/src/index.ts";
 import type { MemoryContext } from "./turn.memory.ts";
 import { readMemoryContext } from "./turn.memory.ts";
-import { attachAboutUserIds, recentDrafts, seedDrafts, toMemoryProposals } from "./turn.memory.drafts.ts";
-import { applyMemoryGates } from "./memory.gate.ts";
+import { buildMemoryPlan } from "./turn.memory.plan.ts";
 import type { Impressions } from "./impressions.ts";
 import { impressionFact } from "./impressions.ts";
+
+/** 回合后低频 compact（#42）：每 N 个已提交回合触发一次，避免每回合都排序/归档 */
+const COMPACT_EVERY = 5;
 
 export interface TurnDeps {
   store: EventLog;
@@ -77,6 +78,8 @@ export class DefaultTurn implements Turn {
   private readonly llmStep: TurnLlm;
   /** clientTurnId 幂等缓存：重复提交只重放，不再花一次 LLM 的钱 */
   private readonly seen = new Map<string, TurnEvent[]>();
+  /** 每房间已提交回合数：只用于低频 compact 限频（进程内计数，重启后重新开始） */
+  private readonly committedTurns = new Map<RoomId, number>();
 
   constructor(deps: TurnDeps) {
     this.deps = deps;
@@ -168,58 +171,42 @@ export class DefaultTurn implements Turn {
         if (gate.kind === "ok") {
           llmProposals.push(...first.proposals);
           narrative = first.text;
-          // 记忆归属：多 NPC 场景每个在场 NPC 各记一份（#20）；0 NPC 时仍记在玩家名下（旧行为）
-          const units = mem.npcs.length > 0
-            ? mem.npcs.map((v) => ({ ownerId: v.npcId, recent: v.recent, ownedCount: v.ownedCount }))
-            : [{ ownerId: mem.ownerId, recent: mem.recent, ownedCount: mem.ownedCount }];
-          // 模型记忆草稿的 ownerId 是空串（由闸门按 owner 重建）；种子草稿已经带 ownerId
-          const baseDrafts = attachAboutUserIds([...seedDrafts(mem, state, req), ...first.memory], state);
-          // 工作记忆（最近对话）：滚动替换旧条 + 叙事/台词分别取（PR #24 P2-1/P2-2）；
-          // tombstone 排在新的 memory.write 之前，同一批内先撤回再写。
-          const working = recentDrafts(mem, state, req, first.narrative, first.dialogue);
-          const accepted: MemoryDraft[] = [];
-          for (const unit of units) {
-            // about → aboutUserIds：canonize/印象靠它反查"这件事该告诉哪个账号"
-            const drafts = [
-              ...baseDrafts.filter((d) => d.ownerId === unit.ownerId || d.ownerId === ""),
-              ...working.drafts.filter((d) => d.ownerId === unit.ownerId),
-            ];
-            const gated = applyMemoryGates({
-              state,
-              actorId: req.actorId,
-              ownerId: unit.ownerId,
-              ...(mem.userId ? { userId: mem.userId } : {}),
-              drafts,
-              recent: unit.recent,
-              ownedCount: unit.ownedCount,
-            });
-            memoryDropped += gated.dropped.length;
-            accepted.push(...gated.accepted);
-          }
-          memoryProposals = [...working.tombstones, ...toMemoryProposals(accepted)];
+          // 记忆写侧统一流水线（#39）：种子/模型记忆/工作记忆都从这里过闸门。
+          // repair 成功后会整份重建，因此这里建的计划在被拒时不会落库（atomic 整批回滚）。
+          const memoryPlan = buildMemoryPlan({
+            mem,
+            state,
+            req,
+            narrative: first.narrative,
+            dialogue: first.dialogue,
+            modelDrafts: first.memory,
+          });
+          memoryProposals = memoryPlan.proposals;
+          memoryDropped = memoryPlan.dropped;
         } else {
           // 审核器故障：文本不下发、提案不采信（可能是被诱导的产物），模块提案照旧
           narrative = this.gate.policy.unavailableText;
         }
       }
 
-      // ① 裁决：默认 atomic —— 任何一条被拒，整批不落库
-      let applied = await this.deps.arbiter.apply(req.roomId, [...moduleProposals, ...llmProposals, ...memoryProposals], causeForBudget, {
-        expectedSeq: seqNow,
-        turnBudget,
-      });
-
-      // 两阶段裁决：记忆写坏了不该毁掉整回合（玩家行动本身是合法的）
-      if (!applied.ok && memoryProposals.length > 0 && applied.rejected.length > 0) {
-        const onlyMemory = applied.rejected.every((r) => memoryProposals.includes(r.proposal));
-        if (onlyMemory) {
-          memoryRejected = true;
-          applied = await this.deps.arbiter.apply(req.roomId, [...moduleProposals, ...llmProposals], causeForBudget, {
-            expectedSeq: seqNow,
-            turnBudget,
-          });
+      // ① 裁决：默认 atomic —— 任何一条被拒，整批不落库。
+      // 两阶段兜底：记忆写坏了不该毁掉整回合（玩家行动本身是合法的），去掉记忆重提一次。
+      const applyBatch = async (ops: Proposal[], expectedSeq: number) => {
+        let result = await this.deps.arbiter.apply(req.roomId, ops, causeForBudget, { expectedSeq, turnBudget });
+        if (!result.ok && memoryProposals.length > 0 && result.rejected.length > 0) {
+          const onlyMemory = result.rejected.every((r) => memoryProposals.includes(r.proposal));
+          if (onlyMemory) {
+            memoryRejected = true;
+            result = await this.deps.arbiter.apply(req.roomId, [...moduleProposals, ...llmProposals], causeForBudget, {
+              expectedSeq,
+              turnBudget,
+            });
+          }
         }
-      }
+        return result;
+      };
+
+      let applied = await applyBatch([...moduleProposals, ...llmProposals, ...memoryProposals], seqNow);
 
       // ② 一次修复：只有"模型给的提案"坏了才值得再问一次；模块的提案坏了属于代码 bug
       let repairError = "";
@@ -244,11 +231,27 @@ export class DefaultTurn implements Turn {
             }
             narrative = gate.kind === "ok" ? repaired.text : this.gate.policy.unavailableText;
             llmProposals.length = 0;
-            if (gate.kind === "ok") llmProposals.push(...repaired.proposals);
-            applied = await this.deps.arbiter.apply(req.roomId, [...moduleProposals, ...llmProposals], causeForBudget, {
-              expectedSeq: this.deps.store.seq(req.roomId),
-              turnBudget,
-            });
+            // #39：修复成功后必须用**修复版产物**重建整份记忆计划；被拒首版的记忆不落库。
+            memoryProposals = [];
+            memoryDropped = 0;
+            memoryRejected = false;
+            if (gate.kind === "ok") {
+              llmProposals.push(...repaired.proposals);
+              const memoryPlan = buildMemoryPlan({
+                mem,
+                state,
+                req,
+                narrative: repaired.narrative,
+                dialogue: repaired.dialogue,
+                modelDrafts: repaired.memory,
+              });
+              memoryProposals = memoryPlan.proposals;
+              memoryDropped = memoryPlan.dropped;
+            }
+            applied = await applyBatch(
+              [...moduleProposals, ...llmProposals, ...memoryProposals],
+              this.deps.store.seq(req.roomId),
+            );
           }
         }
       }
@@ -321,6 +324,8 @@ export class DefaultTurn implements Turn {
       const seq = this.deps.store.seq(req.roomId);
       yield emit({ type: "turn.commit", turnId, seq, usage });
       this.seen.set(req.clientTurnId, events);
+      // #42：低频 compact 只发生在已提交回合之后；失败不影响本回合结果
+      this.maybeCompact(req.roomId, mem);
 
       // 印象只在回合真正提交后标记已投递（否则崩在中途会"说过又没说过"）
       if (deliveredNotices.length > 0 && this.deps.impressions) {
@@ -339,6 +344,22 @@ export class DefaultTurn implements Turn {
     } finally {
       // 不论成功、失败还是抛异常，都释放本回合预算（否则预算表只增不减）
       this.deps.arbiter.endTurn(turnId);
+    }
+  }
+
+  /**
+   * 回合提交后的低频压缩（#42）。
+   * 限频原因：compact 要对 owner 的记忆排序并按 salience 归档 1/3，每回合都做没有必要；
+   * 位置原因：只有已提交的事件才进了记忆索引，失败/回滚的回合不该触发压缩。
+   */
+  private maybeCompact(roomId: RoomId, mem: MemoryContext): void {
+    const n = (this.committedTurns.get(roomId) ?? 0) + 1;
+    this.committedTurns.set(roomId, n);
+    if (n % COMPACT_EVERY !== 0) return;
+    const owners = mem.npcs.length > 0 ? mem.npcs.map((v) => v.npcId) : [mem.ownerId];
+    for (const ownerId of owners) {
+      // compact 是容量优化：失败只影响后续能否继续写，不应该让一个已提交的回合报错
+      void this.deps.memory.compact(roomId, ownerId).catch(() => {});
     }
   }
 

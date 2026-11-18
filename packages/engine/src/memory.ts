@@ -23,13 +23,11 @@ import type {
   MemoryTier,
   RoomId,
 } from "../../shared/src/index.ts";
+import { compactRecords, recomputeArchived } from "./memory.compact.ts";
 
 const W = { tag: 0.45, recency: 0.25, salience: 0.2, relation: 0.1 };
 const THRESHOLD = 0.35;
 const CHARS_PER_TOKEN = 4;
-/** 压缩阈值：超过就把最旧最不重要的 1/3 归档（归档不进 prompt，但还能被检索） */
-const COMPACT_AFTER = 60;
-
 /**
  * token 估算：CJK 按 1 字 = 1 token、其余按 4 字 = 1 token（保守上界）。
  * 全仓只此一份实现 —— 提示词预算、注入硬顶都调它，别各自写一套。
@@ -94,6 +92,9 @@ export class EventSourcedMemory implements Memory {
       if (env.seq <= last) continue;
       this.ingest(env);
     }
+    // 重启后 archived 标记不在事件日志里（compact 是投影侧维护），
+    // 首次同步时按同一确定性规则重算，避免配额被"已归档但忘了"的记忆冻结（#42）。
+    if (last === 0 && (this.syncedSeq.get(roomId) ?? 0) > 0) recomputeArchived(this.byRoom.get(roomId) ?? []);
   }
 
   /** 应用一条事件；不认识的类型直接忽略（日志里有别的子系统的事件） */
@@ -259,13 +260,7 @@ export class EventSourcedMemory implements Memory {
   }
 
   async compact(roomId: RoomId, ownerId: ActorId): Promise<{ impressions: number; archived: number }> {
-    const list = this.byRoom.get(roomId) ?? [];
-    const mine = list.filter((m) => m.ownerId === ownerId && !m.archived && m.status !== "tombstoned");
-    if (mine.length <= COMPACT_AFTER) return { impressions: 0, archived: 0 };
-    mine.sort((a, b) => a.salience - b.salience || a.createdAt - b.createdAt);
-    const take = Math.floor(mine.length / 3);
-    for (const m of mine.slice(0, take)) m.archived = true;
-    return { impressions: mine.length, archived: take };
+    return compactRecords(this.byRoom.get(roomId) ?? [], ownerId);
   }
 
   /** 世界层/私忆通用：按 id 取（canonize 幂等与不可变校验用） */

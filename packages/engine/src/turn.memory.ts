@@ -152,10 +152,11 @@ async function readOwner(
   });
   const owned = memory.all(req.roomId).filter((r) => r.ownerId === ownerId && r.status !== "tombstoned");
   const profile = userId ? await memory.profile(userId, ownerId, req.roomId) : null;
-  // 工作记忆是"最近对话"的滚动副本，不算情节记忆的 sessionCap（PR #24 P2-1）
-  const plotOnly = owned.filter((r) => !isWorkingMemory(r));
+  // 工作记忆是"最近对话"的滚动副本，不算情节记忆的 sessionCap（PR #24 P2-1）；
+  // 已归档（compact 产出）的情节记忆也不再占配额（#42），否则长期房间会被"归档但仍计数"冻结。
+  const plotOnly = owned.filter((r) => !isWorkingMemory(r) && !r.archived);
   const working = owned
-    .filter(isWorkingMemory)
+    .filter((r) => isWorkingMemory(r) && !r.archived)
     .sort((a, b) => b.turn - a.turn || b.createdAt - a.createdAt);
   return {
     long: takeWithin(long, longBudget),
