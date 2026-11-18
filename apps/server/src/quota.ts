@@ -73,7 +73,7 @@ export class LedgerUnreadableError extends Error {
 /** 管理员结案：仅待核对可结案；不存在/状态不符都要能区分，不能静默覆盖 */
 export type ResolveResult =
   | { ok: true; entry: LedgerEntry }
-  | { ok: false; code: "E_REF_NOT_FOUND" | "E_ILLEGAL_OP"; message: string };
+  | { ok: false; code: "E_REF_NOT_FOUND" | "E_ILLEGAL_OP" | "E_STORE_FAULT"; message: string };
 
 export class TurnLedger {
   private readonly entries = new Map<string, LedgerEntry>();
@@ -216,7 +216,7 @@ export class TurnLedger {
   }
 
   /** 管理员人工对账：**仅** `unconfirmed` 可结案；running/committed 不可被覆盖（复审 P2） */
-  resolve(query: TurnScope | string, resolution: "committed" | "failed", committedSeq?: number): ResolveResult {
+  async resolve(query: TurnScope | string, resolution: "committed" | "failed", committedSeq?: number): Promise<ResolveResult> {
     const key = typeof query === "string" ? this.uniqueKey(query) : scopeKey(query);
     const entry = key ? this.entries.get(key) : undefined;
     if (!key || !entry) return { ok: false, code: "E_REF_NOT_FOUND", message: "没有该行动记录" };
@@ -227,8 +227,13 @@ export class TurnLedger {
       ...entry, state: resolution, settledAt: Date.now(),
       ...(resolution === "committed" && committedSeq !== undefined ? { committedSeq } : {}),
     };
+    // 先落盘再确认：append 失败时内存保持 unconfirmed，管理员可重试；不能先改内存再"报告成功"
+    try {
+      await this.append(next);
+    } catch {
+      return { ok: false, code: "E_STORE_FAULT", message: "额度账本写入失败，未结案，可重试" };
+    }
     this.entries.set(key, next);
-    void this.append(next);
     return { ok: true, entry: next };
   }
 

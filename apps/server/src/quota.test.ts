@@ -53,25 +53,38 @@ describe("TurnLedger 状态机", () => {
     expect(l.reserve({ ...base, clientTurnId: "c3" })).toMatchObject({ ok: false, code: "E_TURN_BUSY" });
   });
 
-  it("unconfirmed 保守占用额度；管理员仅可结案 unconfirmed，running/committed 不可覆盖", () => {
+  it("unconfirmed 保守占用额度；管理员仅可结案 unconfirmed，running/committed 不可覆盖", async () => {
     const l = ledger();
     l.reserve({ ...base, clientTurnId: "c1" });
     l.transition("c1", "unconfirmed");
     expect(l.todayTurns("u_a")).toBe(1);
     expect(l.reserve({ ...base, clientTurnId: "c1" })).toMatchObject({ ok: false, code: "E_PRECONDITION" });
 
-    const resolved = l.resolve("c1", "committed", 12);
+    const resolved = await l.resolve("c1", "committed", 12);
     expect(resolved).toMatchObject({ ok: true, entry: { state: "committed", committedSeq: 12 } });
     // 已提交不可被再结案覆盖
-    expect(l.resolve("c1", "failed")).toMatchObject({ ok: false, code: "E_ILLEGAL_OP" });
+    expect(await l.resolve("c1", "failed")).toMatchObject({ ok: false, code: "E_ILLEGAL_OP" });
     expect(l.get("c1")?.state).toBe("committed");
 
     l.reserve({ ...base, clientTurnId: "c2" });
     l.transition("c2", "running");
-    expect(l.resolve("c2", "failed")).toMatchObject({ ok: false, code: "E_ILLEGAL_OP" });
+    expect(await l.resolve("c2", "failed")).toMatchObject({ ok: false, code: "E_ILLEGAL_OP" });
     expect(l.get("c2")?.state).toBe("running");
 
-    expect(l.resolve("missing", "failed")).toMatchObject({ ok: false, code: "E_REF_NOT_FOUND" });
+    expect(await l.resolve("missing", "failed")).toMatchObject({ ok: false, code: "E_REF_NOT_FOUND" });
+  });
+
+  it("人工结案写盘失败：返回 E_STORE_FAULT 且保持 unconfirmed，可重试", async () => {
+    const dir = tempDir("galgame-quota-resolve-fail-");
+    const blocker = path.join(dir, "blocker");
+    await writeFile(blocker, "x", "utf8");
+    const l = new TurnLedger(path.join(blocker, "ledger.jsonl"));
+    l.reserve({ ...base, clientTurnId: "c1" });
+    l.transition("c1", "unconfirmed");
+
+    const failed = await l.resolve("c1", "committed", 9);
+    expect(failed).toMatchObject({ ok: false, code: "E_STORE_FAULT" });
+    expect(l.get("c1")?.state).toBe("unconfirmed");
   });
 
   it("每日额度上限 → E_RATE_LIMITED；null 不限；总开关关闭 → E_RATE_LIMITED", () => {

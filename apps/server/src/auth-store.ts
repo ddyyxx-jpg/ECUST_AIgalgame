@@ -235,7 +235,11 @@ export class AuthStore {
   async register(username: string, password: string, opts: { inviteCode?: string; envCode: string; registrationOpen: boolean }): Promise<RegisterResult> {
     const hash = await hashPassword(password);
     return this.mutate((doc) => {
-      if (!opts.registrationOpen) return { ok: false, code: "E_FORBIDDEN", message: "注册未开放" } as const;
+      // 开关以**串行写事务内的最新状态**为准：密码哈希期间管理员可能已关闭注册；
+      // 继续用进入函数时的旧值会放行在途请求建号（复审 P2）。
+      if (!doc.settings.registrationOpen || !opts.registrationOpen) {
+        return { ok: false, code: "E_FORBIDDEN", message: "注册未开放" } as const;
+      }
       if (doc.users.some((u) => u.username === username)) {
         return { ok: false, code: "E_ID_TAKEN", message: "用户名已被占用" } as const;
       }

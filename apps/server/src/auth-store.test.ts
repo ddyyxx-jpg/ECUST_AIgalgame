@@ -94,6 +94,16 @@ describe("注册 / 邀请原子性", () => {
     }
   });
 
+  it("在途注册以事务内最新开关为准：密码哈希期间关闭注册则不建号", async () => {
+    const store = storeAt(tempDir("galgame-authstore-reg-race-"));
+    await store.load();
+    // register 先做 scrypt；这里在哈希期间排队关闭注册，事务必须看到最新值
+    const pending = store.register("alice", "password123", { envCode: "env", inviteCode: "env", registrationOpen: true });
+    await store.updateSettings({ registrationOpen: false });
+    expect(await pending).toMatchObject({ ok: false, code: "E_FORBIDDEN" });
+    expect(store.findUser("alice")).toBeUndefined();
+  });
+
   it("重置凭证一次性：consumeReset 成功后复用失败", async () => {
     const store = storeAt(tempDir("galgame-authstore-reset-"));
     await store.load();

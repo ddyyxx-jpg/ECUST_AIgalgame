@@ -241,6 +241,13 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     return true;
   };
 
+  /** 全局暂停：所有会写世界/历史的入口共用；地图 travel/tick/dialogue 不能绕过回合入口的开关 */
+  const actionsPaused = (reply: FastifyReply): boolean => {
+    if (deps.auth?.store.getSettings().actionsEnabled !== false) return false;
+    reply.code(429).send({ ok: false, code: "E_RATE_LIMITED", message: "本轮体验已暂停新行动" });
+    return true;
+  };
+
   // 公开健康检查只回 ok + 契约版本（建议11）：canonize 的启用/judge 等运维细节
   // 移到鉴权后的 /admin/stats，避免向未登录者暴露内部 fail-closed 配置。
   app.get("/api/v1/health", async () => ({
@@ -642,6 +649,7 @@ const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!parsed.success) return schemaError(zodMessage(parsed.error));
     const access = await guardRoom(req, reply, deps, roomId, userIdOf, { actorId: parsed.data.actorId });
     if (!access) return reply;
+    if (actionsPaused(reply)) return reply;
     return safe(reply, () => deps.map.travel(roomId, parsed.data.actorId, parsed.data.locId));
   });
 
@@ -652,6 +660,7 @@ const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!parsed.success) return schemaError(zodMessage(parsed.error));
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
+    if (actionsPaused(reply)) return reply;
     return safe(reply, () => deps.map.tick(roomId, parsed.data));
   });
 
@@ -662,6 +671,7 @@ const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!parsed.success) return schemaError(zodMessage(parsed.error));
     const access = await guardRoom(req, reply, deps, roomId, userIdOf, { actorId: parsed.data.actorId });
     if (!access) return reply;
+    if (actionsPaused(reply)) return reply;
     return safe(reply, () =>
       deps.map.openDialogue(roomId, parsed.data.actorId, parsed.data.sceneId, parsed.data.dialogueId),
     );

@@ -74,6 +74,38 @@ describe("turns 额度结算", () => {
     await app.close();
   });
 
+  it("总开关关闭时地图写入口同样 429，且不推进时段/不写历史", async () => {
+    const { app, deps, cookie, roomId, actorId } = await setup();
+    await app.inject({ method: "PUT", url: "/api/v1/admin/settings", headers: { ...ADMIN, ...ORIGIN }, payload: { actionsEnabled: false } });
+    const before = await deps.store.snapshot(roomId);
+    const historyBefore = (await deps.history!.readAll(roomId)).length;
+
+    const tick = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/map/tick`,
+      headers: { cookie, ...ORIGIN }, payload: { advance: true },
+    });
+    expect(tick.statusCode).toBe(429);
+    expect((tick.json() as { code: string }).code).toBe("E_RATE_LIMITED");
+
+    const travel = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/map/travel`,
+      headers: { cookie, ...ORIGIN }, payload: { actorId, locId: "loc_teaching_1" },
+    });
+    expect(travel.statusCode).toBe(429);
+
+    const dialogue = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/map/dialogue`,
+      headers: { cookie, ...ORIGIN }, payload: { actorId, sceneId: "loc_library", dialogueId: "d1" },
+    });
+    expect(dialogue.statusCode).toBe(429);
+
+    const after = await deps.store.snapshot(roomId);
+    expect(after.clock).toEqual(before.clock);
+    expect(after.room.scene.locId).toBe(before.room.scene.locId);
+    expect((await deps.history!.readAll(roomId)).length).toBe(historyBefore);
+    await app.close();
+  });
+
   it("提交后结案 committed；重复逻辑 ID → 409 E_PRECONDITION 带 committedSeq", async () => {
     const { app, deps, roomId, turn } = await setup();
     const first = await turn("c1");

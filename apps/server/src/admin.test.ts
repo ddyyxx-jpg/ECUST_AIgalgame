@@ -213,6 +213,15 @@ describe("额度对账端点", () => {
     await app.close();
   });
 
+  it("账本写盘失败 → 503 E_STORE_FAULT，不对外确认结案", async () => {
+    const { app, deps } = await makeApp();
+    deps.ledger.resolve = async () => ({ ok: false, code: "E_STORE_FAULT", message: "额度账本写入失败，未结案，可重试" });
+    const res = await app.inject({ method: "POST", url: "/api/v1/admin/quota/c1/resolve", headers: { ...ADMIN, ...ORIGIN }, payload: { resolution: "committed", committedSeq: 4 } });
+    expect(res.statusCode).toBe(503);
+    expect((res.json() as { code: string }).code).toBe("E_STORE_FAULT");
+    await app.close();
+  });
+
   it("只允许结案 unconfirmed：running/committed → 409 E_ILLEGAL_OP", async () => {
     const { app, deps } = await makeApp();
     const { userId } = await registerPlayer(app, "alice");
