@@ -10,6 +10,7 @@ import type { LlmSettings } from "./settings.ts";
 import type { SaveIndex } from "./saves.ts";
 import type { TurnHistory } from "./turn-history.ts";
 import { registerResumeRoutes } from "./resume.routes.ts";
+import { makeRoomExists } from "./room-exists.ts";
 import { isSafeRoomId } from "../../../packages/engine/src/store.ts";
 import { EMPTY_SCENARIOS } from "./scenarios.ts";
 import type { ScenarioCatalog } from "./scenarios.ts";
@@ -126,6 +127,25 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     }
   });
 
+  const roomExists = makeRoomExists(deps.store);
+
+  /**
+   * 房间入口统一守卫（issue #37）：世界层房间与不存在的房间一律 404，且必须先于
+   * body 校验、SSE 开流与任何写操作。存在性走 `listRooms()`（持久化事实），
+   * 不再依赖 `snapshot()` 抛错——后者对缺失房间返回空状态，会把未知房间当 200。
+   */
+  const roomGate = async (roomId: string, reply: FastifyReply): Promise<boolean> => {
+    if (isWorldRoom(roomId)) {
+      reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "世界层房间不接受该操作" });
+      return false;
+    }
+    if (!(await roomExists(roomId))) {
+      reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "房间不存在" });
+      return false;
+    }
+    return true;
+  };
+
   app.get("/api/v1/health", async () => ({
     ok: true,
     contract: deps.version,
@@ -217,21 +237,21 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   });
 
   // 续玩/存档（issue #7）：独立区块，见 resume.routes.ts
-  registerResumeRoutes(app, deps, { userIdOf, isWorldRoom });
+  registerResumeRoutes(app, deps, { userIdOf, isWorldRoom, roomExists });
 
   app.get("/api/v1/rooms/:roomId/state", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
-    if (isWorldRoom(roomId)) return reply.code(404).send({ error: "E_ROOM_NOT_FOUND" });
+    if (!(await roomGate(roomId, reply))) return reply;
     try {
       return await deps.store.snapshot(roomId);
     } catch {
-      return reply.code(404).send({ error: "E_ROOM_NOT_FOUND" });
+      return reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "房间不存在或事件日志不可读" });
     }
   });
 
   app.get("/api/v1/rooms/:roomId/events", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
-    if (isWorldRoom(roomId)) return reply.code(404).send({ error: "E_ROOM_NOT_FOUND" });
+    if (!(await roomGate(roomId, reply))) return reply;
     const q = req.query as { fromSeq?: string; limit?: string };
     const from = Number(q.fromSeq ?? 0);
     const limit = Math.min(Number(q.limit ?? 200), 200);
@@ -242,7 +262,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */
   app.post("/api/v1/rooms/:roomId/turns", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
-    if (isWorldRoom(roomId)) return reply.code(404).send({ code: "E_ROOM_NOT_FOUND", message: "世界层房间不接受回合" });
+    if (!(await roomGate(roomId, reply))) return reply;
     const body = (req.body ?? {}) as { actorId?: string; input?: string; clientTurnId?: string; userId?: string; options?: Record<string, unknown> };
     if (!body.actorId || !body.input || !body.clientTurnId) {
       return reply.code(400).send({ code: "E_SCHEMA_INVALID", message: "actorId/input/clientTurnId 必填" });
@@ -326,28 +346,32 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   });
 
   // ---------------------------------------------------------------- 地图（docs/06 §4）
-  app.get("/api/v1/rooms/:roomId/map", (req, reply) => {
+  app.get("/api/v1/rooms/:roomId/map", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (!(await roomGate(roomId, reply))) return reply;
     const q = req.query as { actorId?: string };
     return safe(reply, () => deps.map.getMap(roomId, q.actorId));
   });
 
-  app.post("/api/v1/rooms/:roomId/map/travel", (req, reply) => {
+  app.post("/api/v1/rooms/:roomId/map/travel", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (!(await roomGate(roomId, reply))) return reply;
     const parsed = TravelBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) return schemaError(zodMessage(parsed.error));
     return safe(reply, () => deps.map.travel(roomId, parsed.data.actorId, parsed.data.locId));
   });
 
-  app.post("/api/v1/rooms/:roomId/map/tick", (req, reply) => {
+  app.post("/api/v1/rooms/:roomId/map/tick", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (!(await roomGate(roomId, reply))) return reply;
     const parsed = TickBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) return schemaError(zodMessage(parsed.error));
     return safe(reply, () => deps.map.tick(roomId, parsed.data));
   });
 
-  app.post("/api/v1/rooms/:roomId/map/dialogue", (req, reply) => {
+  app.post("/api/v1/rooms/:roomId/map/dialogue", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
+    if (!(await roomGate(roomId, reply))) return reply;
     const parsed = DialogueBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) return schemaError(zodMessage(parsed.error));
     return safe(reply, () =>

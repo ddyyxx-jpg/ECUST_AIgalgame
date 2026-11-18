@@ -173,6 +173,10 @@
 - 2026-11-17 ｜ main ｜ `CHANGELOG.md` ｜ docs ｜ 新增根目录更新日志（M0 / 引擎 3.0.0 / 审核与锚定 / 地图 v0.2，按日期分段） ｜ GitHub 上需要可读的更新日志；协议版本以 CONTRACT_VERSION 为准 ｜ tsc 0；14 文件/117 用例；8 项契约 ｜ 无
 - 2026-11-17 ｜ main ｜ `CHANGELOG.md`（二次） ｜ docs ｜ 小节标题对齐 tag（v0.1.0/v0.1.1/v0.1.2/v0.2.0），拆出引擎与审核/锚定两段 ｜ 让 CHANGELOG 与 GitHub Releases 一一对应 ｜ tsc 0；14 文件/117 用例；8 项契约 ｜ 无
 
+### fix/room-tick（issue #37 / #38，待 PR）
+
+- 2026-11-18 ｜ `fix/room-tick` ｜ 本提交 ｜ fix ｜ 新增 `apps/server/src/room-exists.ts`：房间入口先判持久化存在性（有 `listRooms` 用文件名，否则退化为读 1 条事件），未知/世界层房间一律 404 `E_ROOM_NOT_FOUND`，不隐式落盘；覆盖 `/state`、`/events`、`/turns`（SSE 前）、`/history`、`/map`、`/map/travel`、`/map/tick`、`/map/dialogue`。`map.ts` 的 tick 改为 `time.advance` 与模块提案单批 atomic apply，失败零部分提交（#38）｜ 根因：#37 `FileStore.snapshot` 对未知房间返回空 WorldState 不抛错 → 200 且 tick 写幽灵日志；#38 先单独提交时间推进，后阶段失败无法撤销。判定用持久化事实（`listRooms`）而非 snapshot 抛错，避免依赖实现细节；`time.advance` 不进 dryRun（3.2.1 起按信封来源 trustedOrigin，dryRun 的 `arbiter.dryRun` 来源不被信任），由带 `cause {type:"tick"}` 的 apply 一并裁决 ｜ tsc 0；38 文件/273 用例（新增 6：room-guard 3 + map tick 回归 3）；check:contract 8 项（3.2.1） ｜ 版本号由 Lead 统一落 3.3.0（本 PR 不改 header/version.ts）；未改 engine/web；`docs/03` §10.15、`docs/06` §4/§4.3/§9 已同步
+
 ### fix/store-robustness（PR #9，已 squash 合并 `d55b29e`）
 
 - 2026-11-17 ｜ `fix/store-robustness` ｜ 本提交 ｜ fix ｜ `FileStore.readLog` 的 `loaded` 置位移到"成功读取+解析+回放"之后；断档修复改为先写回文件再改内存；回放异常时清掉半载入的内存状态。新增回归测试：同名目录占位模拟 `readFile` EISDIR（稳定、不依赖 root/权限），第二次 `load` 必须读到真实日志 ｜ 读失败先置 `loaded` 会让房间永久"已载入"（seq 假 0），后续 append 从 seq 1 重写并覆盖真实日志，属 issue #7 §C 的真实丢数据风险；先写盘再改内存保证失败可重试 ｜ tsc 0；26 文件/186 用例；check:contract 8 项（3.1.0） ｜ 未改 web/memory 索引（`byRoom`/`syncedSeq` 属 `memory.ts`，本次不涉及）；待 PR 审阅

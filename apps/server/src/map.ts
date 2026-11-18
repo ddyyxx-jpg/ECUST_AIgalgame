@@ -232,29 +232,10 @@ export class MapService {
   // -------------------------------------------------------------- tick（不经过 Turn / LLM）
   async tick(roomId: string, opts: { advance?: boolean } = {}): Promise<TickResult> {
     const events: Envelope[] = [];
-    let phase = (await this.deps.store.snapshot(roomId)).clock.phase;
-
-    if (opts.advance) {
-      const applied = await this.deps.arbiter.apply(
-        roomId,
-        [{ op: "time.advance", args: { phase: nextPhase(phase) }, reason: "地图 tick 推进时段", by: "tick" }],
-        this.cause(roomId, "tick"),
-      );
-      const rejected = applied.rejected[0];
-      if (!applied.ok || rejected) {
-        return fail(
-          rejected && isErrorCode(rejected.code) ? rejected.code : "E_MODULE_FAULT",
-          rejected?.detail ?? "time.advance 被拒绝",
-        );
-      }
-      events.push(...applied.events);
-      phase = applied.events.some((e) => e.type === "clock.advanced")
-        ? (await this.deps.store.snapshot(roomId)).clock.phase
-        : phase;
-    }
-
     const state = await this.deps.store.snapshot(roomId);
+    const phase = opts.advance ? nextPhase(state.clock.phase) : state.clock.phase;
     const actorId = playerActorId(state);
+
     let proposals: Proposal[];
     try {
       proposals = await this.deps.modules.tick(
@@ -264,25 +245,45 @@ export class MapService {
     } catch (e) {
       return fail(codeOfError(e), e instanceof Error ? e.message : String(e));
     }
-    if (proposals.length > 0) {
-      // 先整批 dryRun：任何一条被拒就整批不落库，避免 NPC 半移动、坐标与镜头不一致
-      const dry = await this.deps.arbiter.dryRun(roomId, proposals);
-      const dryRejected = dry.rejected[0];
-      if (!dry.ok || dryRejected) {
-        return fail(
-          dryRejected && isErrorCode(dryRejected.code) ? dryRejected.code : "E_MODULE_FAULT",
-          dryRejected?.detail ?? "tick 提案未通过 Arbiter 校验",
-        );
+
+    // issue #38：time.advance 与模块提案必须合成**同一批**提交。旧实现先单独提交时间推进，
+    // 后阶段失败时时段已经前进且无法撤销（响应 ok:false 但世界变了，重试还会多推一次）。
+    // 注意：模块拿到的 ctx.clock 是推进前状态，目标 phase 以 `tick(ctx, phase)` 的参数为准。
+    const batch: Proposal[] = opts.advance
+      ? [{ op: "time.advance", args: { phase }, reason: "地图 tick 推进时段", by: "tick" }, ...proposals]
+      : proposals;
+    if (batch.length > 0) {
+      // 先整批 dryRun：任何一条被拒就整批不落库，避免 NPC 半移动、坐标与镜头不一致。
+      // 注意 dryRun 的信封来源是 `arbiter.dryRun`，3.2.1 的 `time.advance` 只认
+      // engine/tick 来源（不认 proposal.by），所以这里只预检模块提案；time.advance 由
+      // 下面带 `cause {type:"tick"}` 的 apply 一并裁决——apply 是 atomic，失败即整批回滚。
+      if (proposals.length > 0) {
+        const dry = await this.deps.arbiter.dryRun(roomId, proposals);
+        const dryRejected = dry.rejected[0];
+        if (!dry.ok || dryRejected) {
+          return fail(
+            dryRejected && isErrorCode(dryRejected.code) ? dryRejected.code : "E_MODULE_FAULT",
+            dryRejected?.detail ?? "tick 提案未通过 Arbiter 校验",
+          );
+        }
       }
-      const applied = await this.deps.arbiter.apply(roomId, proposals, this.cause(roomId, "tick"));
-      const rejected = applied.rejected[0];
-      if (!applied.ok || rejected) {
-        return fail(
-          rejected && isErrorCode(rejected.code) ? rejected.code : "E_MODULE_FAULT",
-          rejected?.detail ?? "tick 提案被 Arbiter 拒绝",
-        );
+      // apply 默认 atomic：dryRun 与 apply 之间若有竞争/落盘失败，整批回滚（含 time.advance）。
+      try {
+        const applied = await this.deps.arbiter.apply(roomId, batch, this.cause(roomId, "tick"));
+        const rejected = applied.rejected[0];
+        if (!applied.ok || rejected) {
+          const code = rejected && isErrorCode(rejected.code)
+            ? rejected.code
+            : applied.error && isErrorCode(applied.error.code)
+              ? applied.error.code
+              : "E_MODULE_FAULT";
+          return fail(code, rejected?.detail ?? applied.error?.message ?? "tick 提案未提交");
+        }
+        events.push(...applied.events);
+      } catch (e) {
+        // 兜底未预期异常；语义与 E_STORE_FAULT 一致：整批未提交
+        return fail(codeOfError(e), e instanceof Error ? e.message : String(e));
       }
-      events.push(...applied.events);
     }
 
     const after = await this.deps.store.snapshot(roomId);

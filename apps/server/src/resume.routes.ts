@@ -14,6 +14,8 @@ import type { AppDeps } from "./routes.ts";
 export interface ResumeRouteHelpers {
   userIdOf(req: Parameters<typeof import("./routes.ts").userIdOf>[0], deps: AppDeps): string | undefined;
   isWorldRoom(roomId: string): boolean;
+  /** 房间存在性（issue #37）：以持久化事实判定，避免 snapshot 对缺失房间返回空状态 */
+  roomExists(roomId: string): Promise<boolean>;
 }
 
 function missingUser(reply: FastifyReply) {
@@ -21,7 +23,7 @@ function missingUser(reply: FastifyReply) {
 }
 
 export function registerResumeRoutes(app: FastifyInstance, deps: AppDeps, helpers: ResumeRouteHelpers): void {
-  const { userIdOf, isWorldRoom } = helpers;
+  const { userIdOf, isWorldRoom, roomExists } = helpers;
   app.get("/api/v1/me/saves", async (req, reply) => {
     const userId = userIdOf(req, deps);
     if (!userId) return missingUser(reply);
@@ -43,6 +45,9 @@ export function registerResumeRoutes(app: FastifyInstance, deps: AppDeps, helper
     const { roomId } = req.params as { roomId: string };
     if (isWorldRoom(roomId)) {
       return reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "世界层房间没有可恢复的对话历史" });
+    }
+    if (!(await roomExists(roomId))) {
+      return reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "房间不存在" });
     }
 
     // 权限：本房成员可读。老房间（3.1 之前建房、成员表没有 userId）退化为"可读"，

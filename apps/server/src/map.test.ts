@@ -133,6 +133,8 @@ class FakeModules implements Modules {
   tickProposals: Proposal[] = [];
   /** 模拟真 map 模块对"不可达/同点"返回 ok:true + 空 proposals 的行为 */
   noTravel = false;
+  /** 模拟模块 tick 抛错（issue #38：失败不能留下已推进的时段） */
+  tickError: Error | null = null;
 
   list(): ModuleInfo[] {
     return [];
@@ -151,6 +153,7 @@ class FakeModules implements Modules {
   }
   async tick(_ctx: ModuleContext, phase: Phase): Promise<Proposal[]> {
     this.tickedPhases.push(phase);
+    if (this.tickError) throw this.tickError;
     return this.tickProposals;
   }
   context(): ContextSlice[] {
@@ -187,14 +190,28 @@ async function writeFixture(contentDir: string): Promise<void> {
   }
 }
 
-async function setup(llm = new MockLlm({ responses: [VALID_SCENE] })): Promise<Fixture> {
+/** 可注入一次 append 失败的 store：模拟落盘异常（issue #38 的"写盘失败"用例） */
+class FlakyStore extends EventSourcedStore {
+  failAppendOnce = false;
+  override async append(roomId: string, envs: Envelope[]): Promise<void> {
+    if (this.failAppendOnce) {
+      this.failAppendOnce = false;
+      throw new Error("simulated disk full");
+    }
+    return super.append(roomId, envs);
+  }
+}
+
+async function setup(
+  llm = new MockLlm({ responses: [VALID_SCENE] }),
+  store: EventSourcedStore = new EventSourcedStore({ worldId: WORLD.worldId, locId: WORLD.startLocId }),
+): Promise<Fixture> {
   const root = tempDir("galgame-map-test-");
   const contentDir = path.join(root, "content");
   const dataDir = path.join(root, "data");
   await writeFixture(contentDir);
 
   const registry = new JsonRegistry({ attrs: COORD_ATTRS });
-  const store = new EventSourcedStore({ worldId: WORLD.worldId, locId: WORLD.startLocId });
   const arbiter = new DefaultArbiter({ store, registry });
   const modules = new FakeModules();
 
@@ -451,6 +468,44 @@ describe("MapService · tick", () => {
     const res = await f.service.tick(ROOM_ID, { advance: false });
     expect(res).toMatchObject({ ok: false, code: "E_ENTITY_MISSING" });
     expect(f.store.state(ROOM_ID).entities.npc_missing).toBeUndefined();
+  });
+
+  it("advance:true 时模块抛错：时段不推进、不产生事件（issue #38）", async () => {
+    const f = await setup();
+    const seqBefore = f.store.seq(ROOM_ID);
+    f.modules.tickError = new Error("module boom");
+    const res = await f.service.tick(ROOM_ID, { advance: true });
+    expect(res).toMatchObject({ ok: false, code: "E_MODULE_FAULT" });
+    expect(f.store.state(ROOM_ID).clock.phase).toBe("morning");
+    expect(f.store.seq(ROOM_ID)).toBe(seqBefore);
+  });
+
+  it("advance:true 时提案被拒：时段不推进，重试只推进一次（issue #38）", async () => {
+    const f = await setup();
+    f.modules.tickProposals = [{ op: "move.to", args: { actorId: "npc_missing", locId: "loc_canteen" }, reason: "坏日程" }];
+    const first = await f.service.tick(ROOM_ID, { advance: true });
+    expect(first).toMatchObject({ ok: false, code: "E_ENTITY_MISSING" });
+    // 旧实现此时已经提交了 time.advance：ok=false 但 phase 已经变成 noon
+    expect(f.store.state(ROOM_ID).clock.phase).toBe("morning");
+
+    // 修好日程后重试：只推进一次（morning→noon），不是补推进到 afternoon
+    f.modules.tickProposals = [];
+    const retry = await f.service.tick(ROOM_ID, { advance: true });
+    expect(retry.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).clock.phase).toBe("noon");
+  });
+
+  it("落盘失败时整批不提交：时段留在原处，重试只推进一次（issue #38）", async () => {
+    const flaky = new FlakyStore({ worldId: WORLD.worldId, locId: WORLD.startLocId });
+    const f = await setup(undefined, flaky);
+    flaky.failAppendOnce = true;
+    const first = await f.service.tick(ROOM_ID, { advance: true });
+    expect(first).toMatchObject({ ok: false, code: "E_STORE_FAULT" });
+    expect(f.store.state(ROOM_ID).clock.phase).toBe("morning");
+
+    const retry = await f.service.tick(ROOM_ID, { advance: true });
+    expect(retry.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).clock.phase).toBe("noon");
   });
 });
 
