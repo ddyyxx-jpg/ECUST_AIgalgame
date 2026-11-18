@@ -7,7 +7,7 @@
  * - 输出不是合法 JSON → 带解析错误重问，只让模型改格式，不许它借机改内容。
  * 前者语义失败重试无意义（retryable=false），后者才是可重试错误（retryable=true）。
  */
-import type { ActorId, LlmPort, MemoryDraft, Proposal, Registry, TurnRequest, Usage, WorldState } from "../../shared/src/index.ts";
+import type { ActorId, ErrorCode, LlmPort, MemoryDraft, Proposal, Registry, TurnRequest, Usage, WorldState } from "../../shared/src/index.ts";
 import type { RealityKind, RealityPolicy } from "./reality.ts";
 import { filterProposals, realityFraming } from "./reality.ts";
 import { codeOf, errMessage, parseTurn } from "./turn.parse.ts";
@@ -41,6 +41,16 @@ export interface RejectedReason {
   detail: string;
 }
 
+/** 第二次调用失败：必须带上 code（以及原始异常）——超时/限流不能被 ask() 改写成 E_LLM_FORMAT */
+export interface RepairFailure {
+  ok: false;
+  /** 第二次调用自身的错误码；解析不出 JSON 时为 E_LLM_FORMAT，其余原样保留（如 E_LLM_TIMEOUT） */
+  code: ErrorCode;
+  error: string;
+  /** 原始异常：ask() 对非格式错误原样上抛，DefaultTurn 从异常取最终码 */
+  cause?: unknown;
+}
+
 export class TurnLlm {
   constructor(private readonly deps: TurnLlmDeps) {}
 
@@ -55,9 +65,12 @@ export class TurnLlm {
       // 只有"格式错"值得重问；超时/限流由上层按可重试错误直接上报，避免多花一次调用
       if (codeOf(e) !== "E_LLM_FORMAT") throw e;
       const repaired = await this.repair(req, state, [], kind, mem, errMessage(e));
-      // 错误信息可能带网关/模型的长报文：压平并截到 200 字，避免把整段原文写进 turn.error 与日志
-      if (!repaired.ok) throw formatError(`模型输出不是合法 JSON，自动修复一次后仍失败：${clip(repaired.error)}`);
-      return repaired;
+      if (repaired.ok) return repaired;
+      // 重问这次调用若遇到超时/限流，必须保留原码上抛：否则基础设施故障会被误报成
+      // E_LLM_FORMAT，超时切 provider、按码分流都会失效（PR #23 复审 P2）
+      if (repaired.code !== "E_LLM_FORMAT") throw causeOf(repaired);
+      // 第二次输出仍是坏 JSON，才算"格式错误"；长报文压平截 200 字，避免整段原文进 turn.error/日志
+      throw formatError(`模型输出不是合法 JSON，自动修复一次后仍失败：${clip(repaired.error)}`);
     }
   }
 
@@ -87,7 +100,7 @@ export class TurnLlm {
     kind: RealityKind | null,
     mem?: MemoryContext,
     parseError?: string,
-  ): Promise<({ ok: true } & LlmProduct) | { ok: false; error: string }> {
+  ): Promise<({ ok: true } & LlmProduct) | RepairFailure> {
     try {
       const res = await this.deps.llm.chat({
         json: true,
@@ -102,10 +115,11 @@ export class TurnLlm {
         maxTokens: 900,
       });
       const parsed = parseTurn(res.raw);
-      if (!parsed) return { ok: false, error: "模型修复输出不是合法 JSON" };
+      if (!parsed) return { ok: false, code: "E_LLM_FORMAT", error: "模型修复输出不是合法 JSON" };
       return { ok: true, ...this.product(parsed.proposals ?? [], parsed.narrative, parsed.dialogue, res.usage, req, kind, parsed.memory) };
     } catch (e) {
-      return { ok: false, error: errMessage(e) };
+      // 保留原始错误码与 cause：ask() 判断"是模型格式坏还是基础设施坏"全靠它（PR #23 复审 P2）
+      return { ok: false, code: codeOf(e), cause: e, error: errMessage(e) };
     }
   }
 
@@ -162,6 +176,14 @@ export class TurnLlm {
 function clip(text: string, max = 200): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
+}
+
+/** 把 repair 的失败还原成异常：优先抛原错误对象（保留 code/cause），否则按 code 重建 */
+function causeOf(failure: RepairFailure): Error {
+  if (failure.cause instanceof Error) return failure.cause;
+  const err = new Error(failure.error) as Error & { code: ErrorCode };
+  err.code = failure.code;
+  return err;
 }
 
 /** 可恢复的格式错误：code 供上层按 §7 报 E_LLM_FORMAT，recoverable 供引擎内部/测试识别"还能再救" */

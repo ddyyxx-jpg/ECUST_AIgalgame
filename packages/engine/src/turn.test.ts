@@ -39,6 +39,21 @@ function rawLlm(raws: string[]): { calls: number; chat: (req: LlmRequest) => Pro
   return port;
 }
 
+
+/** 按脚本依次返回 raw 或抛指定错误码：验证「第二次调用基础设施故障」时错误码是否被保留（P2） */
+function stepLlm(steps: Array<{ raw: string } | { code: string; message?: string }>) {
+  const port = {
+    calls: 0,
+    async chat(_req: LlmRequest): Promise<LlmResult> {
+      port.calls += 1;
+      const step = steps[Math.min(port.calls - 1, steps.length - 1)]!;
+      if ("code" in step) throw Object.assign(new Error(step.message ?? step.code), { code: step.code });
+      return { raw: step.raw, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "step-test", latencyMs: 0 };
+    },
+  };
+  return port;
+}
+
 describe("turn.run", () => {
   it("skipLLM 时完全不调模型，仍能走完 accepted→commit", async () => {
     const llm = new MockLlm({ responses: [okJson] });
@@ -63,6 +78,48 @@ describe("turn.run", () => {
     const { turn, roomId } = await makeTurn(llm);
     const evs = await collect(turn.run({ roomId, actorId: "plr_self", input: "x", clientTurnId: "c3" }));
     expect(llm.calls).toBe(2); // 只重问一次，不无限循环
+    const err = evs.at(-1);
+    expect(err?.type).toBe("turn.error");
+    if (err?.type === "turn.error") {
+      expect(err.code).toBe("E_LLM_FORMAT");
+      expect(err.retryable).toBe(true);
+    }
+    expect(evs.some((e) => e.type === "turn.commit")).toBe(false);
+  });
+
+
+  it("首次坏 JSON → 重问超时：保留 E_LLM_TIMEOUT，不误报 E_LLM_FORMAT", async () => {
+    const port = stepLlm([{ raw: "抱歉，我不能输出 JSON。" }, { code: "E_LLM_TIMEOUT" }]);
+    const { turn, roomId } = await makeTurn(port);
+    const evs = await collect(turn.run({ roomId, actorId: "plr_self", input: "x", clientTurnId: "c_timeout" }));
+    expect(port.calls).toBe(2);
+    const err = evs.at(-1);
+    expect(err?.type).toBe("turn.error");
+    if (err?.type === "turn.error") {
+      expect(err.code).toBe("E_LLM_TIMEOUT");
+      expect(err.retryable).toBe(true);
+    }
+    expect(evs.some((e) => e.type === "turn.commit")).toBe(false);
+  });
+
+  it("首次坏 JSON → 重问 429：保留 E_RATE_LIMITED", async () => {
+    const port = stepLlm([{ raw: "抱歉，我不能输出 JSON。" }, { code: "E_RATE_LIMITED", message: "429 Too Many Requests" }]);
+    const { turn, roomId } = await makeTurn(port);
+    const evs = await collect(turn.run({ roomId, actorId: "plr_self", input: "x", clientTurnId: "c_rate" }));
+    expect(port.calls).toBe(2);
+    const err = evs.at(-1);
+    expect(err?.type).toBe("turn.error");
+    if (err?.type === "turn.error") {
+      expect(err.code).toBe("E_RATE_LIMITED");
+      expect(err.retryable).toBe(true);
+    }
+  });
+
+  it("两次都坏 JSON：最终仍是 E_LLM_FORMAT（真格式错）", async () => {
+    const port = stepLlm([{ raw: "抱歉，我不能输出 JSON。" }, { raw: "还是不是 JSON" }]);
+    const { turn, roomId } = await makeTurn(port);
+    const evs = await collect(turn.run({ roomId, actorId: "plr_self", input: "x", clientTurnId: "c_bothbad" }));
+    expect(port.calls).toBe(2);
     const err = evs.at(-1);
     expect(err?.type).toBe("turn.error");
     if (err?.type === "turn.error") {
