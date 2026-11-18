@@ -210,7 +210,7 @@ describe("多 NPC 记忆注入（issue #20）", () => {
     expect(owners.has(BAI)).toBe(true);
   });
 
-  it("配额取舍：模型写满 3 条时最近对话让位（每 owner 上限 3）", async () => {
+  it("工作记忆不占配额：模型写满 3 条时最近对话仍写入（PR #24 P2-1）", async () => {
     const memory = new EventSourcedMemory();
     memory.sync(ROOM, [
       memEvent(6, "mem_lin_1", LIN, "林静记得玩家上周把伞落在了图书馆。"),
@@ -227,8 +227,76 @@ describe("多 NPC 记忆注入（issue #20）", () => {
     await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "借书", clientTurnId: "c1" }));
     for (const owner of [LIN, BAI]) {
       const mine = memory.all(ROOM).filter((r) => r.ownerId === owner);
-      expect(mine.length).toBe(4); // 既有 1 条 + 模型 3 条；最近对话因配额让位
-      expect(mine.some((r) => r.tags.includes("最近对话"))).toBe(false);
+      expect(mine.length).toBe(5); // 既有 1 条 + 模型 3 条 + 工作记忆 1 条
+      expect(mine.filter((r) => r.tags.includes("最近对话"))).toHaveLength(1);
+    }
+  });
+
+  it("工作记忆滚动替换：旧条 tombstoned、活条不增长、最新条可被下一回合召回（PR #24 P2-1a）", async () => {
+    const memory = new EventSourcedMemory();
+    memory.sync(ROOM, [memEvent(6, "mem_lin_1", LIN, "林静记得玩家上周把伞落在了图书馆。")]);
+    const llm = new MockLlm({
+      responses: [
+        reply([], "林静把借书卡推到你面前。"),
+        JSON.stringify({ narrative: "林静抬头看了看窗外。", dialogue: "明早 8 点图书馆见。", proposals: [], memory: [] }),
+        reply([], "第二天早上，林静在门口等你。"),
+      ],
+    });
+    const { turn } = await makeTurn({ llm, memory });
+    await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "明天什么时候见", clientTurnId: "c1" }));
+    const first = memory.all(ROOM).filter((r) => r.ownerId === LIN && r.tags.includes("最近对话") && r.status !== "tombstoned");
+    expect(first).toHaveLength(1);
+    const firstId = first[0]!.id;
+
+    await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "好", clientTurnId: "c2" }));
+    const after = memory.all(ROOM).filter((r) => r.ownerId === LIN && r.tags.includes("最近对话") && r.status !== "tombstoned");
+    expect(after).toHaveLength(1); // 旧条已撤回，只留最新一条
+    expect(after[0]!.id).not.toBe(firstId);
+    expect(memory.all(ROOM).find((r) => r.id === firstId)?.status).toBe("tombstoned");
+    expect(after[0]!.content).toContain("8 点");
+
+    // 最新工作记忆能被下一回合的提示词召回（短记忆段）
+    await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "走吧", clientTurnId: "c3" }));
+    expect(promptOf(llm)).toContain("8 点");
+  });
+
+  it("叙事/台词分别进工作记忆：叙事超长时台词仍被记住（PR #24 P2-2）", async () => {
+    const memory = new EventSourcedMemory();
+    const longNarrative = "图书馆的旧风扇在头顶转了很久，窗外的梧桐叶被风翻来覆去，".repeat(4);
+    const llm = new MockLlm({
+      responses: [
+        JSON.stringify({ narrative: longNarrative, dialogue: "明早 8 点图书馆见。", proposals: [], memory: [] }),
+        reply([], "第二天早上，林静在门口等你。"),
+      ],
+    });
+    const { turn } = await makeTurn({ llm, memory });
+    await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "明天什么时候见", clientTurnId: "c1" }));
+    const working = memory.all(ROOM).filter((r) => r.ownerId === LIN && r.tags.includes("最近对话") && r.status !== "tombstoned");
+    expect(working).toHaveLength(1);
+    expect(working[0]!.content).toContain("8 点");
+    await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "好", clientTurnId: "c2" }));
+    expect(promptOf(llm)).toContain("8 点");
+  });
+
+  it("连续 >30 轮：工作记忆始终保留最新一条，情节记忆配额不被工作记忆挤占（PR #24 P2-1）", async () => {
+    const memory = new EventSourcedMemory();
+    memory.sync(ROOM, [memEvent(6, "mem_lin_1", LIN, "林静记得玩家上周把伞落在了图书馆。")]);
+    const responses: string[] = [];
+    for (let i = 1; i <= 31; i += 1) {
+      responses.push(reply([{ content: `第 ${i} 次考试前他来找我占座`, tags: ["占座"], salience: 3 }], `第 ${i} 天，林静在图书馆整理书架。`));
+    }
+    const llm = new MockLlm({ responses });
+    const { turn } = await makeTurn({ llm, memory });
+    for (let i = 1; i <= 31; i += 1) {
+      await collect(turn.run({ roomId: ROOM, actorId: PLR, input: `第 ${i} 回合`, clientTurnId: `c${i}` }));
+    }
+    for (const owner of [LIN, BAI]) {
+      const all = memory.all(ROOM).filter((r) => r.ownerId === owner);
+      const working = all.filter((r) => r.tags.includes("最近对话") && r.status !== "tombstoned");
+      expect(working).toHaveLength(1);
+      expect(working[0]!.content).toContain("第 31 回合");
+      const plot = all.filter((r) => !r.tags.includes("最近对话") && r.status !== "tombstoned");
+      expect(plot.length).toBe(30); // 1 条既有 + 29 条模型记忆，达到 sessionCap 后不再增长
     }
   });
 });

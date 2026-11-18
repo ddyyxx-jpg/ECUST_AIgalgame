@@ -2,10 +2,10 @@
  * 记忆写侧：首轮种子 / 最近对话 / 模型记忆草稿，以及草稿 → memory.write 的纯函数。
  * 从 turn.memory.ts 拆出，守住"文件 ≤300 行"（AGENTS §6）；读侧仍只有 turn.memory.ts。
  */
-import type { Id, Phase, Proposal, TurnRequest, WorldState } from "../../shared/src/index.ts";
+import type { Id, MemoryRecord, Phase, Proposal, TurnRequest, WorldState } from "../../shared/src/index.ts";
 import type { MemoryDraft } from "../../shared/src/index.ts";
 import type { MemoryContext } from "./turn.memory.ts";
-import { memoryDraftArgs } from "./memory.gate.ts";
+import { memoryDraftArgs, WORKING_MEMORY_TAG } from "./memory.gate.ts";
 
 const PHASE_LABEL: Record<Phase, string> = {
   morning: "早上",
@@ -43,21 +43,64 @@ export function seedDrafts(mem: MemoryContext, state: WorldState, req: TurnReque
 }
 
 /**
- * 最近对话（#21-2）：把本回合的"玩家输入 + 叙事摘要"写进每个在场 NPC 的 short 记忆。
- * 这是给下一回合用的工作记忆，不是模型产出的情节记忆；content 控制在闸门上限内。
- * 放在模型记忆之后提交：配额满时被挤掉的是它，不是模型自己的记忆。
+ * 最近对话（#21-2）：把本回合的"玩家输入 + 叙事摘要 + NPC 台词"写进每个在场 NPC 的 short 记忆。
+ * 这是给下一回合用的工作记忆，不是模型产出的情节记忆。
+ *
+ * - 叙事与台词**分别**分配预算（PR #24 P2-2）：只要叙事写满 100 字就把台词整段截掉，
+ *   "明早 8 点见"这类约定会丢；现在 narrative≤70、dialogue≤90、玩家输入≤30，总 ≤200。
+ * - 滚动替换（PR #24 P2-1a）：写新条前先 tombstone 该 owner 的旧工作记忆，只保留最新 1 条；
+ *   tombstone 排在写入之前（同一批内先撤回再写，幂等由 turnId 去重与 Arbiter 顺序保证）。
+ * - 工作记忆不占 sessionCap=30（见 memory.gate 的 WORKING_MEMORY_TAG 豁免），
+ *   所以它不会挤掉模型/情节记忆，也不会被它们挤掉。
  */
-export function recentDrafts(mem: MemoryContext, state: WorldState, req: TurnRequest, narrative: string): MemoryDraft[] {
-  if (!mem.available || mem.npcs.length === 0) return [];
+export interface WorkingMemoryPlan {
+  drafts: MemoryDraft[];
+  /** 旧工作记忆的 tombstone proposals（提交时排在新的 memory.write 之前） */
+  tombstones: Proposal[];
+}
+
+const SAID_MAX = 30;
+const NARRATIVE_MAX = 70;
+const DIALOGUE_MAX = 90;
+
+/** 旧工作记忆 → memory.write(status=tombstoned)：撤回旧条，释放"每 owner 只留最新 1 条"的位置 */
+function tombstoneProposal(old: MemoryRecord): Proposal {
+  const args: Record<string, unknown> = {
+    ownerId: old.ownerId,
+    content: old.content,
+    tags: old.tags,
+    salience: old.salience,
+    about: old.about,
+    visibility: old.visibility,
+    tier: old.tier,
+    status: "tombstoned",
+    supersedes: old.id,
+  };
+  if (old.userId) args.userId = old.userId;
+  if (old.aboutUserIds && old.aboutUserIds.length > 0) args.aboutUserIds = old.aboutUserIds;
+  return { op: "memory.write", args, reason: "工作记忆滚动替换：旧条让位", by: "engine.memory" };
+}
+
+export function recentDrafts(
+  mem: MemoryContext,
+  state: WorldState,
+  req: TurnRequest,
+  narrative: string,
+  dialogue = "",
+): WorkingMemoryPlan {
+  if (!mem.available || mem.npcs.length === 0) return { drafts: [], tombstones: [] };
   const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
-  const said = clip(req.input.trim(), 60);
-  const happened = clip(narrative.trim(), 100);
-  if (!said && !happened) return [];
-  const content = clip([said ? `刚才玩家说「${said}」` : "", happened].filter(Boolean).join("，"), 200);
+  const said = clip(req.input.trim(), SAID_MAX);
+  const happened = clip(narrative.trim(), NARRATIVE_MAX);
+  const replied = clip(dialogue.trim(), DIALOGUE_MAX);
+  if (!said && !happened && !replied) return { drafts: [], tombstones: [] };
+  const content = clip([said ? `刚才玩家说「${said}」` : "", happened, replied].filter(Boolean).join("，"), 200);
   // 地点标签既帮助召回打分，也让"刚才的事"和当前场景绑定
   const here = state.entities[state.room.scene.locId];
-  const tags = ["最近对话", ...(here?.name ? [here.name] : [])];
-  return mem.npcs.map((view) => {
+  const tags = [WORKING_MEMORY_TAG, ...(here?.name ? [here.name] : [])];
+  const tombstones: Proposal[] = [];
+  const drafts = mem.npcs.map((view) => {
+    for (const old of view.working) tombstones.push(tombstoneProposal(old));
     const draft: MemoryDraft = {
       ownerId: view.npcId,
       content,
@@ -70,6 +113,7 @@ export function recentDrafts(mem: MemoryContext, state: WorldState, req: TurnReq
     if (mem.userId) draft.userId = mem.userId;
     return draft;
   });
+  return { drafts, tombstones };
 }
 
 /**

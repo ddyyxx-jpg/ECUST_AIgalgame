@@ -29,6 +29,18 @@ export const DEFAULT_MEMORY_GATES: MemoryGateLimits = {
   similarity: 0.8,
 };
 
+/**
+ * 工作记忆（"最近对话"）的标签：引擎每回合为在场 NPC 滚动替换的派生数据。
+ * 它不属于情节记忆，因此**不参与** G3 去重、G4 重要度提升、G6 配额（PR #24 P2-1）：
+ * - 不占 sessionCap=30 的情节记忆上限；
+ * - 也不会被模型写满 writePerTurn=3 时挤掉（滚动替换由写侧先 tombstone 旧条保证）。
+ */
+export const WORKING_MEMORY_TAG = "最近对话";
+
+export function isWorkingMemory(r: { tags?: readonly string[] }): boolean {
+  return (r.tags ?? []).includes(WORKING_MEMORY_TAG);
+}
+
 export type MemoryDropReason =
   | "shape"
   | "owner_absent"
@@ -161,6 +173,17 @@ export function applyMemoryGates(input: MemoryGateInput): MemoryGateResult {
     const secretLine = input.state.plots.find((p) => p.status === "active" && p.forbidReveal && content.includes(p.forbidReveal));
     if (secretLine) {
       dropped.push({ reason: "secret_forbidden", detail: `内容直说了 plot ${secretLine.id} 的禁语` });
+      continue;
+    }
+
+    // ---------- 工作记忆（最近对话）：引擎侧滚动替换，跳过 G3/G4/G6 ----------
+    // 工作记忆每回合都写、内容天然相近；若走去重会被旧条拦下，走配额会被情节记忆或模型记忆挤掉。
+    // 写侧在提交前已把该 owner 的旧工作记忆 tombstone（见 turn.memory.drafts.ts），只保留最新一条。
+    if (tags.includes(WORKING_MEMORY_TAG)) {
+      const draft: MemoryDraft = { ownerId: input.ownerId, content, tags, salience, about, visibility, tier };
+      if (input.userId) draft.userId = input.userId;
+      if (raw.aboutUserIds && raw.aboutUserIds.length > 0) draft.aboutUserIds = raw.aboutUserIds;
+      accepted.push(draft);
       continue;
     }
 

@@ -117,8 +117,8 @@ describe("Turn × Memory（P1）", () => {
     await collect(turn.run({ roomId: ROOM, actorId: PLR, input: "聊两句", clientTurnId: "c1" }));
     const ids = memory.all(ROOM).map((r) => r.id);
     expect(new Set(ids).size).toBe(ids.length);
-    // 种子 + 两条模型记忆 = 3，已达每 owner 每回合上限，最近对话让位（docs/07 §4.2 取舍）
-    expect(memory.all(ROOM)).toHaveLength(3);
+    // 种子 + 两条模型记忆 + 一条工作记忆（最近对话不占 writePerTurn 配额，PR #24 P2-1）
+    expect(memory.all(ROOM)).toHaveLength(4);
   });
 
   it("记忆被 Arbiter 拒绝时：只多一条 fact、不重问模型、行动照常生效", async () => {

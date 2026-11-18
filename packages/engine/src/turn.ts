@@ -174,14 +174,15 @@ export class DefaultTurn implements Turn {
             : [{ ownerId: mem.ownerId, recent: mem.recent, ownedCount: mem.ownedCount }];
           // 模型记忆草稿的 ownerId 是空串（由闸门按 owner 重建）；种子草稿已经带 ownerId
           const baseDrafts = attachAboutUserIds([...seedDrafts(mem, state, req), ...first.memory], state);
-          // 最近对话排在模型记忆之后：配额满时让位的是工作记忆，不是模型自己的记忆
-          const recent = recentDrafts(mem, state, req, narrative);
+          // 工作记忆（最近对话）：滚动替换旧条 + 叙事/台词分别取（PR #24 P2-1/P2-2）；
+          // tombstone 排在新的 memory.write 之前，同一批内先撤回再写。
+          const working = recentDrafts(mem, state, req, first.narrative, first.dialogue);
           const accepted: MemoryDraft[] = [];
           for (const unit of units) {
             // about → aboutUserIds：canonize/印象靠它反查"这件事该告诉哪个账号"
             const drafts = [
               ...baseDrafts.filter((d) => d.ownerId === unit.ownerId || d.ownerId === ""),
-              ...recent.filter((d) => d.ownerId === unit.ownerId),
+              ...working.drafts.filter((d) => d.ownerId === unit.ownerId),
             ];
             const gated = applyMemoryGates({
               state,
@@ -195,7 +196,7 @@ export class DefaultTurn implements Turn {
             memoryDropped += gated.dropped.length;
             accepted.push(...gated.accepted);
           }
-          memoryProposals = toMemoryProposals(accepted);
+          memoryProposals = [...working.tombstones, ...toMemoryProposals(accepted)];
         } else {
           // 审核器故障：文本不下发、提案不采信（可能是被诱导的产物），模块提案照旧
           narrative = this.gate.policy.unavailableText;

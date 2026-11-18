@@ -17,6 +17,7 @@ import type {
 } from "../../shared/src/index.ts";
 import type { EventSourcedMemory } from "./memory.ts";
 import { estimateTokens, worldRoomId } from "./memory.ts";
+import { isWorkingMemory } from "./memory.gate.ts";
 import { resolveUserId } from "./turn.memory.drafts.ts";
 
 /** 注入硬顶（docs/07 §3）：S1.5 + S7 + S8 合计不超过 1100 token */
@@ -33,10 +34,12 @@ export interface NpcMemory {
   long: MemoryHit[];
   short: MemoryHit[];
   profile: MemoryProfile | null;
-  /** 该 NPC 已有条数（配额给闸门用） */
+  /** 该 NPC 已有条数（配额给闸门用；**不含**工作记忆，PR #24 P2-1） */
   ownedCount: number;
   /** 去重用：该 NPC 最近的记录 */
   recent: MemoryRecord[];
+  /** 该 NPC 现存的工作记忆（"最近对话"，写侧滚动替换用；最新在前） */
+  working: MemoryRecord[];
 }
 
 export interface MemoryContext {
@@ -112,6 +115,7 @@ interface OwnerRead {
   profile: MemoryProfile | null;
   ownedCount: number;
   recent: MemoryRecord[];
+  working: MemoryRecord[];
 }
 
 /** 读某个记忆所有者的长期/短期记忆（owner 视角的召回与配额事实） */
@@ -148,12 +152,18 @@ async function readOwner(
   });
   const owned = memory.all(req.roomId).filter((r) => r.ownerId === ownerId && r.status !== "tombstoned");
   const profile = userId ? await memory.profile(userId, ownerId, req.roomId) : null;
+  // 工作记忆是"最近对话"的滚动副本，不算情节记忆的 sessionCap（PR #24 P2-1）
+  const plotOnly = owned.filter((r) => !isWorkingMemory(r));
+  const working = owned
+    .filter(isWorkingMemory)
+    .sort((a, b) => b.turn - a.turn || b.createdAt - a.createdAt);
   return {
     long: takeWithin(long, longBudget),
     short: takeWithin(short, shortBudget),
     profile,
-    ownedCount: owned.length,
+    ownedCount: plotOnly.length,
     recent: [...owned].sort((a, b) => b.turn - a.turn || b.createdAt - a.createdAt).slice(0, 12),
+    working,
   };
 }
 

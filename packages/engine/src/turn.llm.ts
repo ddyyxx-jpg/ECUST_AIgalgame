@@ -26,7 +26,12 @@ export interface TurnLlmDeps {
 
 export interface LlmProduct {
   proposals: Proposal[];
+  /** narrative + dialogue 的拼接（沿用旧语义：下发叙事/横幅用） */
   text: string;
+  /** 叙事（PR #24 P2-2：工作记忆要分别取叙事与台词，不能只靠 text 截断） */
+  narrative: string;
+  /** 台词 */
+  dialogue: string;
   usage?: Usage;
   /** 因"偏离现实"被丢掉的提案数：要如实告诉玩家 */
   dropped: number;
@@ -152,9 +157,13 @@ export class TurnLlm {
     // 诱导性发言换不来数值：过滤必须在代码里做，不能只靠提示词
     const filtered = filterProposals(this.deps.reality, kind, proposals, req.actorId);
     const mem = coerceMemoryDrafts(memoryRaw);
+    const narration = (narrative ?? "").trim();
+    const reply = (dialogue ?? "").trim();
     return {
       proposals: filtered.kept,
-      text: [narrative, dialogue].filter(Boolean).join("\n"),
+      text: [narration, reply].filter(Boolean).join("\n"),
+      narrative: narration,
+      dialogue: reply,
       ...(usage ? { usage } : {}),
       dropped: filtered.dropped.length,
       memory: mem.drafts,
