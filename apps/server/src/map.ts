@@ -206,7 +206,8 @@ export class MapService {
    * 安全性论证（缓存陈旧不会导致漏遮）：早期失败的 message 只来自静态场景名（canon 模板 /
    * 已发布场景数据）和用户传入的 locId，不是"状态里新出现的 NPC 名"。占位表的变化只会随
    * knows_name 变 true 而移除条目（已认识 → 真名可直接显示），陈旧表至多让本该显示的已认识名
-   * 被多遮一次（可接受），不会漏遮静态内容里的未认识名：未认识 NPC 一旦进过表就一直在表里。
+   * 被多遮一次（可接受）。边界：缓存填充后才发布、且场景名里带新 NPC 真名的静态数据不在旧表里，
+   * 该极端情形需靠场景发布时清空缓存（当前发布低频，未做）。
    */
   private async maskEarlyFailure(result: MapFail, roomId: string): Promise<MapFail> {
     let placeholders = this.failPlaceholders.get(roomId);

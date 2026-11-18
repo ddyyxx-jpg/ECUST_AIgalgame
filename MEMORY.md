@@ -175,6 +175,10 @@
 
 - 2026-11-18 ｜ `fix/turn-idempotency-only` ｜ squash `2c51028` ｜ merge ｜ PR #50 squash 合入 main（39 文件/283 用例）；复审通过，P2 记录：失败路径 waiter 竞态、waiter 无超时、跨重启不幂等仅注释 ｜ issue #34 关闭 ｜ — ｜ 无
 
+### fix/fail-mask-cost（issue #62，PR 待开）
+
+- 2026-11-18 ｜ `fix/fail-mask-cost` ｜ `d238de8` ｜ fix ｜ MapService 新增按 roomId 的轻量占位表缓存与 `maskEarlyFailure()`，travel 的两处早期失败（E_SCENE_NOT_FOUND / 规划在建点 E_FORBIDDEN）改走缓存命中路径，未命中才回退一次 `store.snapshot`；新增 3 条计数用例验证第二次失败零快照且 #58 脱敏不回归 ｜ 早期失败位于快照之前，原实现每请求回放整条事件日志（O(事件数)），无鉴权重复非法 locId 可放大；只缓存真名→占位映射不缓存 WorldState，陈旧表至多多遮已认识名不漏遮静态内容（新发布场景名含新 NPC 名的极端情形已在注释记为边界） ｜ tsc 0；49 文件/327 用例通过（子 agent 树基于 38b8202）；cherry-pick 到 main 3e13f3c 后 tsc 0、50 文件/335 用例、check:contract 8 项（3.4.1）；与 #61 补丁集成 51 文件/337 用例、build:web 成功 ｜ 未在 state-bearing 路径主动 warm 缓存（避让 #61 对 outbound 的改动），先成功后早期失败仍付一次快照；#33/#35 按用户指示忽略
+
 ### main
 
 - 2026-11-18 ｜ main ｜ 本提交（tag `v0.5.4`） ｜ release ｜ `CONTRACT_VERSION 3.4.0 → 3.4.1`；CHANGELOG v0.5.4 定稿（PR #52/#55/#56）；docs/03 §10.19；MEMORY 快照/时间线/遗留/分支同步 ｜ 把 3.4.0（PR #52）与 #53/#54 的 security patch 收进同一个对外版本 ｜ tsc 0；47 文件/320 用例；8 项契约（3.4.1）；build 287.14 kB / gzip 91.02 kB ｜ #33/#35 仍暂缓
