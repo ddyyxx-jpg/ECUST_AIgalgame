@@ -150,6 +150,10 @@
 
 > 格式：`- 日期 ｜ 分支 ｜ 提交 ｜ 类型 ｜ 改了什么 ｜ 决策与理由 ｜ 验证 ｜ 遗留`
 
+### fix/turn-idempotency-only（issue #34，待 PR）
+
+- 2026-11-18 ｜ `fix/turn-idempotency-only` ｜ 本提交 ｜ fix ｜ 基于 3.3.0 只移植 #34：幂等键改为 `JSON.stringify([roomId, actorId, clientTurnId])`，同 key 并发用 `inFlight` promise 串行并回放；`seen.set` + `maybeCompact` + `markDelivered` 全部移到 `yield turn.commit` **之前**，外层 try/finally 保证 break 时也释放锁 ｜ 上游 HTTP 消费者在 commit 处 break 生成器，yield 之后的记账不会执行（issue 根因）；只做 #34，不重复已被 PR #45 合并的 #39；进程内缓存不跨重启（需 EventLog + 契约变更） ｜ tsc 0；39 文件/283 用例通过（新增 4 条幂等）；check:contract 8 项（3.3.0） ｜ #33/#35 按用户指示暂缓；PR #46–#49 被并行合并的 #44/#45 supersede，另行关闭
+
 ### main
 
 - 2026-11-18 ｜ main ｜ 本提交（tag `v0.5.2`） ｜ release ｜ `CONTRACT_VERSION 3.2.1 → 3.3.0`；CHANGELOG 新增 v0.5.2 段、v0.5.1 段标题对齐；`E_ROOM_NOT_FOUND` 登记 + docs/03 §10.17；MEMORY/README 导航同步 ｜ 收口 §10.15/§10.16 的“待 bump”，让房间 404 的 code 有契约来源 ｜ tsc 0；38 文件/279 用例；8 项契约（3.3.0，34 错误码）；build 287.05 kB / gzip 90.90 kB ｜ 后续见 §3.3

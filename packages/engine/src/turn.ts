@@ -76,8 +76,14 @@ export class DefaultTurn implements Turn {
   private readonly gate: AuditGate;
   private readonly reality: RealityPolicy;
   private readonly llmStep: TurnLlm;
-  /** clientTurnId 幂等缓存：重复提交只重放，不再花一次 LLM 的钱 */
+  /**
+   * clientTurnId 幂等缓存：重复提交只重放，不再花一次 LLM 的钱。
+   * key 含 roomId/actorId，避免不同房间/不同 actor 用同一个 clientTurnId 时串台（issue #34）。
+   * 进程内缓存，重启后重新结算：要跨重启幂等需 EventLog 持久化回合标记 + 契约变更。
+   */
   private readonly seen = new Map<string, TurnEvent[]>();
+  /** 同 key 并发：后来者等待首个结算完成并重放同一结果，不重复调模型（issue #34） */
+  private readonly inFlight = new Map<string, Promise<void>>();
   /** 每房间已提交回合数：只用于低频 compact 限频（进程内计数，重启后重新开始） */
   private readonly committedTurns = new Map<RoomId, number>();
 
@@ -100,11 +106,25 @@ export class DefaultTurn implements Turn {
   }
 
   async *run(req: TurnRequest): AsyncIterable<TurnEvent> {
-    const cached = this.seen.get(req.clientTurnId);
+    const key = JSON.stringify([req.roomId, req.actorId, req.clientTurnId]);
+    const cached = this.seen.get(key);
     if (cached) {
       for (const ev of cached) yield ev;
       return;
     }
+    // 同 key 的并发请求等首个结算完成，再重放它的事件（不各自重试、不重复扣钱）
+    const waiting = this.inFlight.get(key);
+    if (waiting) {
+      await waiting;
+      const replay = this.seen.get(key);
+      if (replay) {
+        for (const ev of replay) yield ev;
+        return;
+      }
+    }
+    let release!: () => void;
+    this.inFlight.set(key, new Promise<void>((resolve) => { release = resolve; }));
+    try {
     const events: TurnEvent[] = [];
     const emit = (ev: TurnEvent): TurnEvent => {
       events.push(ev);
@@ -165,7 +185,7 @@ export class DefaultTurn implements Turn {
             emit(ev);
             yield ev;
           }
-          this.seen.set(req.clientTurnId, events);
+          this.seen.set(key, events);
           return;
         }
         if (gate.kind === "ok") {
@@ -226,7 +246,7 @@ export class DefaultTurn implements Turn {
                 emit(ev);
                 yield ev;
               }
-              this.seen.set(req.clientTurnId, events);
+              this.seen.set(key, events);
               return;
             }
             narrative = gate.kind === "ok" ? repaired.text : this.gate.policy.unavailableText;
@@ -322,11 +342,11 @@ export class DefaultTurn implements Turn {
       }
 
       const seq = this.deps.store.seq(req.roomId);
-      yield emit({ type: "turn.commit", turnId, seq, usage });
-      this.seen.set(req.clientTurnId, events);
+      // issue #34：apps/server 的消费者在收到 turn.commit 后立即 `break` 生成器，
+      // yield 之后的语句不会执行；所有提交记账必须在 yield 之前完成。
+      this.seen.set(key, events);
       // #42：低频 compact 只发生在已提交回合之后；失败不影响本回合结果
       this.maybeCompact(req.roomId, mem);
-
       // 印象只在回合真正提交后标记已投递（否则崩在中途会"说过又没说过"）
       if (deliveredNotices.length > 0 && this.deps.impressions) {
         try {
@@ -335,6 +355,7 @@ export class DefaultTurn implements Turn {
           // 印象是锦上添花：投递标记失败下次可能重复提示一次，可接受
         }
       }
+      yield emit({ type: "turn.commit", turnId, seq, usage });
     } catch (e) {
       const code = codeOf(e);
       // 可重试 = 契约 RETRYABLE（格式/超时/限流）+ E_STORE_FAULT（写盘失败，本回合未 commit，重试安全，docs/03 §7）；
@@ -344,6 +365,11 @@ export class DefaultTurn implements Turn {
     } finally {
       // 不论成功、失败还是抛异常，都释放本回合预算（否则预算表只增不减）
       this.deps.arbiter.endTurn(turnId);
+    }
+    } finally {
+      // issue #34：即便上游在 turn.commit 处 break 生成器，也要释放同 key 并发等待者
+      release();
+      this.inFlight.delete(key);
     }
   }
 
