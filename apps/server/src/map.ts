@@ -35,7 +35,7 @@ import {
 import type { MapFail, SceneDialogue, SceneLink, SceneRef, SceneStatus, SceneTemplate } from "./map.data.ts";
 import { DraftEngine } from "./map.drafts.ts";
 import type { DraftListResult, DraftResult, PublishResult } from "./map.drafts.ts";
-import { displayNameOf, knowsNameOf, maskTurnEvents, unknownPlaceholders } from "./view-names.ts";
+import { displayNameOf, knowsNameOf, maskNamesDeep, maskTurnEvents, unknownPlaceholders } from "./view-names.ts";
 
 // ---------------------------------------------------------------- 对外视图（docs/06 §4）
 export interface MapViewLink {
@@ -131,6 +131,11 @@ export class MapService {
   private readonly deps: MapServiceDeps;
   private readonly content: MapContent;
   private readonly drafts: DraftEngine;
+  /**
+   * issue #62：早期失败脱敏用的占位表缓存，按 roomId 一份轻量 Map（真名 → 占位名），
+   * 不缓存整份 WorldState，避免长期占用内存。只保存最近一次算出的表。
+   */
+  private readonly failPlaceholders = new Map<string, Map<string, string>>();
 
   constructor(deps: MapServiceDeps) {
     this.deps = deps;
@@ -191,15 +196,37 @@ export class MapService {
     return maskTurnEvents<T>(roomId, result, this.deps.store, this.deps.appearance, state);
   }
 
+  /**
+   * issue #62：早期失败（travel 的 E_SCENE_NOT_FOUND、规划/在建点 E_FORBIDDEN）发生在取快照之前，
+   * 此时拿不到 state；若照常走 outbound → maskTurnEvents，就会每次都 `store.snapshot(roomId)`，
+   * FileStore 每次 ensure + replay 整条事件日志（O(事件数)）。无鉴权下重复请求非法 locId 可放大
+   * CPU / 磁盘读。这里按房间缓存最近一次算出的占位表：命中直接复用，未命中才回退一次 snapshot
+   * （首个请求的必要代价），之后同房间的早期失败不再回放日志。
+   *
+   * 安全性论证（缓存陈旧不会导致漏遮）：早期失败的 message 只来自静态场景名（canon 模板 /
+   * 已发布场景数据）和用户传入的 locId，不是"状态里新出现的 NPC 名"。占位表的变化只会随
+   * knows_name 变 true 而移除条目（已认识 → 真名可直接显示），陈旧表至多让本该显示的已认识名
+   * 被多遮一次（可接受），不会漏遮静态内容里的未认识名：未认识 NPC 一旦进过表就一直在表里。
+   */
+  private async maskEarlyFailure(result: MapFail, roomId: string): Promise<MapFail> {
+    let placeholders = this.failPlaceholders.get(roomId);
+    if (!placeholders) {
+      const state = await this.deps.store.snapshot(roomId);
+      placeholders = unknownPlaceholders(state, this.deps.appearance);
+      this.failPlaceholders.set(roomId, placeholders);
+    }
+    return maskNamesDeep(result, placeholders);
+  }
+
   // -------------------------------------------------------------- 移动（turn 跑完整流程，skipLLM）
   async travel(roomId: string, actorId: string | undefined, locId: string): Promise<TravelResult> {
     const { refs } = await this.content.sceneRefs();
     const target = refs.get(locId);
-    if (!target) return this.outbound(fail("E_SCENE_NOT_FOUND", `场景 ${locId} 不存在`), roomId);
+    if (!target) return this.maskEarlyFailure(fail("E_SCENE_NOT_FOUND", `场景 ${locId} 不存在`), roomId);
     // 规划/在建点只用于地图展示：不能进入，也不触发懒安装
     if (target.scene.status !== "built") {
       const label = target.scene.status === "planned" ? "规划中，尚未建成" : "在建，暂不可进入";
-      return this.outbound(fail("E_FORBIDDEN", `${target.scene.name}${label}`), roomId);
+      return this.maskEarlyFailure(fail("E_FORBIDDEN", `${target.scene.name}${label}`), roomId);
     }
 
     const state = await this.deps.store.snapshot(roomId);
