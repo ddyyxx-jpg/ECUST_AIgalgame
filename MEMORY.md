@@ -160,6 +160,10 @@
 
 > 格式：`- 日期 ｜ 分支 ｜ 提交 ｜ 类型 ｜ 改了什么 ｜ 决策与理由 ｜ 验证 ｜ 遗留`
 
+### fix/dialogue-mask（issue #61，PR 待开）
+
+- 2026-11-18 ｜ `fix/dialogue-mask` ｜ `6c2bc55` ｜ fix ｜ `openDialogue()` 成功台词与全部失败文本统一走 map.ts 既有 `outbound → maskTurnEvents`（泛型放宽到 `DialogueResult`），除 snapshot 前的 E_SCENE_NOT_FOUND 外都传已取快照省一次回放；新增 2 条用例断言未认识真名 0 命中、已知名保留；docs/06 §6 同步 ｜ 种子台词里含林静/周明远等真名，/map/dialogue 是 #53/#58 之外最后一个未接一级认识脱敏的地图端点；复用统一出口避免掩码规则漂移，不 bump、不改契约/依赖 ｜ tsc 0；49 文件/326 用例通过（子 agent 树，基于 38b8202）；cherry-pick 到 main 3e13f3c 后 tsc 0、50 文件/334 用例、check:contract 8 项（3.4.1） ｜ E_SCENE_NOT_FOUND 仍走一次 snapshot 回退（#62 处理早期失败成本）；#33/#35 按用户指示忽略
+
 ### fix/map-bubble-refresh（issue #57，PR 待开）
 
 - 2026-11-18 ｜ `fix/map-bubble-refresh` ｜ `48ce5fe` ｜ fix ｜ App 把 `stateRev` 作为 `version` 传给 ChatPanel → CampusMap；gallery effect 依赖改为 `[roomId, version]`，解锁 NPC 后同房间重拉即出气泡，无需重挂载；抽 `nextBubbleState` 纯函数（换房间立即清空、同房间重拉/失败保留上次成功值、成功只取 met 且有 mutter），新增 8 条 web 用例 ｜ 与 GalleryPanel 的 `version={stateRev}` 口径一致，最小改动复用既有刷新信号；换房间清空防串房，失败保留避免永久空表/闪烁；web vitest 是 node 环境无 jsdom，故用纯函数单测 + effect 依赖结构断言，未加新依赖；不 bump ｜ tsc 0；48 文件/328 用例通过（基线 47/320）；check:contract 8 项（3.4.1）；与 PR #58 集成 49 文件/332 用例全绿，build:web 成功 ｜ 未认识/图鉴失败仍不出气泡（不回归 #54）；#33/#35 按用户指示忽略
