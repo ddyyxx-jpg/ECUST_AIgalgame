@@ -3,7 +3,7 @@
  * 断言状态与错误码，不断言文案。
  */
 import { describe, expect, it, vi } from "vitest";
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tempDir } from "@galgame/testkit";
 import { LedgerUnreadableError, TurnLedger, dayKey } from "./quota.ts";
@@ -191,6 +191,42 @@ describe("TurnLedger 状态机", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("无换行的半截尾行不会吞掉重启后的第一条追加记录", async () => {
+    const file = path.join(tempDir("galgame-quota-tail-append-"), "ledger.jsonl");
+    const good = JSON.stringify({ clientTurnId: "c1", roomId: "r1", userId: "u_a", state: "committed", day: "2026-11-18", reservedAt: 1 });
+    // 模拟崩溃：最后一条 JSON 只写了一半，且没有换行
+    await writeFile(file, `${good}\n{"clientTurnId":"broken","roomId":"r1"`, "utf8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const l1 = new TurnLedger(file);
+      await l1.load();
+      expect(l1.skippedLines).toBe(1);
+      l1.reserve({ ...base, clientTurnId: "c2" });
+      await l1.transitionDurable({ userId: "u_a", roomId: "room_x", clientTurnId: "c2" }, "committed", { committedSeq: 5 });
+
+      // 重启后新记录必须仍可解析：追加前若没补换行，它会和半截尾行粘成一条坏行
+      const l2 = new TurnLedger(file);
+      await l2.load();
+      expect(l2.get("c2")).toMatchObject({ state: "committed", committedSeq: 5 });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("进程内短写留下半截尾行后，下一条追加仍从新行开始", async () => {
+    const file = path.join(tempDir("galgame-quota-short-write-"), "ledger.jsonl");
+    const l1 = new TurnLedger(file);
+    l1.reserve({ ...base, clientTurnId: "c1" });
+    await l1.flush();
+    // 模拟一次短写：只落了半截 JSON，且没有换行；进程内没有再 load 过
+    await appendFile(file, '{"clientTurnId":"short"', "utf8");
+
+    await l1.transitionDurable({ userId: "u_a", roomId: "room_x", clientTurnId: "c1" }, "committed", { committedSeq: 6 });
+    const l2 = new TurnLedger(file);
+    await l2.load();
+    expect(l2.get("c1")).toMatchObject({ state: "committed", committedSeq: 6 });
   });
 
   it("list 按 userId/state 过滤", () => {

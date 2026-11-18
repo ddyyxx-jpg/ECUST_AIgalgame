@@ -252,7 +252,9 @@ export class TurnLedger {
       // transitionDurable 的语义要求 fsync 之后才算写完。
       const fh = await open(this.filePath, "a");
       try {
-        await fh.writeFile(`${JSON.stringify(entry)}\n`, "utf8");
+        // 每条记录前先写换行：即使上一次写入只落了半行（短写/崩溃/外部损坏），
+        // 新记录也从行首开始，不会被半截尾行粘成新的坏行。空行在加载时被忽略。
+        await fh.writeFile(`\n${JSON.stringify(entry)}\n`, "utf8");
         await fh.sync();
       } finally {
         await fh.close();

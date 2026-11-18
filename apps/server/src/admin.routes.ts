@@ -5,6 +5,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AuthService } from "./auth.ts";
+import { dailyLimitFor } from "./auth-store.ts";
 import type { TurnLedger } from "./quota.ts";
 import type { AdminLog } from "./admin-log.ts";
 import type { AdminTokenGate, TokenVerdict } from "./admin-token.ts";
@@ -17,6 +18,8 @@ export interface AdminDeps {
   adminToken: string;
   /** 与主路由共用同一实例：令牌失败计数要在所有管理入口间累计，否则限制形同虚设 */
   gate?: AdminTokenGate;
+  /** 与主路由共用请求级缓存：同一请求的登录门/CSRF/管理路由只计一次失败 */
+  verdictOf?: (req: FastifyRequest) => TokenVerdict;
 }
 
 const StateBody = z.object({ state: z.enum(["active", "suspended", "archived"]), reason: z.string().default("") });
@@ -43,7 +46,11 @@ function operatorOf(req: FastifyRequest, deps: AdminDeps): { operator: string | 
   const fromSession = user?.role === "admin" ? user.userId : null;
   const token = adminTokenOf(req.headers);
   if (!token) return { operator: fromSession };
-  const verdict = deps.gate ? deps.gate.check(token, req.ip) : { ok: !!deps.adminToken && token === deps.adminToken };
+  const verdict = deps.verdictOf
+    ? deps.verdictOf(req)
+    : deps.gate
+      ? deps.gate.check(token, req.ip)
+      : { ok: !!deps.adminToken && token === deps.adminToken };
   if (verdict.ok) return { operator: "token" };
   // 令牌失败仍可退回管理员会话；但被限流时一律 429（fail closed），不给猜令牌留窗口
   return { operator: fromSession, verdict };
@@ -72,7 +79,7 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
     const settings = deps.auth.store.getSettings();
     const users = deps.auth.store.listUsers(q).map((u) => ({
       ...publicUser(u),
-      usage: { todayTurns: deps.ledger.todayTurns(u.userId), dailyLimit: settings.perUserDailyTurns[u.userId] ?? settings.defaultDailyTurns },
+      usage: { todayTurns: deps.ledger.todayTurns(u.userId), dailyLimit: dailyLimitFor(settings, u.userId) },
     }));
     return { ok: true, users };
   });

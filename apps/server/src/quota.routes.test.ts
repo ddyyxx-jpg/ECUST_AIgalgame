@@ -86,6 +86,61 @@ describe("turns 额度结算", () => {
     expect(typeof body.committedSeq).toBe("number");
     await app.close();
   });
+
+  it("已提交后姓名解锁失败：账本保持 committed，SSE 仍下发提交且不报可重试错误", async () => {
+    const { app, deps, cookie, roomId, actorId } = await setup();
+    const state = await deps.store.snapshot(roomId);
+    const target = state.room.scene.presentIds
+      .map((id) => state.entities[id])
+      .find((e) => e?.kind === "npc");
+    expect(target).toBeDefined();
+    if (!target) return;
+    deps.learnNpcNames = async () => {
+      throw new Error("attr.set 写入失败");
+    };
+    const res = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/turns`,
+      headers: { cookie, ...ORIGIN },
+      payload: { actorId, input: "你叫什么名字？", clientTurnId: "c1", targetNpcId: target.id },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("turn.commit");
+    expect(res.body).not.toContain("turn.error");
+    expect(deps.ledger.get("c1")?.state).toBe("committed");
+    await app.close();
+  });
+
+  it("个人额度显式 null 覆盖全局 0；显式 0 也覆盖全局 null（管理列表同口径）", async () => {
+    const { app, cookie, turn } = await setup();
+    const me = await app.inject({ method: "GET", url: "/api/v1/auth/me", headers: { cookie } });
+    const userId = (me.json() as { user: { userId: string } }).user.userId;
+
+    // 全局 0 + 个人显式 null（不限）：不能被当成"沿用默认值"而拒绝
+    await app.inject({
+      method: "PUT", url: "/api/v1/admin/settings", headers: { ...ADMIN, ...ORIGIN },
+      payload: { defaultDailyTurns: 0, perUserDailyTurns: { [userId]: null } },
+    });
+    const users = await app.inject({ method: "GET", url: "/api/v1/admin/users", headers: ADMIN });
+    const listed = (users.json() as { users: { userId: string; usage: { dailyLimit: number | null } }[] }).users
+      .find((u) => u.userId === userId);
+    expect(listed?.usage.dailyLimit).toBeNull();
+    const unlimited = await turn("c1");
+    expect(unlimited.statusCode).toBe(200);
+
+    // 反向：全局 null + 个人显式 0，回合入口与管理列表都必须看到 0
+    await app.inject({
+      method: "PUT", url: "/api/v1/admin/settings", headers: { ...ADMIN, ...ORIGIN },
+      payload: { defaultDailyTurns: null, perUserDailyTurns: { [userId]: 0 } },
+    });
+    const users2 = await app.inject({ method: "GET", url: "/api/v1/admin/users", headers: ADMIN });
+    const listed2 = (users2.json() as { users: { userId: string; usage: { dailyLimit: number | null } }[] }).users
+      .find((u) => u.userId === userId);
+    expect(listed2?.usage.dailyLimit).toBe(0);
+    const blocked = await turn("c2");
+    expect(blocked.statusCode).toBe(429);
+    expect((blocked.json() as { code: string }).code).toBe("E_RATE_LIMITED");
+    await app.close();
+  });
 });
 
 describe("行动核对端点", () => {

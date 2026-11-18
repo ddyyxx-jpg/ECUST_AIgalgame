@@ -7,6 +7,7 @@ import Fastify from "fastify";
 import { tempDir } from "@galgame/testkit";
 import { createApp } from "./bootstrap.ts";
 import { registerRoutes } from "./routes.ts";
+import { AdminTokenGate } from "./admin-token.ts";
 import type { ServerConfig } from "./config.ts";
 
 const ORIGIN = { origin: "https://galgame.test" };
@@ -86,6 +87,31 @@ describe("管理端点鉴权", () => {
     expect(blocked.statusCode).toBe(429);
     expect((blocked.json() as { code: string }).code).toBe("E_RATE_LIMITED");
     expect(blocked.headers["retry-after"]).toBeDefined();
+    await app.close();
+  });
+
+  it("同一请求的令牌失败只计一次（登录门 + 管理路由共用请求级缓存）", async () => {
+    const deps = await createApp(testConfig());
+    // 阈值 1：若同一请求在两个入口各记一次，第一个请求就会被判 429
+    deps.adminGate = new AdminTokenGate("dev-admin", 1, 60_000);
+    const app = Fastify();
+    registerRoutes(app, deps);
+    const { cookie } = await registerPlayer(app, "alice");
+
+    const first = await app.inject({
+      method: "GET", url: "/api/v1/admin/users",
+      headers: { cookie, "x-admin-token": "wrong-once" },
+    });
+    expect(first.statusCode).toBe(403);
+    expect((first.json() as { code: string }).code).toBe("E_FORBIDDEN");
+
+    // 第二个请求才应触发 429：证明上一条只累计了 1 次失败
+    const second = await app.inject({
+      method: "GET", url: "/api/v1/admin/users",
+      headers: { "x-admin-token": "wrong-twice" },
+    });
+    expect(second.statusCode).toBe(429);
+    expect((second.json() as { code: string }).code).toBe("E_RATE_LIMITED");
     await app.close();
   });
 });

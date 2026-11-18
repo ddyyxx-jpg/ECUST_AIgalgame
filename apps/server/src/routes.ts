@@ -14,6 +14,7 @@ import type { TurnHistory } from "./turn-history.ts";
 import { registerResumeRoutes } from "./resume.routes.ts";
 import { registerAuthRoutes, type AuthService } from "./auth.ts";
 import { registerAdminRoutes } from "./admin.routes.ts";
+import { dailyLimitFor } from "./auth-store.ts";
 import type { TurnLedger } from "./quota.ts";
 import type { AdminLog } from "./admin-log.ts";
 import { makeRoomExists } from "./room-exists.ts";
@@ -22,7 +23,7 @@ import { EMPTY_SCENARIOS } from "./scenarios.ts";
 import type { ScenarioCatalog } from "./scenarios.ts";
 import { registerViewRoutes } from "./view.routes.ts";
 import { adminTokenOf, guardRoom } from "./room-guard.ts";
-import { AdminTokenGate } from "./admin-token.ts";
+import { AdminTokenGate, type TokenVerdict } from "./admin-token.ts";
 
 export interface AppDeps {
   store: Store;
@@ -56,6 +57,8 @@ export interface AppDeps {
   adminToken?: string;
   /** 令牌校验 + 失败限流（registerRoutes 未提供时按 adminToken 新建；测试可注入独立实例） */
   adminGate?: AdminTokenGate;
+  /** 请求级令牌判定缓存（registerRoutes 注入）：登录门/CSRF/room-guard/admin 共用，同一请求只计一次失败 */
+  adminVerdict?: (req: FastifyRequest) => TokenVerdict;
   /** 世界印象（用户投影）：/me 只读，投递在 Turn 里 */
   impressions?: { pending(userId: string, roomId: string, limit: number): Promise<unknown[]>; count?(userId: string): Promise<number> };
   /** 回合历史（issue #7）：只记已提交回合，用于续玩重放 */
@@ -160,6 +163,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     verdictCache.set(req, verdict);
     return verdict;
   };
+  // room-guard 与登录门/CSRF 共用同一份请求级判定：否则房间写入口会把同一次坏令牌再计一次
+  deps.adminVerdict = adminVerdict;
 
   // 所有带 :roomId 的路径先过白名单：roomId 只允许作为 id，不能变成文件路径。
   // Fastify 会先解码 `%2F`，所以 `..%2F..%2Fpwn` 到这里已经是 `../../pwn`；必须在这里挡。
@@ -213,7 +218,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   // 登录/注册/登出与管理端点放在 hook 之后注册，才能被上面的登录门与 CSRF 覆盖。
   if (deps.auth) registerAuthRoutes(app, deps.auth);
   if (deps.auth && deps.ledger && deps.adminLog) {
-    registerAdminRoutes(app, { auth: deps.auth, ledger: deps.ledger, log: deps.adminLog, adminToken: deps.adminToken ?? "", gate: adminGate });
+    registerAdminRoutes(app, { auth: deps.auth, ledger: deps.ledger, log: deps.adminLog, adminToken: deps.adminToken ?? "", gate: adminGate, verdictOf: adminVerdict });
   }
 
   const roomExists = makeRoomExists(deps.store);
@@ -409,7 +414,7 @@ const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     const ledger = userId ? deps.ledger : undefined;
     if (ledger && userId && turnScope) {
       const settings = deps.auth?.store.getSettings();
-      const dailyLimit = settings ? (settings.perUserDailyTurns[userId] ?? settings.defaultDailyTurns) : null;
+      const dailyLimit = settings ? dailyLimitFor(settings, userId) : null;
       const reserved = ledger.reserve({
         ...turnScope, actorId: body.actorId,
         dailyLimit, actionsEnabled: settings?.actionsEnabled ?? true,
@@ -492,38 +497,52 @@ const access = await guardRoom(req, reply, deps, roomId, userIdOf);
       // - 只有回合真的提交（turn.commit）才解锁——失败回合不落状态；
       // - 目标必须此刻在玩家所在场景（presentIds）里——不在场的人解锁不了。
       if (deps.learnNpcNames && committed) {
-        const snapshot = finalState ?? (await deps.store.snapshot(roomId));
-        const npcs = Object.values(snapshot.entities).filter((e) => e.kind === "npc" && e.status === "active");
-        const learnedIds = new Set<string>();
-        const presentIds = new Set(snapshot.room.scene.presentIds);
-        if (body.targetNpcId && isAskNameInput(body.input)) {
-          const targetNpc = snapshot.entities[body.targetNpcId];
-          if (targetNpc && targetNpc.kind === "npc" && presentIds.has(targetNpc.id)) learnedIds.add(targetNpc.id);
-        }
-        if (!body.targetNpcId) {
-          const speech = events
-            .flatMap((ev) => {
-              const d = ev as { type?: string; field?: string; text?: string; facts?: string[] };
-              if (d.type === "turn.delta" && typeof d.text === "string") return [d.text];
-              if (d.type === "turn.facts" && Array.isArray(d.facts)) return d.facts;
-              return [];
-            })
-            .join("\n");
-          for (const npc of namesIntroducedIn(speech, npcs)) {
-            if (presentIds.has(npc.id)) learnedIds.add(npc.id);
+        // 已提交回合不能再被旁路失败改写：姓名解锁失败只记日志，账本保持 committed、事件照常下发
+        try {
+          const snapshot = finalState ?? (await deps.store.snapshot(roomId));
+          const npcs = Object.values(snapshot.entities).filter((e) => e.kind === "npc" && e.status === "active");
+          const learnedIds = new Set<string>();
+          const presentIds = new Set(snapshot.room.scene.presentIds);
+          if (body.targetNpcId && isAskNameInput(body.input)) {
+            const targetNpc = snapshot.entities[body.targetNpcId];
+            if (targetNpc && targetNpc.kind === "npc" && presentIds.has(targetNpc.id)) learnedIds.add(targetNpc.id);
           }
-        }
-        if (learnedIds.size > 0) {
-          await deps.learnNpcNames(roomId, [...learnedIds]);
-          finalState = await deps.store.snapshot(roomId);
+          if (!body.targetNpcId) {
+            const speech = events
+              .flatMap((ev) => {
+                const d = ev as { type?: string; field?: string; text?: string; facts?: string[] };
+                if (d.type === "turn.delta" && typeof d.text === "string") return [d.text];
+                if (d.type === "turn.facts" && Array.isArray(d.facts)) return d.facts;
+                return [];
+              })
+              .join("\n");
+            for (const npc of namesIntroducedIn(speech, npcs)) {
+              if (presentIds.has(npc.id)) learnedIds.add(npc.id);
+            }
+          }
+          if (learnedIds.size > 0) {
+            await deps.learnNpcNames(roomId, [...learnedIds]);
+            finalState = await deps.store.snapshot(roomId);
+          }
+        } catch (e) {
+          console.warn(`[names] 回合已提交，但姓名解锁失败：${roomId}`, e);
         }
       }
-      const placeholders = unknownPlaceholders(finalState ?? (await deps.store.snapshot(roomId)), deps.appearance);
+      // 响应生成与提交状态解耦：脱敏快照失败时用回合开始前的快照兜底，
+      // 宁可把刚解锁的人继续遮住，也不能漏真名或把已提交回合报成可重试失败。
+      let placeholders: Map<string, string>;
+      try {
+        placeholders = unknownPlaceholders(finalState ?? (await deps.store.snapshot(roomId)), deps.appearance);
+      } catch (e) {
+        console.warn(`[names] 回合已提交，但脱敏快照失败，改用回合开始前快照：${roomId}`, e);
+        placeholders = unknownPlaceholders(snapshotForInput, deps.appearance);
+      }
       for (const ev of events) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, placeholders));
     } catch (e) {
       errored = true;
-      if (turnScope) ledger?.transition(turnScope, "failed");
-      sseWrite(reply.raw, "turn.error", { type: "turn.error", code: "E_UPSTREAM", message: String(e), retryable: true });
+      // 收到 turn.commit 后才会走到这里的旁路异常：账本保持 committed，也不给客户端可重试信号
+      if (!committed && turnScope) ledger?.transition(turnScope, "failed");
+      sseWrite(reply.raw, "turn.error", { type: "turn.error", code: "E_UPSTREAM", message: String(e), retryable: !committed });
     } finally {
       reply.raw.end();
     }

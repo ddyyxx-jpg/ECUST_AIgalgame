@@ -54,9 +54,11 @@ export async function guardRoom(
 
   const token = adminTokenOf(req.headers);
   if (token) {
-    const verdict: TokenVerdict = deps.adminGate
-      ? deps.adminGate.check(token, req.ip)
-      : { ok: tokenEquals(token, deps.adminToken ?? "") };
+    const verdict: TokenVerdict = deps.adminVerdict
+      ? deps.adminVerdict(req)
+      : deps.adminGate
+        ? deps.adminGate.check(token, req.ip)
+        : { ok: tokenEquals(token, deps.adminToken ?? "") };
     if (verdict.blocked) {
       reply.code(429).send({ ok: false, code: "E_RATE_LIMITED", message: "管理员鉴权失败次数过多，请稍后再试" });
       return null;

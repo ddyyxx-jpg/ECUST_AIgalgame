@@ -7,6 +7,7 @@ import Fastify from "fastify";
 import { tempDir } from "@galgame/testkit";
 import { createApp } from "./bootstrap.ts";
 import { registerRoutes } from "./routes.ts";
+import { AdminTokenGate } from "./admin-token.ts";
 import type { ServerConfig } from "./config.ts";
 
 function testConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
@@ -31,8 +32,9 @@ function testConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
 /** Cookie 写请求的合法 Origin（CSRF 校验）；成员资格测试要越过 CSRF 才能测到 guardRoom */
 const ORIGIN = { origin: "https://galgame.test" };
 
-async function makeApp(overrides: Partial<ServerConfig> = {}) {
+async function makeApp(overrides: Partial<ServerConfig> = {}, gate?: AdminTokenGate) {
   const deps = await createApp(testConfig(overrides));
+  if (gate) deps.adminGate = gate;
   const app = Fastify();
   registerRoutes(app, deps);
   return { deps, app };
@@ -142,6 +144,33 @@ describe("房间授权（issue #33，强制登录模式）", () => {
     });
     expect(turn.statusCode).toBe(200);
     expect(turn.body).toContain("turn.commit");
+    await app.close();
+  });
+
+  it("房间写入口与 CSRF 钩子共用令牌失败计数（同一请求只计一次）", async () => {
+    // 阈值 1：若 CSRF 钩子与 room-guard 各计一次，第一个请求就会被判 429
+    const { app } = await makeApp({}, new AdminTokenGate("dev-admin", 1, 60_000));
+    const cookie = await register(app, "alice");
+    const created = await app.inject({ method: "POST", url: "/api/v1/rooms", headers: { cookie, ...ORIGIN }, payload: { mode: "solo" } });
+    const { roomId, actorId } = created.json() as { roomId: string; actorId: string };
+
+    const first = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/turns`,
+      headers: { cookie, ...ORIGIN, "x-admin-token": "wrong-room-1" },
+      payload: { actorId, input: "你好", clientTurnId: "c1" },
+    });
+    expect(first.statusCode).toBe(200);
+
+    // 第二个请求才应被限流：证明第一个请求只累计 1 次失败
+    const second = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/turns`,
+      headers: { cookie, ...ORIGIN, "x-admin-token": "wrong-room-2" },
+      payload: { actorId, input: "你好", clientTurnId: "c2" },
+    });
+    expect(second.statusCode).toBe(429);
+    expect((second.json() as { code: string }).code).toBe("E_RATE_LIMITED");
     await app.close();
   });
 

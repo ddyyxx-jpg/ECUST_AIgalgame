@@ -49,6 +49,16 @@ export interface AuthSettings {
   perUserDailyTurns: Record<string, number | null>;
 }
 
+/**
+ * 额度解析的唯一口径：个人键存在时**即使值为 null（不限）也算显式设置**，不能回退全局默认。
+ * 回合入口与管理列表必须共用本函数，否则同一个账号会看到两个不同额度（复审 P2）。
+ */
+export function dailyLimitFor(settings: AuthSettings, userId: string): number | null {
+  return Object.prototype.hasOwnProperty.call(settings.perUserDailyTurns, userId)
+    ? (settings.perUserDailyTurns[userId] ?? null)
+    : settings.defaultDailyTurns;
+}
+
 interface AuthFile {
   version: 2;
   users: Account[];
