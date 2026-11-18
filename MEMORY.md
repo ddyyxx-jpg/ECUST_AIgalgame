@@ -246,6 +246,10 @@
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `48d91d6` ｜ fix ｜ 点不在场 NPC 不再建立对话对象，改为「TA 不在这里（在「XX」）」+「前往 TA 所在地」（复用 `/map/travel`，到达后自动选中）；新增 `npc-presence.ts` 纯函数判定与测试；`turn.error/retryable` 透传，可重试时对话区给「重试」按钮，用新 `clientTurnId` 重发上次输入、不自动重试；docs/06 §7/§8 同步 ｜ 只在当前场景开聊才能保证「在场」语义；travel 成功要等 `view.position.locId` 到位再选中，避免被换场景清理 effect 覆盖；重试判定以服务端 `retryable` 为准、事件缺字段才回退契约 `RETRYABLE`，不自己维护错误码名单 ｜ tsc 0；34 文件 / 228 用例（新增 web 2 文件 13 例）；check:contract 8 项（3.2.0，未 bump）；build:web 286.13 kB / gzip 90.58 kB ｜ 与 PR #19（登录门/2D 地图）交互：本改动只在 ChatPanel/App 对话流与地图点击回调上，不改 MapView/路由；若 #19 改带 actorId 的 travel 调用签名需同步 `enterScene` 返回值 ｜ 未做：失败回合已流出的部分叙事不回滚（重试会追加新叙事）
 - 2026-11-18 ｜ `fix/scene-isolation-web` ｜ `6af5bd2` ｜ fix ｜ PR #22 评审 P2：换场景后重试仍向旧 NPC 发「对X说：…」。① `view.position.locId` 变化即清 `lastTurn`（`shouldDropRetryOnMove`），重试按钮可见时收掉并提示失效；② `retry` 提交前用当前 WorldState 复核目标在场（`targetStillInScene`：`scene.presentIds` 或 `located_in` 指向脚下），不在则禁用不请求 ｜ 只清旧重试、不动正常对话；复核与 `planNpcTalk` 共用同一套在场定义，避免两处口径漂移；首次拿到位置（prev 空）不算移动 ｜ tsc 0；34 文件 / 237 用例（web 22 例，新增 9）；check:contract 8/8；build:web 未回归 ｜ 未做：失败回合已流出的部分叙事不回滚（重试追加新叙事）
 
+### fix/turn-memory-consistency（issues #36 / #41 / #42，待 PR）
+
+- 2026-11-18 ｜ `fix/turn-memory-consistency` ｜ `8e58faa` ｜ fix ｜ #36：引擎内部 Symbol 标记（仅 `recentDrafts()` 设置）取代模型可填的「最近对话」标签作为 G3/G4/G6 豁免依据，模型草稿的该标签被剥离，读侧 `isWorkingMemory` 仍按标签兼容历史数据 ｜ 标签是模型可控输入、不能作信任信号；Symbol 不进契约/Proposal.args，故不 bump（docs/03 §10.14 记为行为澄清） ｜ #41：核实 issue 前提有误——`memory.write` 从来不计入 `xWritesPerTurn`（只有 `x.` 前缀的 attr 写计数），不改行为，补代码注释/docs 口径与双 NPC 35 轮回归（8 x-writes 全部落地、无 E_X_LIMIT） ｜ #42：`compact()` 接入 `EventSourcedMemory.ingest()`（按 room 每 10 写扫描一次、不产事件/不调模型），`COMPACT_AFTER` 60→20（须小于 G6 sessionCap=30），archived 与工作记忆不计入 G6 配额；归档标记仅内存、重建按 salience/createdAt 确定性复现（持久化需契约变更，未做） ｜ docs/07 §4.2/§5、docs/03 §10.14 同步（无新名字/字段/错误码，未 bump） ｜ tsc 0；38 文件/275 用例通过；check:contract 8/8（3.2.1） ｜ 未做：跨重启幂等见 turn 分支；#33/#35 按用户指示暂缓
+
 ### 历史分支（已合并 / 已删除，保留记录）
 
 - 2026-11-16 ｜ `feature/map-module @ 362df4a` ｜ 已合并（`95eb27d..362df4a` ff，后随 main 进入 `3112f79`）；远端分支已删
