@@ -176,14 +176,14 @@ export class MapService {
   }
 
   /**
-   * travel / tick 所有返回点的统一出站脱敏出口（issue #53 成功，#58 失败）。
+   * travel / tick / scene dialogue 所有返回点的统一出站脱敏出口（issue #53 成功，#58 失败，#61 对话）。
    *
    * 成功整包交给 maskTurnEvents；失败响应（MapFail）同属出站视图，message / details
    * 里的文本同样可能带未认识 NPC 真名，走同一层掩码。maskNamesDeep 只替换未认识
    * NPC 真名，错误码 / 场景 id 不含人名，不会被误伤。早期失败可能拿不到快照，
    * 此时 maskTurnEvents 回退到 store.snapshot；已有快照的调用点传入可省一次回放。
    */
-  private async outbound<T extends TravelResult | TickResult>(
+  private async outbound<T extends TravelResult | TickResult | DialogueResult>(
     result: T,
     roomId: string,
     state?: WorldState,
@@ -323,24 +323,26 @@ export class MapService {
   ): Promise<DialogueResult> {
     const { refs } = await this.content.sceneRefs();
     const sceneRef = refs.get(sceneId);
-    if (!sceneRef) return fail("E_SCENE_NOT_FOUND", `场景 ${sceneId} 不存在`);
+    // 出站脱敏（issue #61）：场景对话台词/失败文本同样可能带未认识 NPC 真名，统一过 outbound。
+    // 此处在 snapshot 之前，无 state 可传，maskTurnEvents 会回退到 store.snapshot。
+    if (!sceneRef) return this.outbound(fail("E_SCENE_NOT_FOUND", `场景 ${sceneId} 不存在`), roomId);
 
     const state = await this.deps.store.snapshot(roomId);
     const actor = actorId ?? playerActorId(state);
     // 只能触发"当前所在地 + 玩家在场"的场景对话，避免从地图远程播放别处剧情
     if (state.room.scene.locId !== sceneId) {
-      return fail("E_NOT_ADJACENT", `你不在 ${sceneId}，不能触发该场景对话`);
+      return this.outbound(fail("E_NOT_ADJACENT", `你不在 ${sceneId}，不能触发该场景对话`), roomId, state);
     }
     if (!state.room.scene.presentIds.includes(actor)) {
-      return fail("E_NOT_IN_ROOM", "玩家不在当前场景");
+      return this.outbound(fail("E_NOT_IN_ROOM", "玩家不在当前场景"), roomId, state);
     }
 
     const dialogue = sceneRef.scene.dialogues.find((d) => d.id === dialogueId);
-    if (!dialogue) return fail("E_DIALOGUE_NOT_FOUND", `场景 ${sceneId} 没有对话 ${dialogueId}`);
+    if (!dialogue) return this.outbound(fail("E_DIALOGUE_NOT_FOUND", `场景 ${sceneId} 没有对话 ${dialogueId}`), roomId, state);
 
     const npc = state.entities[dialogue.npcId];
     if (!npc || npc.kind !== "npc" || !isLive(state, dialogue.npcId)) {
-      return fail("E_ENTITY_MISSING", `对话 NPC ${dialogue.npcId} 不在本房间`);
+      return this.outbound(fail("E_ENTITY_MISSING", `对话 NPC ${dialogue.npcId} 不在本房间`), roomId, state);
     }
     // 不强制 NPC 与玩家同场景：AI 生成的场景对话可能是"门后的声音/电话/留言"，
     // 强校验会让生成内容几乎永远不可用；玩家必须在场这一点已在上面校验。
@@ -373,9 +375,15 @@ export class MapService {
       // 还不认识（不知道名字）：先补一句"陌生人"开场，NPC 不会假装熟络，
       // 而是问怎么称呼；玩家随后在对话流里自述名字，由 introduce 模块落 knows_name 与记忆。
       const opener = knowsNameOf(npc) ? [] : [`（他看了你一眼，显然不认识你）「同学，你是？怎么称呼？」`];
-      return { ok: true, npc: { id: npc.id, name: displayNameOf(npc, placeholders) }, lines: [...opener, ...lines], sessionId: session.id };
+      // 成功返回整包过 outbound：seed 台词里的未认识真名换成占位名，已认识名原样保留；
+      // 传入已有 state 快照，省一次事件日志回放。
+      return this.outbound<DialogueResult>(
+        { ok: true, npc: { id: npc.id, name: displayNameOf(npc, placeholders) }, lines: [...opener, ...lines], sessionId: session.id },
+        roomId,
+        state,
+      );
     } catch (e) {
-      return fail(codeOfError(e), e instanceof Error ? e.message : String(e));
+      return this.outbound(fail(codeOfError(e), e instanceof Error ? e.message : String(e)), roomId, state);
     }
   }
 
