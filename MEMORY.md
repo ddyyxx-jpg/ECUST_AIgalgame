@@ -130,10 +130,10 @@
 ### 3.3 已知遗留（MINOR，均有记录；按需修）
 
 - **地图**（来自 `map-review.md` M1–M12）：`createDraft` 无鉴权 + draft id 32 位无碰撞检查；save 先改缓存后写盘（写盘失败假成功）；冷启动并发丢更新；tick 先推时间后校验移动（失败时时间已前进）；崩溃遗留 `generating` 无恢复；文件超 300 行（`map.ts` 575 等）；部分测试断言文案/fixture 偏差；docs 版本/坐标范围历史残留；app 层硬编码 map 数据路径；admin token 存 localStorage（已文档明示）。地图 v0.2：NPC 同点偏移 34 世界像素在 fit 缩放下屏幕差约 5px（视觉余量小、无测试）；偏移只读展示，不写状态。
-- **引擎**：`readLog` 失败污染 loaded 已修（PR #9，含 EISDIR 回归）；预算淘汰按插入顺序非 LRU；`bootstrap` 种子直写 + 种子 op abort 时可能半初始化；`trade` 端到端依赖地图/数据文件。另：`xWritesPerTurn=8` 为整回合 x 区限额，双 NPC + 模型各写满时（3+3 模型 + 2 工作记忆 + 2 tombstone = 10）可能 `E_X_LIMIT` 拒整批记忆（叙事两阶段重试仍成功），建议独立预算/放宽并补双 NPC 写满用例（PR #24 复审记录）。
+- **引擎**：`readLog` 失败污染 loaded 已修（PR #9，含 EISDIR 回归）；预算淘汰按插入顺序非 LRU；`bootstrap` 种子直写 + 种子 op abort 时可能半初始化；`trade` 端到端依赖地图/数据文件。`xWritesPerTurn=8` 经核对只统计 `attr.delta`/`attr.set` 的 `x.` 键，`memory.write`（含工作记忆/tombstone）本就不计入，PR #24 复审记录的 `E_X_LIMIT` 前提在 3.2.1 上无法复现；`fix/memory-issues` 补 8 条 x 写 + 双 NPC 记忆同回合回归，并在 docs/03 §2.3/§8 写明口径。
 - **审核/现实锚定**：违规回合连同模块提案一起丢弃（`docs/05` §10.2 已写明理由）；审核测试断言 policy 模板文案（轻度）；子串匹配会漏变体/误伤正常句子（`docs/05` §11.4 已承认）。
 - **文档**：README/AGENTS/MEMORY 职责已收口（PR #10）；剩余：`docs/02` §6 SQL DDL 标“规划中”、`docs/07/08` 内的历史版本句子按需清理。
-- **记忆子系统（3.1.0）**：`perSourceCap` 缺可构造测试场景；`publish` 函数体 ~150 行（文件已 ≤300）；`memory.impression.queued` 事件注册但未发射（留联机广播用）；canonize 定时默认关（仅 admin 端点触发）。工作记忆「最近对话」滚动 tombstone 只留最新 1 条（PR #24）；`archived` 仍占情节配额、`compact` 未接线（后续 issue）。
+- **记忆子系统（3.1.0）**：`perSourceCap` 缺可构造测试场景；`publish` 函数体 ~150 行（文件已 ≤300）；`memory.impression.queued` 事件注册但未发射（留联机广播用）；canonize 定时默认关（仅 admin 端点触发）。工作记忆「最近对话」滚动 tombstone 只留最新 1 条（PR #24）；`archived` 仍占情节配额、`compact` 未接线（`fix/memory-issues` 修复中：#36 可信通道、#39 repair 补写、#42 compact 接线/archived 不占配额）。
 - **存档/会话 MVP（PR #13）**：历史一次最多 200 行；本地身份 `ecust.playerId` 可伪造、清空即丢索引（房间仍可进）；无多槽/导出/跨设备；`GET /history` 对老房间（成员无 userId）开放只读。
 - **前端（#21 修复，PR #22）**：失败回合已流出的部分叙事不回滚（重试追加新叙事）；重试判定纯函数有单测、无组件级 jsdom 测试；与 PR #19 登录门/2D 地图合并时需检查 `enterScene`/travel 签名。
 - **引擎 #1 剩余**：阶段数组仍是扁平拼接（无显式阶段对象）、`dryRun`/权限环境一致性未验证（docs/03 §10.11 已记录）。
@@ -225,6 +225,10 @@
 - 2026-11-18 ｜ `fix/memory-context` ｜ `49d20ce` ｜ feat ｜ 多 NPC 记忆按人注入（`MemoryContext.npcs[]`，S1.5 之外预算 1100 均分，S7/S8 按人分段标名）+ 每回合把「玩家输入+叙事摘要」写成每个在场 NPC 的 short 工作记忆（`memory.write`，排在模型记忆之后，配额满时让位）+ S1 增「只有在场者能说话/行动，不得替不在场者回答」；`PROMPT_VERSION 2026-11-17.3 → 2026-11-18.1`；`docs/07` §4.1/§4.2、`docs/prompts/CHANGELOG.md` ｜ #20 根因：`turn.memory.selectOwner` 在多 NPC 场景把 owner 退回玩家，两个在场 NPC 的私忆整段不进 S7/S8（与 docs/07 §4 的承诺矛盾，判为 bug）；单 NPC/0 NPC 保持旧行为，写入按 owner 各过闸门、每 NPC 每回合仍 ≤3 条 ｜ 修前新测试 7 failed / 1 passed；修后 tsc 0、33 文件/223 用例、check:contract 8/8（3.2.0 未变） ｜ 待 PR 合并；已知：同一事件会分别写入各 NPC 私忆（有意，内容重复）、`speakers` 仍 `[]`、最近对话对下一回合才出现的不在场者不可见
 
 - 2026-11-18 ｜ `fix/memory-context` ｜ `88aef4d` ｜ fix ｜ Codex P2 修复：①「最近对话」工作记忆写新条前先 tombstone 旧条（`memory.write status=tombstoned, supersedes`），每 owner 只留最新 1 条；`ownedCount` 与闸门 G6 排除工作记忆（`WORKING_MEMORY_TAG` 豁免 G3/G4/G6），`sessionCap=30` 只约束情节记忆；② `LlmProduct` 追加 `narrative`/`dialogue`（`text` 语义不变），工作记忆分别取 30/70/90 字、总 ≤200，叙事写满不再丢台词；`docs/07` §4.2 与 G6 行同步 ｜ 理由：工作记忆每回合 1 条会把 30 条上限填满并挤掉模型记忆（P2-1）；只取拼接文本截 100 字会整段丢掉「明早 8 点见」这类台词（P2-2）；不给工作记忆单开配额字段，用标签豁免 + 滚动替换保持改动面最小，`archived` 容量回收留给后续 issue ｜ 新增 `memory.gate.test.ts` 3 例；`memory.multinpc.test.ts` 增滚动替换/台词保留/连续 31 轮；更新 2 处旧预期；tsc 0、34 文件/229 用例、check:contract 8/8（3.2.0 未变）；`PROMPT_VERSION` 未改（提示词文案没动） ｜ 已知：`archived` 仍计入情节记忆配额（`compact` 未接线，后续 issue）；修复前积累的多条旧工作记忆会在首次写入时一次性 tombstone
+
+### fix/memory-issues（issue #36/#39/#41/#42，PR 待建）
+
+- 2026-11-18 ｜ `fix/memory-issues` ｜ `4a7f2a2` ｜ fix ｜ #36 工作记忆对 G3/G4/G6 的豁免从"模型可写 tags"改为引擎内部 `workingDrafts` 通道（模型/种子草稿的「最近对话」标签在 `coerceMemoryDrafts` 与主循环两处清洗，仍受每回合 3 条 / session 30 条；读侧 `isWorkingMemory` 兼容历史）；#39 repair 成功后用修复版叙事/台词/记忆重建整份 plan 并随最终批提交（抽出 `applyBatch` 共用主批与 repair 批）；#42 `maybeCompact` 每 5 个提交回合对每个在场 owner 异步 compact（失败忽略）、`COMPACT_AFTER` 60→20、`archived` 不计 `ownedCount`/不进 prompt/工作记忆不归档、重启首次 sync 确定性重算 archived（新增 `memory.compact.ts`，`memory.ts` 294 行）；#41 核对 `xWrites` 只统计 `attr.delta`/`attr.set` 的 `x.` 键（`arbiter.ts:258`），`memory.write` 本就不计，3.2.1 上无法复现 E_X_LIMIT ｜ 信任边界必须是代码结构而非模型可写字符串；repair 两阶段只重提业务提案导致成功回合 0 记忆；长期房间会被"归档但仍计数"冻结配额；`compact` 归档不落事件，重启需确定性重算才能恢复配额；x 区预算按文档只约束 x. 属性写 ｜ rebase 到 ff61237 后：tsc 0；38 文件 / 279 用例全过（gate 6、turn 8、multinpc 13 含 45 轮/重启重算、#41 回归）；check:contract 8/8（3.2.1 未 bump）；PROMPT_VERSION 未改 ｜ CONTRACT_VERSION 待 Lead 统一 3.3.0；compact 非事件持久化（重启重算，归档集合可能与重启前略有差异）、异步失败静默；`maybeCompact` 进程内计数，重启后从 0 开始（最多晚 5 个回合才再压缩）
 
 ### feature/campus-map-v0.2
 
