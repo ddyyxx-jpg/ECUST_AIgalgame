@@ -212,6 +212,10 @@
 - 2026-11-17 ｜ main ｜ `CHANGELOG.md` ｜ docs ｜ 新增根目录更新日志（M0 / 引擎 3.0.0 / 审核与锚定 / 地图 v0.2，按日期分段） ｜ GitHub 上需要可读的更新日志；协议版本以 CONTRACT_VERSION 为准 ｜ tsc 0；14 文件/117 用例；8 项契约 ｜ 无
 - 2026-11-17 ｜ main ｜ `CHANGELOG.md`（二次） ｜ docs ｜ 小节标题对齐 tag（v0.1.0/v0.1.1/v0.1.2/v0.2.0），拆出引擎与审核/锚定两段 ｜ 让 CHANGELOG 与 GitHub Releases 一一对应 ｜ tsc 0；14 文件/117 用例；8 项契约 ｜ 无
 
+### fix/map-failure-mask（issue #58，PR 待开）
+
+- 2026-11-18 ｜ `fix/map-failure-mask` ｜ `f4163cb` ｜ fix ｜ `map.ts` 新增私有 `outbound()` 统一出站出口，travel/tick 的成功与全部 10 个 ok:false 返回点都过 `maskTurnEvents`（失败遮 message/detail，成功整包）；早期失败靠 snapshot 回退，有快照的调用点直接传入；新增 4 条失败脱敏用例，`docs/06` §4.2/§4.3 同步 ｜ #55 只用路径巧合论证失败响应安全，错误 detail 可能含未认识 NPC 真名（尤其 tick 的 rejected.detail），失败同属出站视图必须同口径；maskNamesDeep 只替换占位表真名，不误伤错误码/场景 id，也天然覆盖未来 details 字段；不 bump ｜ tsc 0；48 文件/324 用例通过（基线 47/320）；check:contract 8 项（3.4.1）；与 PR #57 集成 49 文件/332 用例全绿 ｜ openDialogue / installScene 内部 fail 不在本 issue 范围（installScene 失败经 travel 的 installFail 已覆盖）；#33/#35 按用户指示忽略
+
 ### fix/scenario-profile-gating（issue #54，PR #56，已 squash 合并 `2547d73`）
 
 - 2026-11-18 ｜ `fix/scenario-profile-gating` ｜ `3006ce2` ｜ fix ｜ `/api/v1/scenarios` 的 npcs 收窄为 `PublicNpcEntry`（id/appearance）；`mutter` 改随 `/gallery` 且 `met=true` 下发，web `CampusMap` 按 `roomId` 拉图鉴取气泡（拉不到则不出）；`docs/03` §5.2.5/§5.2.6/§10.18 与 `docs/06` §7/§8 同步；新增 5 条测试 ｜ 一级认识口径要求未认识 NPC 不给档案；全局公开端点不应带任何档案字段（已知也不带）；气泡由房间图鉴供给，避免标题页读档案，同时不回退地图气泡；不 bump（派生视图收窄，不进契约 schema） ｜ tsc 0；46 文件/317 用例通过（基线 44/312）；check:contract 8 项（3.4.0）；与 PR #55 合并集成 47 文件/320 用例全绿 ｜ CampusMap 实际由 `ChatPanel.tsx:168` 渲染，故该文件仅加一行 `roomId={roomId}`；气泡在新认识后下一次房间切换/重挂载出现；#33/#35 按用户指示忽略
