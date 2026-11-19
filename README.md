@@ -60,7 +60,7 @@ export GALGAME_AUDIT_API_KEY=...
 
 公开 demo 用「邀请注册 + 用户名密码登录 + HttpOnly Cookie 会话」。本地开发两种进入方式：
 
-- **访客进入**：`GALGAME_AUTH_REQUIRED=0`（默认）时，标题页提供「以访客身份进入（本地开发）」，无需登录/邀请码。
+- **访客进入**：`GALGAME_AUTH_REQUIRED=0`（默认）时，可直接以访客进入。退出后再次点击访客入口，同一浏览器会继续使用原访客存档。
 - **完整注册**：启动服务端前设置 `GALGAME_AUTH_REQUIRED=1`、`GALGAME_INVITE_CODE=<邀请码>` 和 `GALGAME_PUBLIC_ORIGIN=http://127.0.0.1:5173`。Origin 必须与浏览器地址栏的协议、主机和端口完全一致。注册页填写邀请码（共享码可重复用，适合组内测试）。部署时将 Origin 改为实际访问地址，并在可信反向代理后启用 `GALGAME_TRUST_PROXY=1`。
 - **管理员 / 一次性邀请**：直接运行 Node 服务时，停服后在同一工作目录用与服务端相同的 `GALGAME_DATA_DIR` 执行 `GALGAME_ADMIN_PASSWORD=<密码> npx tsx scripts/admin-init.ts <用户名>`。Docker 部署按容器步骤初始化；已有账号提权需用该账号当前密码。[管理端点](docs/03-接口总表.md) · [Docker 初始化](deploy/README.md#初始化管理员)
 

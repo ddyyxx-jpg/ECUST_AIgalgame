@@ -77,15 +77,20 @@ sudo docker compose up -d app
 
 ## 4. Nginx + 自签证书（无域名，仅 IP 访问）
 
+将 `PUBLIC_IP` 改为部署主机的公网 IPv4，须与 §2 的 `GALGAME_PUBLIC_ORIGIN` 使用同一个地址。安装前用该地址渲染 Nginx 模板的 `server_name`。
+
 ```bash
+PUBLIC_IP=203.0.113.10  # 示例地址，部署前替换
+sudo install -d -m 0700 /etc/nginx/ssl
 sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout /etc/nginx/ssl/ecust-galgame.key \
   -out /etc/nginx/ssl/ecust-galgame.crt \
-  -subj "/CN=<公网IP>" \
-  -addext "subjectAltName=IP:<公网IP>"
+  -subj "/CN=$PUBLIC_IP" \
+  -addext "subjectAltName=IP:$PUBLIC_IP"
 sudo chmod 600 /etc/nginx/ssl/ecust-galgame.key
 
-sudo cp deploy/nginx-ecust-galgame.conf /etc/nginx/sites-available/ecust-galgame
+sed "s/__GALGAME_PUBLIC_IP__/$PUBLIC_IP/g" deploy/nginx-ecust-galgame.conf |
+  sudo tee /etc/nginx/sites-available/ecust-galgame >/dev/null
 sudo ln -sfn /etc/nginx/sites-available/ecust-galgame /etc/nginx/sites-enabled/ecust-galgame
 sudo nginx -t && sudo systemctl reload nginx
 ```

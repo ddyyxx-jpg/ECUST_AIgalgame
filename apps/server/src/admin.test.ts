@@ -3,6 +3,8 @@
  * 断言状态码 / 错误码 / 结构，不断言文案。
  */
 import { describe, expect, it } from "vitest";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
 import Fastify from "fastify";
 import { tempDir } from "@galgame/testkit";
 import { createApp } from "./bootstrap.ts";
@@ -38,12 +40,67 @@ function cookieOf(res: { headers: Record<string, unknown> }): string {
   return first.split(";")[0] ?? "";
 }
 
-async function makeApp() {
-  const deps = await createApp(testConfig());
+async function makeApp(config = testConfig()) {
+  const deps = await createApp(config);
   const app = Fastify();
   registerRoutes(app, deps);
   return { deps, app };
 }
+
+describe("管理操作审计", () => {
+  it("半截尾行不会吞掉下一条审计记录，成功响应可立即核查", async () => {
+    const config = testConfig();
+    const { app } = await makeApp(config);
+    const file = path.join(config.dataDir, "auth", "admin-actions.jsonl");
+    try {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, '{"operator":"interrupted"');
+      const changed = await app.inject({
+        method: "PUT", url: "/api/v1/admin/settings", headers: ADMIN, payload: { registrationOpen: false },
+      });
+      expect(changed.statusCode).toBe(200);
+      expect(changed.json()).not.toHaveProperty("auditWarning");
+      const audit = await app.inject({ url: "/api/v1/admin/actions", headers: ADMIN });
+      expect(audit.json().actions).toMatchObject([{ action: "settings.update", operator: "token" }]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("写审计失败明确报告操作已生效，审计读取失败返回 503", async () => {
+    const config = testConfig();
+    const { app } = await makeApp(config);
+    const file = path.join(config.dataDir, "auth", "admin-actions.jsonl");
+    try {
+      const empty = await app.inject({ url: "/api/v1/admin/actions", headers: ADMIN });
+      expect(empty.json()).toEqual({ ok: true, actions: [] });
+      await mkdir(file, { recursive: true });
+
+      const issued = await app.inject({
+        method: "POST", url: "/api/v1/admin/invites", headers: ADMIN, payload: {},
+      });
+      expect(issued.statusCode).toBe(200);
+      expect(issued.json()).toMatchObject({ ok: true, code: expect.any(String), auditWarning: { code: "E_STORE_FAULT" } });
+      const invites = await app.inject({ url: "/api/v1/admin/invites", headers: ADMIN });
+      expect(invites.json().invites).toHaveLength(1);
+      const audit = await app.inject({ url: "/api/v1/admin/actions", headers: ADMIN });
+      expect(audit.statusCode).toBe(503);
+      expect(audit.json()).toMatchObject({ ok: false, code: "E_STORE_FAULT" });
+      expect(audit.body).not.toContain(file);
+
+      await rename(file, file + ".blocked");
+      const changed = await app.inject({
+        method: "PUT", url: "/api/v1/admin/settings", headers: ADMIN, payload: { registrationOpen: false },
+      });
+      expect(changed.statusCode).toBe(200);
+      expect(changed.json()).not.toHaveProperty("auditWarning");
+      const recovered = await app.inject({ url: "/api/v1/admin/actions", headers: ADMIN });
+      expect(recovered.json().actions).toMatchObject([{ action: "settings.update" }]);
+    } finally {
+      await app.close();
+    }
+  });
+});
 
 async function registerPlayer(app: Awaited<ReturnType<typeof makeApp>>["app"], username: string) {
   const res = await app.inject({ method: "POST", url: "/api/v1/auth/register", headers: ORIGIN, payload: { username, password: "password123", inviteCode: "invite-123" } });

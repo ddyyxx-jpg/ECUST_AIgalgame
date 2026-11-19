@@ -28,13 +28,14 @@ export class AdminLog {
 
   constructor(private readonly filePath: string) {}
 
-  record(action: Omit<AdminAction, "at">): void {
+  record(action: Omit<AdminAction, "at">): Promise<void> {
     const entry: AdminAction = { at: Date.now(), ...action, reason: action.reason.slice(0, 200) };
     const run = this.chain.then(async () => {
       await mkdir(path.dirname(this.filePath), { recursive: true });
-      await appendFile(this.filePath, `${JSON.stringify(entry)}\n`, "utf8");
+      await appendFile(this.filePath, `\n${JSON.stringify(entry)}\n`, { encoding: "utf8", flush: true });
     });
     this.chain = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   async list(limit = 50): Promise<AdminAction[]> {
@@ -43,8 +44,9 @@ export class AdminLog {
     let raw: string;
     try {
       raw = await readFile(this.filePath, "utf8");
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw Object.assign(new Error("读取管理操作日志失败", { cause: error }), { code: "E_STORE_FAULT" });
     }
     const actions: AdminAction[] = [];
     for (const line of raw.split("\n")) {
@@ -57,6 +59,7 @@ export class AdminLog {
         // 半截行跳过
       }
     }
-    return actions.slice(-Math.min(Math.max(1, limit), 500)).reverse();
+    const count = Number.isFinite(limit) ? Math.min(Math.max(1, Math.floor(limit)), 500) : 50;
+    return actions.slice(-count).reverse();
   }
 }

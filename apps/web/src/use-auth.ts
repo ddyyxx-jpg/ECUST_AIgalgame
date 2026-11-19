@@ -7,8 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { fetchAuthStatus, fetchMe, logout as logoutRequest } from "./api-auth.ts";
 import type { AuthStatus, AuthUser } from "./api-auth.ts";
 import { setVisitorId } from "./http.ts";
-
-const VISITOR_KEY = "ecust.galgame.visitorId";
+import { enterVisitorStorage, signOutVisitorStorage, visitorIdForRestore } from "./visitor-storage.ts";
 
 export interface AuthGate {
   user: AuthUser | null;
@@ -25,11 +24,7 @@ export interface AuthGate {
 
 function loadVisitorId(): string {
   try {
-    const saved = localStorage.getItem(VISITOR_KEY);
-    if (saved) return saved;
-    const id = `visitor_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    localStorage.setItem(VISITOR_KEY, id);
-    return id;
+    return enterVisitorStorage(localStorage, () => `visitor_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`);
   } catch {
     // 隐私模式写不了本地记录：本次会话内仍可用，只是不持久
     return `visitor_${Date.now().toString(36)}`;
@@ -70,7 +65,7 @@ export function useAuth(): AuthGate {
       } else if (!status.required) {
         // 本地开发模式：有访客记录就直接恢复，不用每次重新点
         try {
-          const saved = localStorage.getItem(VISITOR_KEY);
+          const saved = visitorIdForRestore(localStorage);
           if (saved) {
             setVisitorId(saved);
             setVisitor(true);
@@ -109,10 +104,10 @@ export function useAuth(): AuthGate {
   }, []);
 
   const logout = useCallback(async (): Promise<boolean> => {
-    // 访客没有服务端会话：清本地身份即完成退出
+    // 访客退出只停止自动进入，保留关联存档的持久 ID。
     if (visitor) {
       try {
-        localStorage.removeItem(VISITOR_KEY);
+        signOutVisitorStorage(localStorage);
       } catch {
         // 忽略
       }

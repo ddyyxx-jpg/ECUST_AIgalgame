@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { AuthService } from "./auth.ts";
 import { dailyLimitFor } from "./auth-store.ts";
 import type { TurnLedger } from "./quota.ts";
-import type { AdminLog } from "./admin-log.ts";
+import type { AdminAction, AdminLog } from "./admin-log.ts";
 import type { AdminTokenGate, TokenVerdict } from "./admin-token.ts";
 import { adminTokenOf } from "./room-guard.ts";
 
@@ -57,6 +57,14 @@ function operatorOf(req: FastifyRequest, deps: AdminDeps): { operator: string | 
 }
 
 export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void {
+  const audit = async (action: Omit<AdminAction, "at">) => {
+    try {
+      await deps.log.record(action);
+    } catch (error) {
+      console.error("[admin] 操作已生效，但审计写入失败", error);
+      return { auditWarning: { code: "E_STORE_FAULT", message: "操作已生效，但审计日志写入失败，请勿重试该操作" } };
+    }
+  };
   const guard = (req: FastifyRequest, reply: FastifyReply): string | null => {
     const { operator, verdict } = operatorOf(req, deps);
     if (verdict?.blocked) {
@@ -93,8 +101,8 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
     const user = await deps.auth.store.setUserState(userId, parsed.data.state);
     if (!user) return notFound(reply);
     if (parsed.data.state !== "active") deps.auth.sessions.revokeUser(userId);
-    deps.log.record({ operator, target: userId, action: "user.state", reason: parsed.data.reason, result: parsed.data.state });
-    return { ok: true, user: publicUser(user) };
+    const warning = await audit({ operator, target: userId, action: "user.state", reason: parsed.data.reason, result: parsed.data.state });
+    return { ok: true, user: publicUser(user), ...warning };
   });
 
   app.post("/api/v1/admin/users/:userId/role", async (req, reply) => {
@@ -105,8 +113,8 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
     const { userId } = req.params as { userId: string };
     const user = await deps.auth.store.setUserRole(userId, parsed.data.role);
     if (!user) return notFound(reply);
-    deps.log.record({ operator, target: userId, action: "user.role", reason: parsed.data.reason, result: parsed.data.role });
-    return { ok: true, user: publicUser(user) };
+    const warning = await audit({ operator, target: userId, action: "user.role", reason: parsed.data.reason, result: parsed.data.role });
+    return { ok: true, user: publicUser(user), ...warning };
   });
 
   app.post("/api/v1/admin/users/:userId/reset-credential", async (req, reply) => {
@@ -116,8 +124,8 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
     const { userId } = req.params as { userId: string };
     const issued = await deps.auth.store.issueReset(userId, deps.auth.opts.resetTtlMs, operator);
     if (!issued) return notFound(reply);
-    deps.log.record({ operator, target: userId, action: "user.reset-credential", reason: parsed.data?.reason ?? "", result: "issued" });
-    return { ok: true, credential: issued.credential, expiresAt: issued.expiresAt };
+    const warning = await audit({ operator, target: userId, action: "user.reset-credential", reason: parsed.data?.reason ?? "", result: "issued" });
+    return { ok: true, credential: issued.credential, expiresAt: issued.expiresAt, ...warning };
   });
 
   app.post("/api/v1/admin/users/:userId/revoke-sessions", async (req, reply) => {
@@ -127,8 +135,8 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
     const { userId } = req.params as { userId: string };
     if (!deps.auth.store.getUser(userId)) return notFound(reply);
     const revoked = deps.auth.sessions.revokeUser(userId);
-    deps.log.record({ operator, target: userId, action: "user.revoke-sessions", reason: parsed.data?.reason ?? "", result: String(revoked) });
-    return { ok: true, revoked };
+    const warning = await audit({ operator, target: userId, action: "user.revoke-sessions", reason: parsed.data?.reason ?? "", result: String(revoked) });
+    return { ok: true, revoked, ...warning };
   });
 
   app.get("/api/v1/admin/invites", async (req, reply) => {
@@ -143,9 +151,9 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
     const parsed = InviteBody.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "邀请参数不正确" });
     const { invite, code } = await deps.auth.store.createInvite(parsed.data, operator);
-    deps.log.record({ operator, target: invite.id, action: "invite.create", reason: parsed.data.note ?? "", result: `maxUses=${invite.maxUses}` });
+    const warning = await audit({ operator, target: invite.id, action: "invite.create", reason: parsed.data.note ?? "", result: `maxUses=${invite.maxUses}` });
     const { codeHash: _codeHash, ...rest } = invite;
-    return { ok: true, invite: rest, code };
+    return { ok: true, invite: rest, code, ...warning };
   });
 
   app.post("/api/v1/admin/invites/:id/revoke", async (req, reply) => {
@@ -155,8 +163,8 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
     const { id } = req.params as { id: string };
     const revoked = await deps.auth.store.revokeInvite(id);
     if (!revoked) return notFound(reply);
-    deps.log.record({ operator, target: id, action: "invite.revoke", reason: parsed.data?.reason ?? "", result: "revoked" });
-    return { ok: true };
+    const warning = await audit({ operator, target: id, action: "invite.revoke", reason: parsed.data?.reason ?? "", result: "revoked" });
+    return { ok: true, ...warning };
   });
 
   app.get("/api/v1/admin/settings", async (req, reply) => {
@@ -170,8 +178,8 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
     const parsed = SettingsBody.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "设置参数不正确" });
     const settings = await deps.auth.store.updateSettings(parsed.data);
-    deps.log.record({ operator, target: "settings", action: "settings.update", reason: "", result: JSON.stringify(parsed.data) });
-    return { ok: true, settings };
+    const warning = await audit({ operator, target: "settings", action: "settings.update", reason: "", result: JSON.stringify(parsed.data) });
+    return { ok: true, settings, ...warning };
   });
 
   app.get("/api/v1/admin/actions", async (req, reply) => {
@@ -207,7 +215,7 @@ export function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps): void
       }
       return notFound(reply);
     }
-    deps.log.record({ operator, target: clientTurnId, action: "quota.resolve", reason: parsed.data.reason, result: parsed.data.resolution });
-    return { ok: true, entry: result.entry };
+    const warning = await audit({ operator, target: clientTurnId, action: "quota.resolve", reason: parsed.data.reason, result: parsed.data.resolution });
+    return { ok: true, entry: result.entry, ...warning };
   });
 }
