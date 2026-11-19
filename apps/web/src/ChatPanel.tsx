@@ -82,6 +82,8 @@ export default function ChatPanel({
   onLoadEarlier,
 }: ChatPanelProps) {
   const [talking, setTalking] = useState<{ id: string; name: string } | null>(null);
+  /** 点击时记的是占位名；对方自报姓名解锁后，用权威状态里的真名覆盖标题/输入框 */
+  const talkingName = talking ? (state?.entities[talking.id]?.name ?? talking.name) : "";
   const [blocked, setBlocked] = useState<BlockedNpc | null>(null);
   /** 「前往 TA 所在地」成功后，等位置真的切过去再选中这个人（避免被换场景的清理 effect 覆盖） */
   const [pendingTalk, setPendingTalk] = useState<{ id: string; name: string; locId: string } | null>(null);
@@ -249,7 +251,7 @@ export default function ChatPanel({
                   }}
                 />
               </span>
-              <strong>{talking.name}</strong>
+              <strong>{talkingName || talking.name}</strong>
               <span className="muted">正在对话</span>
               <button type="button" className="btn ghost" onClick={() => setTalking(null)}>
                 结束对话
@@ -345,7 +347,7 @@ export default function ChatPanel({
                 key={s}
                 type="button"
                 className="suggest-chip"
-                onClick={() => onPick(s, talking)}
+                onClick={() => onPick(s, talking ? { id: talking.id, name: talkingName } : null)}
                 disabled={busy || !state}
                 title={`说出：${s}`}
               >
@@ -359,13 +361,13 @@ export default function ChatPanel({
           className="composer"
           onSubmit={(e) => {
             e.preventDefault();
-            onSend(talking);
+            onSend(talking ? { id: talking.id, name: talkingName } : null);
           }}
         >
           <input
             value={input}
             onChange={(e) => onInput(e.target.value)}
-            placeholder={talking ? `对${talking.name}说…` : "你要做什么？（也可以直接用 WASD 走动）"}
+            placeholder={talking ? `对${talkingName}说…` : "你要做什么？（也可以直接用 WASD 走动）"}
             disabled={busy || !state}
           />
           <button type="submit" disabled={busy || !state}>

@@ -138,16 +138,42 @@ describe("陌生人机制：解锁条件", () => {
   });
 
   it("目标不在场（presentIds 里没有）不解锁", async () => {
-    const { app, learn } = await makeApp({ events: commit });
+    // 台词里没有自我介绍，只有普通寒暄：确保解锁判断不会因为"场内有别人报了名字"而误触发
+    const { app, learn } = await makeApp({
+      events: [
+        { type: "turn.accepted", turnId: "t1" },
+        { type: "turn.delta", field: "narrative", text: "林静：你好，小声一点。" },
+        { type: "turn.commit", turnId: "t1", seq: 2 },
+      ],
+    });
     await app.inject({ method: "POST", url: `/api/v1/rooms/${ROOM}/turns`, payload: { actorId: PLR, input: "你叫什么名字？", clientTurnId: "c1", targetNpcId: BAI } });
     expect(learn).not.toHaveBeenCalled();
     await app.close();
   });
 
-  it("没问名字（自由输入）时不按目标解锁", async () => {
-    const { app, learn } = await makeApp({ events: commit });
+  it("有对话目标、对方自己报名字（玩家没问）→ 也解锁（回归：以前 target 存在就跳过台词判定）", async () => {
+    const { app, learn } = await makeApp({
+      events: [
+        { type: "turn.accepted", turnId: "t1" },
+        { type: "turn.delta", field: "narrative", text: "林静：林静，安静的静。你是新来的？" },
+        { type: "turn.commit", turnId: "t1", seq: 2 },
+      ],
+    });
     await app.inject({ method: "POST", url: `/api/v1/rooms/${ROOM}/turns`, payload: { actorId: PLR, input: "你好", clientTurnId: "c1", targetNpcId: LIN } });
-    // 台词里出现"林静："但没有自报姓名，不应解锁
+    expect(learn).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(learn).mock.calls[0]?.[1]).toEqual([LIN]);
+    await app.close();
+  });
+
+  it("有对话目标但台词没有自报姓名 → 不解锁", async () => {
+    const { app, learn } = await makeApp({
+      events: [
+        { type: "turn.accepted", turnId: "t1" },
+        { type: "turn.delta", field: "narrative", text: "林静：你好，小声一点，这边有人自习。" },
+        { type: "turn.commit", turnId: "t1", seq: 2 },
+      ],
+    });
+    await app.inject({ method: "POST", url: `/api/v1/rooms/${ROOM}/turns`, payload: { actorId: PLR, input: "你好", clientTurnId: "c1", targetNpcId: LIN } });
     expect(learn).not.toHaveBeenCalled();
     await app.close();
   });

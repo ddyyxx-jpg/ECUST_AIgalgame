@@ -35,7 +35,7 @@ import {
 import type { MapFail, SceneDialogue, SceneLink, SceneRef, SceneStatus, SceneTemplate } from "./map.data.ts";
 import { DraftEngine } from "./map.drafts.ts";
 import type { DraftListResult, DraftResult, PublishResult } from "./map.drafts.ts";
-import { displayNameOf, knowsNameOf, maskTurnEvents, unknownPlaceholders } from "./view-names.ts";
+import { displayNameOf, knowsNameOf, maskNamesDeep, maskTurnEvents, unknownPlaceholders } from "./view-names.ts";
 
 // ---------------------------------------------------------------- 对外视图（docs/06 §4）
 export interface MapViewLink {
@@ -131,6 +131,11 @@ export class MapService {
   private readonly deps: MapServiceDeps;
   private readonly content: MapContent;
   private readonly drafts: DraftEngine;
+  /**
+   * issue #62：早期失败脱敏用的占位表缓存，按 roomId 一份轻量 Map（真名 → 占位名），
+   * 不缓存整份 WorldState，避免长期占用内存。只保存最近一次算出的表。
+   */
+  private readonly failPlaceholders = new Map<string, Map<string, string>>();
 
   constructor(deps: MapServiceDeps) {
     this.deps = deps;
@@ -176,14 +181,14 @@ export class MapService {
   }
 
   /**
-   * travel / tick 所有返回点的统一出站脱敏出口（issue #53 成功，#58 失败）。
+   * travel / tick / scene dialogue 所有返回点的统一出站脱敏出口（issue #53 成功，#58 失败，#61 对话）。
    *
    * 成功整包交给 maskTurnEvents；失败响应（MapFail）同属出站视图，message / details
    * 里的文本同样可能带未认识 NPC 真名，走同一层掩码。maskNamesDeep 只替换未认识
    * NPC 真名，错误码 / 场景 id 不含人名，不会被误伤。早期失败可能拿不到快照，
    * 此时 maskTurnEvents 回退到 store.snapshot；已有快照的调用点传入可省一次回放。
    */
-  private async outbound<T extends TravelResult | TickResult>(
+  private async outbound<T extends TravelResult | TickResult | DialogueResult>(
     result: T,
     roomId: string,
     state?: WorldState,
@@ -191,15 +196,38 @@ export class MapService {
     return maskTurnEvents<T>(roomId, result, this.deps.store, this.deps.appearance, state);
   }
 
+  /**
+   * issue #62：早期失败（travel 的 E_SCENE_NOT_FOUND、规划/在建点 E_FORBIDDEN）发生在取快照之前，
+   * 此时拿不到 state；若照常走 outbound → maskTurnEvents，就会每次都 `store.snapshot(roomId)`，
+   * FileStore 每次 ensure + replay 整条事件日志（O(事件数)）。无鉴权下重复请求非法 locId 可放大
+   * CPU / 磁盘读。这里按房间缓存最近一次算出的占位表：命中直接复用，未命中才回退一次 snapshot
+   * （首个请求的必要代价），之后同房间的早期失败不再回放日志。
+   *
+   * 安全性论证（缓存陈旧不会导致漏遮）：早期失败的 message 只来自静态场景名（canon 模板 /
+   * 已发布场景数据）和用户传入的 locId，不是"状态里新出现的 NPC 名"。占位表的变化只会随
+   * knows_name 变 true 而移除条目（已认识 → 真名可直接显示），陈旧表至多让本该显示的已认识名
+   * 被多遮一次（可接受）。边界：缓存填充后才发布、且场景名里带新 NPC 真名的静态数据不在旧表里，
+   * 该极端情形需靠场景发布时清空缓存（当前发布低频，未做）。
+   */
+  private async maskEarlyFailure(result: MapFail, roomId: string): Promise<MapFail> {
+    let placeholders = this.failPlaceholders.get(roomId);
+    if (!placeholders) {
+      const state = await this.deps.store.snapshot(roomId);
+      placeholders = unknownPlaceholders(state, this.deps.appearance);
+      this.failPlaceholders.set(roomId, placeholders);
+    }
+    return maskNamesDeep(result, placeholders);
+  }
+
   // -------------------------------------------------------------- 移动（turn 跑完整流程，skipLLM）
   async travel(roomId: string, actorId: string | undefined, locId: string): Promise<TravelResult> {
     const { refs } = await this.content.sceneRefs();
     const target = refs.get(locId);
-    if (!target) return this.outbound(fail("E_SCENE_NOT_FOUND", `场景 ${locId} 不存在`), roomId);
+    if (!target) return this.maskEarlyFailure(fail("E_SCENE_NOT_FOUND", `场景 ${locId} 不存在`), roomId);
     // 规划/在建点只用于地图展示：不能进入，也不触发懒安装
     if (target.scene.status !== "built") {
       const label = target.scene.status === "planned" ? "规划中，尚未建成" : "在建，暂不可进入";
-      return this.outbound(fail("E_FORBIDDEN", `${target.scene.name}${label}`), roomId);
+      return this.maskEarlyFailure(fail("E_FORBIDDEN", `${target.scene.name}${label}`), roomId);
     }
 
     const state = await this.deps.store.snapshot(roomId);
@@ -323,24 +351,26 @@ export class MapService {
   ): Promise<DialogueResult> {
     const { refs } = await this.content.sceneRefs();
     const sceneRef = refs.get(sceneId);
-    if (!sceneRef) return fail("E_SCENE_NOT_FOUND", `场景 ${sceneId} 不存在`);
+    // 出站脱敏（issue #61）：场景对话台词/失败文本同样可能带未认识 NPC 真名，统一过 outbound。
+    // 此处在 snapshot 之前，无 state 可传，maskTurnEvents 会回退到 store.snapshot。
+    if (!sceneRef) return this.outbound(fail("E_SCENE_NOT_FOUND", `场景 ${sceneId} 不存在`), roomId);
 
     const state = await this.deps.store.snapshot(roomId);
     const actor = actorId ?? playerActorId(state);
     // 只能触发"当前所在地 + 玩家在场"的场景对话，避免从地图远程播放别处剧情
     if (state.room.scene.locId !== sceneId) {
-      return fail("E_NOT_ADJACENT", `你不在 ${sceneId}，不能触发该场景对话`);
+      return this.outbound(fail("E_NOT_ADJACENT", `你不在 ${sceneId}，不能触发该场景对话`), roomId, state);
     }
     if (!state.room.scene.presentIds.includes(actor)) {
-      return fail("E_NOT_IN_ROOM", "玩家不在当前场景");
+      return this.outbound(fail("E_NOT_IN_ROOM", "玩家不在当前场景"), roomId, state);
     }
 
     const dialogue = sceneRef.scene.dialogues.find((d) => d.id === dialogueId);
-    if (!dialogue) return fail("E_DIALOGUE_NOT_FOUND", `场景 ${sceneId} 没有对话 ${dialogueId}`);
+    if (!dialogue) return this.outbound(fail("E_DIALOGUE_NOT_FOUND", `场景 ${sceneId} 没有对话 ${dialogueId}`), roomId, state);
 
     const npc = state.entities[dialogue.npcId];
     if (!npc || npc.kind !== "npc" || !isLive(state, dialogue.npcId)) {
-      return fail("E_ENTITY_MISSING", `对话 NPC ${dialogue.npcId} 不在本房间`);
+      return this.outbound(fail("E_ENTITY_MISSING", `对话 NPC ${dialogue.npcId} 不在本房间`), roomId, state);
     }
     // 不强制 NPC 与玩家同场景：AI 生成的场景对话可能是"门后的声音/电话/留言"，
     // 强校验会让生成内容几乎永远不可用；玩家必须在场这一点已在上面校验。
@@ -373,9 +403,15 @@ export class MapService {
       // 还不认识（不知道名字）：先补一句"陌生人"开场，NPC 不会假装熟络，
       // 而是问怎么称呼；玩家随后在对话流里自述名字，由 introduce 模块落 knows_name 与记忆。
       const opener = knowsNameOf(npc) ? [] : [`（他看了你一眼，显然不认识你）「同学，你是？怎么称呼？」`];
-      return { ok: true, npc: { id: npc.id, name: displayNameOf(npc, placeholders) }, lines: [...opener, ...lines], sessionId: session.id };
+      // 成功返回整包过 outbound：seed 台词里的未认识真名换成占位名，已认识名原样保留；
+      // 传入已有 state 快照，省一次事件日志回放。
+      return this.outbound<DialogueResult>(
+        { ok: true, npc: { id: npc.id, name: displayNameOf(npc, placeholders) }, lines: [...opener, ...lines], sessionId: session.id },
+        roomId,
+        state,
+      );
     } catch (e) {
-      return fail(codeOfError(e), e instanceof Error ? e.message : String(e));
+      return this.outbound(fail(codeOfError(e), e instanceof Error ? e.message : String(e)), roomId, state);
     }
   }
 

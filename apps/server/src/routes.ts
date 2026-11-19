@@ -596,9 +596,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         const state = (ev as { state?: WorldState }).state;
         if (ev.type === "turn.patch" && state) finalState = state;
       }
-      // 「玩家知道了谁的名字」两条确定性来源：
-      //   ① 这次行动有明确对话对象（targetNpcId）且玩家在问名字 → 解锁该 NPC（唯一、可判、不靠猜文本）；
-      //   ② 没有对象时（自由输入）退回台词判定：台词内容里自报姓名才算，旁白提到不算。
+      // 「玩家知道了谁的名字」两条来源**并行**（review #63-1：不是二选一）：
+      //   ① 这次行动有明确对话对象（targetNpcId）且玩家在问名字 → 解锁该 NPC；
+      //   ② 台词判定：说话人台词里真的报出姓名 / 本人自述姓氏 → 也解锁。
+      //      ② 不因存在 targetNpcId 而跳过——对方主动报名字的场景同样要解锁。
       //
       // 硬约束（审阅 P1-3/P1-4）：
       // - 只有回合真的提交（turn.commit）才解锁——失败回合不落状态；
@@ -614,18 +615,16 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
             const targetNpc = snapshot.entities[body.targetNpcId];
             if (targetNpc && targetNpc.kind === "npc" && presentIds.has(targetNpc.id)) learnedIds.add(targetNpc.id);
           }
-          if (!body.targetNpcId) {
-            const speech = events
-              .flatMap((ev) => {
-                const d = ev as { type?: string; field?: string; text?: string; facts?: string[] };
-                if (d.type === "turn.delta" && typeof d.text === "string") return [d.text];
-                if (d.type === "turn.facts" && Array.isArray(d.facts)) return d.facts;
-                return [];
-              })
-              .join("\n");
-            for (const npc of namesIntroducedIn(speech, npcs)) {
-              if (presentIds.has(npc.id)) learnedIds.add(npc.id);
-            }
+          const speech = events
+            .flatMap((ev) => {
+              const d = ev as { type?: string; field?: string; text?: string; facts?: string[] };
+              if (d.type === "turn.delta" && typeof d.text === "string") return [d.text];
+              if (d.type === "turn.facts" && Array.isArray(d.facts)) return d.facts;
+              return [];
+            })
+            .join("\n");
+          for (const npc of namesIntroducedIn(speech, npcs)) {
+            if (presentIds.has(npc.id)) learnedIds.add(npc.id);
           }
           if (learnedIds.size > 0) {
             await deps.learnNpcNames(roomId, [...learnedIds]);

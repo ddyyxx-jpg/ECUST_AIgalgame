@@ -15,9 +15,11 @@ export interface MapOverlayProps {
   actorId: string;
   push: (kind: LineKind, text: string) => void;
   onRefreshState: () => void;
+  /** 世界状态版本号：认识/改名后地图标注要立刻刷新 */
+  version?: number;
 }
 
-export default function MapOverlay({ open, onClose, roomId, actorId, push, onRefreshState }: MapOverlayProps) {
+export default function MapOverlay({ open, onClose, roomId, actorId, push, onRefreshState, version }: MapOverlayProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
@@ -47,6 +49,7 @@ export default function MapOverlay({ open, onClose, roomId, actorId, push, onRef
           push={push}
           onRefreshState={onRefreshState}
           onStory={onClose}
+          version={version}
         />
       </div>
     </div>

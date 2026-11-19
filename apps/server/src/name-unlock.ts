@@ -26,10 +26,24 @@ function escapeRe(s: string): string {
 
 /**
  * 台词里是否在自报姓名。**只认姓名共现**：嘴上说"我叫/我是"但没有说出名字，
- * 不算自我介绍（审阅 P1-5 的反例："我是图书馆的老师"、"我叫你一声同学吧"、"我姓白"）。
+ * 不算自我介绍（审阅 P1-5 的反例："我是图书馆的老师"、"我叫你一声同学吧"）。
+ *
+ * 例外："姓X"且 X 与 NPC 姓氏一致——但必须是**本人自述**：
+ * - 必须带自述前缀（我/本人/免贵），或整句以"姓X"开头且后面是标点；
+ * - "姓林的都很轴，别惹他们"这类第三人称泛谈一律不算（review #63-2）。
  */
+function surnameSelfIntro(head: string, name: string): boolean {
+  const prefixed = /(?:我|本人|免贵)\s*姓([\u4e00-\u9fa5])/.exec(head);
+  if (prefixed) return name.startsWith(prefixed[1] ?? "");
+  const leading = /^姓([\u4e00-\u9fa5])([\s，。！？；、,.!?]|$)/.exec(head);
+  if (leading) return name.startsWith(leading[1] ?? "");
+  return false;
+}
+
 function speechIntroducesName(speech: string, name: string): boolean {
-  return speech.slice(0, 60).includes(name);
+  const head = speech.slice(0, 60);
+  if (head.includes(name)) return true;
+  return surnameSelfIntro(head, name);
 }
 
 /** 从叙事/台词文本里挑出"当轮报过名字"的未认识 NPC */

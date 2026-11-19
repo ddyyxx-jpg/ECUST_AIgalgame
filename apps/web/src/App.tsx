@@ -344,6 +344,14 @@ const token = scopeRef.current.current();
       .then((s) => {
         if (!scopeRef.current.isCurrent(token.version)) return;
         setState(s);
+        // 位置视图里的 actor 名字是回合当时下发的（可能还是占位名）：认识/改名后用权威状态覆盖，
+        // 走动界面的 NPC 标注才能立刻跟着改，不必等下一回合。
+        setView((old) => {
+          const pos = old.position;
+          if (!pos) return old;
+          const actors = pos.actors.map((a) => ({ ...a, name: s.entities[a.actorId]?.name ?? a.name }));
+          return { ...old, position: { ...pos, actors } };
+        });
         // 图鉴是服务端派生视图：状态一变就让它重新拉，认识/读数不需要玩家手动切换 tab 才同步
         setStateRev((v) => v + 1);
       })
@@ -763,6 +771,7 @@ await runTurn(
           actorId={actorId}
           push={push}
           onRefreshState={refreshState}
+          version={stateRev}
         />
       )}
     </div>
