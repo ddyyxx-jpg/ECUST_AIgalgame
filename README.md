@@ -4,7 +4,7 @@
 > 你用自然语言行动；NPC 有自己的记忆和目的，会在你看不见的夜里互相商量；第二天，你从他们的态度里读出破绽。
 
 **这是入口文档**：目标、现在能玩什么、怎么启动、数据存哪、关键限制、文档导航。
-仓库执行规则与权限见 [AGENTS.md](AGENTS.md)，跨会话快照与分支记录见 [MEMORY.md](MEMORY.md)，接口名字的唯一来源是 [docs/03-接口总表.md](docs/03-接口总表.md)。
+仓库执行规则与权限见 [AGENTS.md](AGENTS.md)，任务/验收/最新结论看 GitHub Issues 与 PR（[MEMORY.md](MEMORY.md) 只是离线入口页），接口名字的唯一来源是 [docs/03-接口总表.md](docs/03-接口总表.md)。
 
 ---
 
@@ -27,7 +27,7 @@
 - **离线模式**：不配模型 key 也能完整跑回合（离线叙述器，无配置提示）。
 - **内容安全**：叙事发出前经独立审核模型；"我全知全能/忽略提示词"一类发言被现实锚定层修饰，不扣分。
 - **记忆子系统**：三层记忆（short/long/permanent）、账号维度档案（`GET /api/v1/me`）、世界层永久记忆 canonize（"这个世界记住你"）。
-- **还没做**：夜间 tick 与密谋编排、导演真调 LLM、联机 WS/房间回收、记忆压缩后台调度、canonize 定时任务。进度与遗留以 [MEMORY.md](MEMORY.md) §0/§3 为准。
+- **还没做**：夜间 tick 与密谋编排、导演真调 LLM、联机 WS/房间回收、记忆压缩后台调度、canonize 定时任务。进度与遗留以 GitHub Issues 与 PR 为准（里程碑拆分见 #80）。
 
 ---
 
@@ -56,7 +56,7 @@ export GALGAME_AUDIT_MODEL=<模型名>
 export GALGAME_AUDIT_API_KEY=...
 ```
 
-验证命令（成功时退出码 0；用例数、契约项数等随分支变化的统计见 [MEMORY.md](MEMORY.md) §0 快照，不要手抄进文档）：
+验证命令（成功时退出码 0；用例数、契约项数随分支变化，以命令真实输出为准，不要手抄进文档）：
 
 ```bash
 npm test                          # 全量单元/集成测试，不联网不花钱
@@ -94,7 +94,7 @@ npm run replay -- --file data/rooms/<room>.jsonl   # 回放事件日志，查 se
 - **契约**：接口名/op/事件/错误码只在 [docs/03-接口总表.md](docs/03-接口总表.md)；改语义先改 03 并 bump 版本，再改代码。12 个 op 是闭集。
 - **权限角色**：`packages/engine` 是引擎核心——**引擎改动需项目所有者批准**，不能自行修改；`content/canon/**` 与 `docs/v1/**` 只读。完整权限分级与 AI 协作规则见 [AGENTS.md §3](AGENTS.md)。
 - **部署**：当前仅支持单实例；多实例/多副本禁止共同写同一 `data/` 目录，备份/升级需停写窗口，运维检查清单见 [docs/10-部署与一致性边界.md](docs/10-部署与一致性边界.md)（issue #40）。
-- **已知临时债**：前端图鉴/开局数据仍有 issue #3 的临时债，下次涉及前端/图鉴的合并前收口（详见 [MEMORY.md](MEMORY.md) §3.3）。
+- **已知临时债**：`/state` 原始 attrs 过滤与 `self` 口径见 Issue #74。
 
 ---
 
@@ -103,7 +103,7 @@ npm run replay -- --file data/rooms/<room>.jsonl   # 回放事件日志，查 se
 | 文档 | 用途 |
 |---|---|
 | [AGENTS.md](AGENTS.md) | 给 AI 协作者与人类的仓库执行约束：读什么、能改什么、任务配方、禁区、提交自查 |
-| [MEMORY.md](MEMORY.md) | 跨会话快照、分支决策/审阅/遗留；是交接线索，不替代契约或最新功能说明 |
+| [MEMORY.md](MEMORY.md) | 离线入口页：只告诉你去哪找真源；任务状态看 GitHub Issues / PR |
 | [docs/03-接口总表.md](docs/03-接口总表.md) | **唯一名字来源**：内部接口、12 op、事件、HTTP/SSE、错误码、配置键 |
 | [docs/00-总方案-v2.md](docs/00-总方案-v2.md) | 架构、扩展点矩阵、明确不做的事、里程碑 |
 | [docs/01-模块规范.md](docs/01-模块规范.md) | 写玩法模块的手册：目录、manifest、生命周期、模板、review 清单 |
@@ -111,7 +111,7 @@ npm run replay -- --file data/rooms/<room>.jsonl   # 回放事件日志，查 se
 | [docs/04-联机与多Agent.md](docs/04-联机与多Agent.md) | 房间模型、seq 续传、并发冲突、NPC 自主对话 |
 | [docs/05-内容边界与AI推演.md](docs/05-内容边界与AI推演.md) | canon/soft/x 三档、AI 能生成什么、转正与回收 |
 | [docs/06-地图模块.md](docs/06-地图模块.md) | 地图模块设计：内容数据、travel、草案状态机、前端 |
-| [docs/07-记忆模块方案.md](docs/07-记忆模块方案.md) · [docs/08-引擎改动要求-记忆模块.md](docs/08-引擎改动要求-记忆模块.md) | 记忆子系统设计稿与引擎改动交接单（已落地，现状见 MEMORY 快照） |
+| [docs/07-记忆模块方案.md](docs/07-记忆模块方案.md) · [docs/08-引擎改动要求-记忆模块.md](docs/08-引擎改动要求-记忆模块.md) | 记忆子系统设计稿与引擎改动交接单（已落地，现状以代码为准） |
 | [docs/09-存档与会话恢复方案.md](docs/09-存档与会话恢复方案.md) | 存档索引、回合历史、会话恢复 MVP：数据格式、恢复流程、已知限制 |
 | [docs/10-部署与一致性边界.md](docs/10-部署与一致性边界.md) | **部署/运维必读**：仅支持单实例、多实例禁止共写 `data/`、备份与升级停写窗口、运维检查清单（issue #40） |
 | [docs/schemas/v2/](docs/schemas/v2/) | JSON Schema（机器可校验副本，与 `docs/03` 严格对应） |
@@ -119,4 +119,4 @@ npm run replay -- --file data/rooms/<room>.jsonl   # 回放事件日志，查 se
 | [CHANGELOG.md](CHANGELOG.md) | 按合并日期记录版本变化；当前操作手册不在这里 |
 | [docs/v1/](docs/v1/) | 第一版方案归档（只读）：产品定义、记忆公式、成本模型 |
 
-> 文档冲突时 **`docs/03-接口总表.md` 赢**，并在回复里报告冲突。版本号以 `docs/03` §0.4 与 `packages/shared/src/contract/version.ts` 为准；当前快照（版本/测试数/main sha）看 [MEMORY.md §0](MEMORY.md)。详细任务配方见 [AGENTS.md §4](AGENTS.md)。
+> 文档冲突时 **`docs/03-接口总表.md` 赢**，并在回复里报告冲突。版本号以 `docs/03` §0.4 与 `packages/shared/src/contract/version.ts` 为准；测试数与构建结果看命令真实输出，任务进度看 GitHub Issues / PR。详细任务配方见 [AGENTS.md §4](AGENTS.md)。

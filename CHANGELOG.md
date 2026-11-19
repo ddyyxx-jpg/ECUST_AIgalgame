@@ -96,7 +96,7 @@
 
 ### 文档
 
-- docs/03 §10.14（3.2.0 → 3.2.1 patch）；docs/07 §4.1/§4.2、docs/06 §7/§8、docs/prompts/CHANGELOG.md；MEMORY §0/§3.2/§3.3/§4。
+- docs/03 §10.14（3.2.0 → 3.2.1 patch）；docs/07 §4.1/§4.2、docs/06 §7/§8、docs/prompts/CHANGELOG.md；分支记录见对应 PR。
 
 ### 验证
 
@@ -118,7 +118,7 @@
 
 ### 文档
 
-- README 改为入口文档，版本号/测试数改为单一来源引用（MEMORY §0 / docs/03 §0.4 / `version.ts`）；AGENTS §1 必读清单补齐 06/07/08。
+- README 改为入口文档，版本号/测试数改为单一来源引用（docs/03 §0.4 / `version.ts` / 命令输出）；AGENTS §1 必读清单补齐 06/07/08。
 - docs/03 新增 §5.2.4（registry）、§5.2.5（gallery）、§5.2.6（scenarios）、§5.2.7（history/saves）与 §10.12；新增 `docs/09-存档与会话恢复方案.md`；`CONTRACT_VERSION 3.1.0 → 3.2.0`（minor：只增端点/类型/配置，旧调用方式不变）。
 
 ### 验证
