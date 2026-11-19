@@ -8,7 +8,11 @@ import { registerRoutes } from "./routes.ts";
 import { createApp } from "./bootstrap.ts";
 
 const cfg = loadConfig();
-const app = Fastify({ logger: { level: process.env.GALGAME_LOG_LEVEL ?? "info" } });
+const app = Fastify({
+  logger: { level: process.env.GALGAME_LOG_LEVEL ?? "info" },
+  // P1-4：反代后按真实 IP 计数限流；默认不信任转发头（直连部署保持原样）
+  trustProxy: cfg.trustProxy ?? false,
+});
 
 const deps = await createApp(cfg);
 registerRoutes(app, deps);

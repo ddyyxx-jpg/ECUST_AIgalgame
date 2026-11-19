@@ -32,9 +32,11 @@ export const ERROR_CODES = [
   "E_SCENE_NOT_FOUND",
   "E_SCHEMA_INVALID",
   "E_SEQ_GAP",
+  "E_AUDIT_UNAVAILABLE",
   "E_STORE_FAULT",
   "E_TOOL_UNKNOWN",
   "E_TURN_BUSY",
+  "E_UNAUTHORIZED",
   "E_X_LIMIT",
 ] as const;
 

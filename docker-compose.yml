@@ -1,0 +1,33 @@
+services:
+  app:
+    build: .
+    container_name: ecust-galgame
+    # 允许容器访问宿主机上的 LLM_context_checker（8788）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    env_file: .env
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # 数据放在 app 目录之外：重新部署（rm -rf app/*）不会误删存档
+      - ../data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/api/v1/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

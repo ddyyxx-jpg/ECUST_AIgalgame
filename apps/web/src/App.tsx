@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WorldState, ViewPatch } from "../../../packages/shared/src/contract/types.ts";
-import { GameError, LEGACY_ACTOR_ID, createSoloRoom, deleteSave, fetchHistory, fetchSaves, fetchState, playerId, runTurn, travel } from "./api.ts";
-import type { HistoryLine, SaveEntry } from "./api.ts";
+import { LEGACY_ACTOR_ID, createSoloRoom, deleteSave, fetchHistory, fetchState, fetchTurnStatus, runTurn, travel } from "./api.ts";
+import type { HistoryPage } from "./api.ts";
+import { GameError, HttpError, httpFailMessage, isUnauthorized, onUnauthorized } from "./http.ts";
+import { useAuth } from "./use-auth.ts";
+import { useSaves } from "./use-saves.ts";
+import { RequestScope } from "./request-scope.ts";
+import { earlierCursor, historyToLines, missingTurnContent, restoreConversation } from "./history-lines.ts";
+import { makeTurnHandlers } from "./turn-handlers.ts";
+import AuthScreen from "./AuthScreen.tsx";
+import type { SaveEntry } from "./api.ts";
 import ChatPanel from "./ChatPanel.tsx";
 import DraftsPanel from "./DraftsPanel.tsx";
 import GalleryPanel from "./GalleryPanel.tsx";
@@ -12,10 +20,9 @@ import type { Scenario } from "./scenarios.ts";
 import { turnSuggestions } from "./suggestions.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
-import type { TypeItem } from "./typewriter.ts";
-import { explainTurnError, isRetryableTurnError, shouldDropRetryOnMove } from "./turn-error.ts";
+import { shouldDropRetryOnMove } from "./turn-error.ts";
 import { npcLocIdFromLinks, targetStillInScene } from "./npc-presence.ts";
-import { errorMessage, phaseLabel } from "./ui.ts";
+import { phaseLabel } from "./ui.ts";
 import type { Line, LineKind } from "./ui.ts";
 
 type Tab = "chat" | "gallery" | "drafts";
@@ -33,7 +40,16 @@ const scenarioKey = (roomId: string) => `ecust.galgame.scenario.${roomId}`;
 
 let lineId = 0;
 
+interface EarlierState {
+  before: string | number | null;
+  hasEarlier: boolean;
+  loading: boolean;
+}
+
+const NO_EARLIER: EarlierState = { before: null, hasEarlier: false, loading: false };
+
 export default function App() {
+  const { user, authReady, authStatus, notice, onAuthed, enterVisitor, logout: authLogout, expireSession } = useAuth();
   const [screen, setScreen] = useState<Screen>("title");
   const [tab, setTab] = useState<Tab>("chat");
   const [roomId, setRoomId] = useState<string>("");
@@ -53,18 +69,26 @@ export default function App() {
   const [err, setErr] = useState<string>("");
   /** 本次回合失败是否值得重试：由 turn.error/retryable 决定（issue #21-3） */
   const [errRetryable, setErrRetryable] = useState(false);
-  /** 最近一次玩家行动：重试时原样再发（新的 clientTurnId），不重复打印玩家行 */
+  /** 流结束但没有 commit/error：重试前必须先向服务端核对（不盲目重发） */
+  const [unconfirmed, setUnconfirmed] = useState<{ clientTurnId: string } | null>(null);
+  /** 最近一次玩家行动：重试时原样再发，不重复打印玩家行 */
   const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null } | null>(null);
+  /** 断流前已收到的叙事/facts：核对到 committed 后只补历史里的差集，避免重复刷屏 */
+  const pendingTurn = useRef<{ clientTurnId: string; narrative: string; facts: string[] } | null>(null);
   /** 全屏地图层：点对话页左上角的小地图打开 */
   const [mapOpen, setMapOpen] = useState(false);
-  const [saves, setSaves] = useState<SaveEntry[]>([]);
+const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
+  const { savesState, refreshSaves } = useSaves(user?.userId ?? null);
   /** 状态版本号：每次刷新权威状态 +1，派生视图（图鉴）据此重新拉取 */
   const [stateRev, setStateRev] = useState(0);
   const [sfx, setSfx] = useState(soundOn);
+  /** 身份来自服务端会话（HttpOnly Cookie）；房间指针按 userId 分开，避免同一浏览器切账号串档 */
+  const roomKey = user ? `${ROOM_KEY}:${user.userId}` : "";
   const turnSeq = useRef(0);
+  /** 身份+房间版本：切换后旧在途请求/SSE 一律作废（abort + 版本号核对） */
+  const scopeRef = useRef(new RequestScope());
   /**
-   * 上一回合 facts 的指纹。模块的 facts 是「世界动了」的提示，
-   * 但连续做同质动作（比如两次「环顾四周」）会给出完全一样的三行，
+   * 上一回合 facts 的指纹。连续同质动作会给出完全一样的提示行，
    * 重复打印只会让对话流看起来在原地打转——完全相同就跳过。
    */
   const lastFacts = useRef<string>("");
@@ -94,29 +118,68 @@ export default function App() {
     setLines((prev) => [...prev, { id: ++lineId, kind, text }]);
   }, []);
 
-  const refreshSaves = useCallback(async () => {
-    try {
-      setSaves(await fetchSaves());
-    } catch {
-      // 存档列表是锦上添花：服务器不可达 / 隐私模式没有本地身份时静默降级，不影响开局
-      setSaves([]);
-    }
+  /** 统一失败出口：401 一律回登录页（多标签页改密/被吊销），其余给人话 */
+  const fail = useCallback(
+    (e: unknown): string => {
+      if (isUnauthorized(e)) {
+        expireSession();
+        return "登录已失效，请重新登录";
+      }
+      return httpFailMessage(e);
+    },
+    [expireSession],
+  );
+
+  /** 切账号/切房间：清掉上一局的全部画面状态（权威数据不缓存，这里只清 UI） */
+  const resetRoomUi = useCallback(() => {
+    getTw().reset();
+    lastFacts.current = "";
+    lastTurn.current = null;
+    setView({});
+    setLines([]);
+    setInput("");
+    setBusy(false);
+    setErr("");
+    setErrRetryable(false);
+    setUnconfirmed(null);
+    setEarlier(NO_EARLIER);
+    setMapOpen(false);
+    setState(null);
+    setRoomId("");
+    setActorId("");
   }, []);
 
-  // 只读本地记录的房间号，用来决定"继续上次"是否出现
+  // 会话失效/退出：中止在途请求并清局内状态，绝不渲染坏掉的游戏画面
   useEffect(() => {
+    if (user) return;
+    scopeRef.current.renew();
+    resetRoomUi();
+    setScreen("title");
+  }, [user, resetRoomUi]);
+
+  // 存档列表的 401 同样触发会话失效（per-request 处理，无需跨标签广播）
+  useEffect(() => {
+    if (savesState.status === "unauthorized") expireSession();
+  }, [savesState.status, expireSession]);
+
+  // 面板级请求（图鉴/地图等走 request()）的 401 也统一回登录页
+  useEffect(() => {
+    onUnauthorized(expireSession);
+    return () => onUnauthorized(null);
+  }, [expireSession]);
+
+  // 每个账号自己的"上次房间"指针：同一浏览器切账号不会串到别人的房间
+  useEffect(() => {
+    if (!roomKey) {
+      setSavedRoomId("");
+      return;
+    }
     try {
-      setSavedRoomId(localStorage.getItem(ROOM_KEY) ?? "");
+      setSavedRoomId(localStorage.getItem(roomKey) ?? "");
     } catch {
       setSavedRoomId("");
     }
-  }, []);
-
-  // 标题页就生成/读取本地身份（issue #7），并拉一次本人存档列表
-  useEffect(() => {
-    playerId();
-    void refreshSaves();
-  }, [refreshSaves]);
+  }, [roomKey]);
 
   // 开局剧本随内容数据走：失败不是致命错误，标题页会提示"无预设开局"并允许直接开始
   useEffect(() => {
@@ -137,18 +200,20 @@ export default function App() {
   }, []);
 
   /**
-   * 进入一个已存在的房间：拉权威状态、记下房间号与开局，并把开场剧情铺进对话流。
+   * 进入一个已存在的房间：先作废上一局的在途请求并清画面，再拉权威状态与历史。
    * 开场只由前端渲染（不在前端推演世界）；之后玩家输入与叙事接在它下面。
    */
   const enterRoom = useCallback(
     async (id: string, opts: { resumed?: boolean; scenarioId?: string; actorId?: string } = {}) => {
+      const token = scopeRef.current.renew();
+      const current = () => scopeRef.current.isCurrent(token.version);
+      resetRoomUi();
       const snapshot = await fetchState(id);
+      if (!current()) return;
       // actorId 的优先级：调用方（建房/存档）→ 房间成员表 → 旧房间兼容值。
-      // 服务端签发后客户端只消费，不再写死 plr_self。
       const memberActorId = snapshot.room.members.find((m) => m.role === "player")?.actorId;
       const candidates = [opts.actorId, memberActorId].filter((v): v is string => typeof v === "string" && v.length > 0);
       const resolvedActorId = candidates.find((v) => snapshot.entities[v]) ?? candidates[0] ?? LEGACY_ACTOR_ID;
-      setActorId(resolvedActorId);
       const fallback = scenarios[0] ?? null;
       let sc: Scenario | null = fallback;
       try {
@@ -156,59 +221,44 @@ export default function App() {
         const wanted = opts.scenarioId ?? stored;
         sc = scenarios.find((s) => s.id === wanted) ?? fallback;
         if (sc) localStorage.setItem(scenarioKey(id), sc.id);
-        localStorage.setItem(ROOM_KEY, id);
+        if (roomKey) localStorage.setItem(roomKey, id);
         setSavedRoomId(id);
       } catch {
         // 隐私模式读不了/写不了本地记录：用调用方给的或默认开局，不影响本局
         sc = opts.scenarioId ? scenarios.find((s) => s.id === opts.scenarioId) ?? fallback : fallback;
       }
 
-      // 历史 = 已提交回合的投影（issue #7）：读得到就直接铺出来，不重播序章、不发任何 turn；
-      // 读不到（老房间/网络异常）就退回序章，不能因为"没有历史"进不了房间。
-      const history: HistoryLine[] = await fetchHistory(id).catch(() => []);
+      // 续玩时读历史失败则留在标题页，保留存档供玩家重试。
+      let page: HistoryPage = { history: [], lastCommittedSeq: 0, hasEarlier: false };
+      try {
+        page = await fetchHistory(id);
+      } catch (e) {
+        if (!current()) return;
+        if (isUnauthorized(e)) throw e;
+        if (opts.resumed) throw new Error("对话历史暂不可用，请稍后重试", { cause: e });
+      }
+      if (!current()) return;
       const tw = getTw();
       tw.reset();
       lastFacts.current = "";
-      if (history.length > 0) {
-        const replay: Line[] = [];
-        for (const h of history) {
-          if (h.input.trim()) replay.push({ id: ++lineId, kind: "player", text: h.input });
-          if (h.narrative.trim()) replay.push({ id: ++lineId, kind: "narrative", text: h.narrative });
-          for (const f of h.facts) if (f.trim()) replay.push({ id: ++lineId, kind: "fact", text: f });
-        }
-        setLines([
-          {
-            id: ++lineId,
-            kind: "system",
-            text: `继续上次${sc ? ` · ${sc.name} · ${sc.role}` : ""}（已恢复 ${history.length} 个回合）`,
-          },
-          ...replay,
-        ]);
+      const restored = restoreConversation(page.history, sc, opts.resumed === true, () => ++lineId);
+      if (restored.lines.length > 0) {
+        setLines(restored.lines);
       } else {
-        // 开场 = 对话流的第一屏：身份 → 正文。建议行动改由输入框上方的快捷按钮给出。
-        // 没有预设剧本（服务端 /api/v1/scenarios 不可用）时只留一行提示，不编造内容。
+        // 开场 = 对话流的第一屏：身份 → 正文。没有预设剧本时只留一行提示，不编造内容。
         setLines([]);
-        const opening: TypeItem[] = sc
-          ? [
-              { kind: "system", text: `序章 · ${sc.name} · ${sc.role}` },
-              ...sc.opening.map((text) => ({ kind: "narrative" as LineKind, text })),
-            ]
-          : [{ kind: "system", text: "无预设开局（服务端 /api/v1/scenarios 不可用），直接开始吧。" }];
-        tw.enqueue([
-          ...opening,
-          ...(opts.resumed
-            ? [{ kind: "system" as LineKind, text: "（世界状态已从事件日志恢复；本局对话历史从这次继续开始记录）" }]
-            : []),
-        ]);
+        tw.enqueue(restored.opening);
       }
 
+      setEarlier({ before: page.earlierCursor ?? earlierCursor(page.history), hasEarlier: page.hasEarlier, loading: false });
       setScenario(sc);
       setState(snapshot);
+      setActorId(resolvedActorId);
       setRoomId(id);
       setTab("chat");
       setScreen("game");
     },
-    [scenarios],
+    [roomKey, scenarios, resetRoomUi],
   );
 
   const startNew = useCallback(
@@ -219,12 +269,12 @@ export default function App() {
         const room = await createSoloRoom(scenarioId);
         await enterRoom(room.roomId, { scenarioId, actorId: room.actorId });
       } catch (e) {
-        setErr(`开局失败：${errorMessage(e)}`);
+        setErr(`开局失败：${fail(e)}`);
       } finally {
         setEntering(false);
       }
     },
-    [enterRoom],
+    [enterRoom, fail],
   );
 
   const resumeLast = useCallback(async () => {
@@ -232,25 +282,25 @@ export default function App() {
     setEntering(true);
     setErr("");
     try {
-      const save = saves.find((s) => s.roomId === savedRoomId);
+      const save = savesState.saves.find((s) => s.roomId === savedRoomId);
       await enterRoom(savedRoomId, { resumed: true, ...(save?.actorId ? { actorId: save.actorId } : {}) });
     } catch (e) {
       // 只有"房间真的没了"才清记录；网络错误保留，避免用户以为存档丢了
       if (e instanceof GameError && e.code === "E_ROOM_NOT_FOUND") {
         try {
-          localStorage.removeItem(ROOM_KEY);
+          if (roomKey) localStorage.removeItem(roomKey);
         } catch {
           // 忽略
         }
         setSavedRoomId("");
-        setErr(`上次的房间已不可用（${errorMessage(e)}），请新建一局`);
+        setErr(`上次的房间已不可用（${fail(e)}），请新建一局`);
       } else {
-        setErr(`连接失败（${errorMessage(e)}）；已保留上次记录，可稍后重试`);
+        setErr(`连接失败（${fail(e)}）；已保留上次记录，可稍后重试`);
       }
     } finally {
       setEntering(false);
     }
-  }, [enterRoom, savedRoomId, saves]);
+  }, [enterRoom, roomKey, savedRoomId, savesState.saves, fail]);
 
   /** 从"我的存档"进房：走与继续上次相同的恢复路径（有历史就重放） */
   const openSave = useCallback(
@@ -261,53 +311,59 @@ export default function App() {
         await enterRoom(save.roomId, { resumed: true, scenarioId: save.scenarioId, ...(save.actorId ? { actorId: save.actorId } : {}) });
       } catch (e) {
         if (e instanceof GameError && e.code === "E_ROOM_NOT_FOUND") {
-          setErr(`存档对应的房间已不可用（${errorMessage(e)}），已从列表移除`);
+          setErr(`存档对应的房间已不可用（${fail(e)}），已从列表移除`);
           void refreshSaves();
         } else {
-          setErr(`读取存档失败：${errorMessage(e)}`);
+          setErr(`读取存档失败：${fail(e)}`);
         }
       } finally {
         setEntering(false);
       }
     },
-    [enterRoom, refreshSaves],
+    [enterRoom, refreshSaves, fail],
   );
 
   const removeSave = useCallback(
     async (save: SaveEntry) => {
-      const ok = await deleteSave(save.roomId);
-      if (!ok) setErr("删除存档失败（索引未更新），请稍后重试");
+      try {
+        const ok = await deleteSave(save.roomId);
+        if (!ok) setErr("移除失败（索引未更新），请稍后重试");
+      } catch (e) {
+        setErr(`移除失败：${fail(e)}`);
+      }
       await refreshSaves();
     },
-    [refreshSaves],
+    [refreshSaves, fail],
   );
 
   /** 地图操作后重拉 /state；只刷新服务端权威数据，不在前端推演 */
   const refreshState = useCallback(() => {
     if (!roomId) return;
-    void fetchState(roomId).then((s) => {
-      setState(s);
-      // 图鉴是服务端派生视图：状态一变就让它重新拉，认识/读数不需要玩家手动切换 tab 才同步
-      setStateRev((v) => v + 1);
-    }).catch(() => undefined);
-  }, [roomId]);
+const token = scopeRef.current.current();
+    void fetchState(roomId)
+      .then((s) => {
+        if (!scopeRef.current.isCurrent(token.version)) return;
+        setState(s);
+        // 图鉴是服务端派生视图：状态一变就让它重新拉，认识/读数不需要玩家手动切换 tab 才同步
+        setStateRev((v) => v + 1);
+      })
+      .catch((e) => {
+        if (isUnauthorized(e)) expireSession();
+      });
+  }, [roomId, expireSession]);
 
   /**
-   * 走到某个点位旁：静默同步世界状态。
-   * 不往对话流里 push 文字——走动是连续动作，每一步都刷一行会把剧情冲没。
-   *
-   * travel 会返回权威地图，必须拿它把 `view.position` 一起推进：
-   * 位置视图只在回合 SSE 的 onUi 里更新，光刷 state 的话 HUD / 小地图 / 快捷选项
-   * 会停在旧地点，直到玩家再说一句话为止。
-   *
-   * 返回是否真的到达：点「前往 TA 所在地」要据此决定是选中 NPC 还是报错；
-   * 普通走动（WASD/地图点）忽略返回值，不把失败弹到对话流里。
+   * 走到某个点位旁：静默同步世界状态（不往对话流刷字）。
+   * travel 返回权威地图，必须拿它推进 view.position，否则 HUD/小地图停在旧地点。
+   * 返回是否真的到达：点「前往 TA 所在地」据此决定选中 NPC 还是报错。
    */
   const enterScene = useCallback(
     async (locId: string): Promise<{ ok: boolean; message?: string }> => {
       if (!roomId || !actorId) return { ok: false, message: "还没进入房间" };
+      const token = scopeRef.current.current();
       try {
         const res = await travel(roomId, actorId, locId);
+        if (!scopeRef.current.isCurrent(token.version)) return { ok: false };
         setView((v) => ({
           ...v,
           position: {
@@ -317,74 +373,91 @@ export default function App() {
             exits: v.position?.exits ?? [],
           },
         }));
-        void fetchState(roomId).then(setState).catch(() => undefined);
+        refreshState();
         return { ok: true };
       } catch (e) {
         // 已经在原地 / 点位未建成 / 不可达：交给调用方决定要不要提示
-        return { ok: false, message: errorMessage(e) };
+        return { ok: false, message: fail(e) };
       }
     },
-    [actorId, roomId],
+    [actorId, roomId, refreshState, fail],
   );
 
   /**
-   * 发一回合。`echo=false` 用于「重试」：不重复把玩家那句话打进日志、不清空输入框；
-   * clientTurnId 每次都是新 id，所以重试是一条全新的回合（幂等键由服务端回合表管）。
+   * 发一回合。`echo=false` 用于「重试」：不重复打印玩家行、不清输入框。
+   * `reuseId` 用于未确认回合的重发：服务端按 clientTurnId 去重，不会重复执行。
    */
   const dispatchTurn = useCallback(
-    async (raw: string, targetNpc: { id: string; name: string } | null, echo: boolean) => {
+    async (raw: string, targetNpc: { id: string; name: string } | null, echo: boolean, reuseId?: string) => {
       const base = raw.trim();
       if (!base || busy || !roomId || !actorId) return;
-      // 选了对话对象就把目标写进行动语义：契约里 TurnRequest 没有 target 字段，
-      // 否则两个不同 NPC 收到同一句"你好"时，服务端分不清在跟谁说话。
+      const token = scopeRef.current.current();
+      const current = () => scopeRef.current.isCurrent(token.version);
+      // 选了对话对象就把目标写进行动语义：契约里 TurnRequest 没有 target 字段
       const text = targetNpc ? `对${targetNpc.name}说：${base}` : base;
       lastTurn.current = { text: base, target: targetNpc };
       const tw = getTw();
-      // 玩家急着说下一句：先把手上的字放完（包括上一回合还没打完的叙事）
       if (tw.typing) tw.skip();
       setBusy(true);
       setErr("");
       setErrRetryable(false);
+      setUnconfirmed(null);
       if (echo) {
         setInput("");
         push("player", text);
       }
-      const clientTurnId = `${Date.now()}_${++turnSeq.current}`;
+      const clientTurnId = reuseId ?? `${Date.now()}_${++turnSeq.current}`;
       tw.setTurnEnded(false);
+      // 记录断流前已经收到的内容：核对到 committed 后只补历史差集，避免重复显示
+      const received: { clientTurnId: string; narrative: string; facts: string[] } = { clientTurnId, narrative: "", facts: [] };
+      pendingTurn.current = received;
+      const baseHandlers = makeTurnHandlers({ current, tw, lastFacts, setState, setView, setErr, setErrRetryable, setUnconfirmed, expireSession });
+      const handlers = {
+        ...baseHandlers,
+        onDelta: (field: "narrative" | "dialogue", chunk: string) => {
+          if (field === "narrative") received.narrative = received.narrative ? `${received.narrative}\n${chunk}` : chunk;
+          baseHandlers.onDelta?.(field, chunk);
+        },
+        onFacts: (facts: string[]) => {
+          received.facts.push(...facts);
+          baseHandlers.onFacts?.(facts);
+        },
+        onCommit: (seq: number) => {
+          pendingTurn.current = null;
+          baseHandlers.onCommit?.(seq);
+        },
+      };
       try {
-        await runTurn(roomId, actorId, text, clientTurnId, {          onDelta: (field, chunk) => {
-            if (field !== "narrative") return;
-            tw.feed(chunk);
-          },
-          // 模块的 facts 是玩家唯一能"看见世界动了"的地方（Mock 模式下尤其重要）
-          onFacts: (facts) => {
-            const rows = facts.filter((f) => f.trim().length > 0);
-            if (rows.length === 0) return;
-            const key = rows.join("\n");
-            if (key === lastFacts.current) return; // 与上一回合完全相同：不再重复刷屏
-            lastFacts.current = key;
-            tw.enqueue(rows.map((f) => ({ kind: "fact" as LineKind, text: f })));
-          },
-          onPatch: (s) => setState(s),
-          onUi: (v) => setView((old) => ({ ...old, ...v })),
-          onError: (code, message, retryable) => {
-            setErr(explainTurnError(code, message));
-            setErrRetryable(isRetryableTurnError(code, retryable));
-          },
-        }, targetNpc?.id);
+await runTurn(
+          roomId,
+          actorId,
+          text,
+          clientTurnId,
+          handlers,
+          token.signal,
+          targetNpc?.id,
+        );
       } catch (e) {
-        // 传输层/网络错误：可稍后再试，但不自动重发（避免重复扣费 / 重复回合）
-        setErr(`${errorMessage(e)}（网络问题可稍后再试）`);
-        setErrRetryable(false);
+        if (!current() || token.signal.aborted) return;
+        if (isUnauthorized(e)) {
+          expireSession();
+          return;
+        }
+        // POST 可能已到达服务端：按"未确认"处理，重试前先核对，不盲目重发
+        setUnconfirmed({ clientTurnId });
+        setErr(`${httpFailMessage(e)}：本回合结果未确认，重试会先向服务端核对。`);
+        setErrRetryable(true);
       } finally {
-        tw.setTurnEnded(true);
-        setBusy(false);
-        void fetchState(roomId).then(setState).catch(() => undefined);
-        // 回合提交后存档游标由服务端推进；这里刷新列表，回标题时时间戳是新的
-        void refreshSaves();
+        if (current()) {
+          tw.setTurnEnded(true);
+          setBusy(false);
+          refreshState();
+          // 回合提交后存档游标由服务端推进；这里刷新列表，回标题时时间戳是新的
+          void refreshSaves();
+        }
       }
     },
-    [actorId, busy, push, roomId, refreshSaves],
+    [actorId, busy, push, roomId, refreshSaves, refreshState, expireSession],
   );
   /** 发新回合（快捷建议把 `raw` 传进来就等于说出这句话，不必先填输入框） */
   const send = useCallback(
@@ -394,12 +467,86 @@ export default function App() {
     [dispatchTurn, input],
   );
 
+  /** 未确认回合：先核对服务端结果，committed 不重发；failed/未知 才用同一 id 重跑 */
+  const reconcileThenRetry = useCallback(
+    async (clientTurnId: string, last: { text: string; target: { id: string; name: string } | null }) => {
+      const token = scopeRef.current.current();
+      const current = () => scopeRef.current.isCurrent(token.version);
+      setBusy(true);
+      setErr("");
+      try {
+        const status = await fetchTurnStatus(roomId, clientTurnId);
+        if (!current()) return;
+        if (status.state === "committed") {
+          const received = pendingTurn.current?.clientTurnId === clientTurnId
+            ? pendingTurn.current
+            : { narrative: "", facts: [] as string[] };
+          pendingTurn.current = null;
+          setUnconfirmed(null);
+          setErrRetryable(false);
+          // 世界序号可能被多个回合共用，按回合与角色补齐断流前未收到的内容。
+          if (status.turnId) {
+            const turnId = status.turnId;
+            try {
+              const page = await fetchHistory(roomId, { match: { turnId, actorId } });
+              if (!current()) return;
+              const line = page.history.find((h) => h.turnId === turnId && h.actorId === actorId);
+              if (line) {
+                const missing = missingTurnContent(line, received);
+                if (missing.narrative) push("narrative", missing.narrative);
+                for (const fact of missing.facts) push("fact", fact);
+              } else {
+                push("system", "该行动已提交，暂未找到可恢复的回合叙事。");
+              }
+            } catch (e) {
+              if (!current()) return;
+              if (isUnauthorized(e)) {
+                fail(e);
+                return;
+              }
+              push("system", "该行动已提交；补齐该回合叙事失败，可重新进入房间从历史查看。");
+            }
+          }
+          push("system", `已核对：该行动已提交（seq ${status.committedSeq ?? "?"}），未重复执行。`);
+          refreshState();
+          return;
+        }
+        if (status.state === "running" || status.state === "reserved") {
+          setErr("上一回合仍在服务端执行，请稍后再点重试核对。");
+          setErrRetryable(true);
+          return;
+        }
+        if (status.state === "unconfirmed") {
+          // 服务端明确"结果待核对"：同 id 重发会被拒（E_PRECONDITION），保留提示等结案
+          setErr("该行动结果仍待核对，请稍后再核对；确认前不会重复执行。");
+          setErrRetryable(true);
+          return;
+        }
+        // failed：服务端允许 failed 复用同一逻辑 ID 重试
+        setUnconfirmed(null);
+        await dispatchTurn(last.text, last.target, false, clientTurnId);
+      } catch (e) {
+        if (!current()) return;
+        if (e instanceof HttpError && e.code === "E_REF_NOT_FOUND") {
+          // 服务端没有这条记录（如重启丢 ledger）：重发安全
+          setUnconfirmed(null);
+          await dispatchTurn(last.text, last.target, false, clientTurnId);
+          return;
+        }
+        setErr(`核对失败：${fail(e)}`);
+        setErrRetryable(true);
+      } finally {
+        if (current()) setBusy(false);
+      }
+    },
+    [roomId, actorId, dispatchTurn, push, refreshState, fail],
+  );
+
   /** 重试上一回合：失败（尤其 E_LLM_FORMAT）时对话区出现按钮，不自动重试 */
   const retry = useCallback(() => {
     const last = lastTurn.current;
     if (!last) return;
-    // 最后一道保险（issue #21 P2）：位置变化时上面的 effect 已经清过 lastTurn，
-    // 但 NPC 自己也可能在回合之间换场景；重发前用当前状态再核一次在场，
+    // NPC 可能在回合之间换场景；重发前用当前状态再核一次在场，
     // 不在就禁用重试，绝不构造「对 X 说：…」绕过场景隔离。
     if (last.target) {
       const currentLocId = view.position?.locId ?? state?.room.scene.locId ?? "";
@@ -412,13 +559,34 @@ export default function App() {
         return;
       }
     }
+    if (unconfirmed) {
+      void reconcileThenRetry(unconfirmed.clientTurnId, last);
+      return;
+    }
     void dispatchTurn(last.text, last.target, false);
-  }, [dispatchTurn, state, view.position?.locId]);
+  }, [dispatchTurn, reconcileThenRetry, unconfirmed, state, view.position?.locId]);
+
+  /** 使用服务端页首游标加载更早的历史，前插到对话流顶部。 */
+  const loadEarlier = useCallback(async () => {
+    if (!roomId || earlier.loading || !earlier.hasEarlier || earlier.before === null) return;
+    const token = scopeRef.current.current();
+    const before = earlier.before;
+    setEarlier((s) => ({ ...s, loading: true }));
+    try {
+      const page = await fetchHistory(roomId, { before });
+      if (!scopeRef.current.isCurrent(token.version)) return;
+      const older = historyToLines(page.history, () => ++lineId);
+      setLines((prev) => [...older, ...prev]);
+      setEarlier({ before: page.earlierCursor ?? earlierCursor(page.history), hasEarlier: page.hasEarlier, loading: false });
+    } catch (e) {
+      if (!scopeRef.current.isCurrent(token.version)) return;
+      setEarlier((s) => ({ ...s, loading: false }));
+      setErr(`加载更早历史失败：${fail(e)}`);
+    }
+  }, [roomId, earlier, fail]);
 
   /**
-   * 换场景后旧的重试目标不再可信（issue #21 P2）：
-   * 清掉 `lastTurn`；如果重试按钮正显示着，把按钮收掉并说明失效原因。
-   * 重试按钮只可能出现在「上一回合可重试失败」之后，所以清 lastTurn 不影响正常对话。
+   * 换场景后旧的重试目标不再可信（issue #21 P2）：清 lastTurn 并收掉重试按钮。
    */
   const lastSceneRef = useRef<string>("");
   useEffect(() => {
@@ -434,6 +602,34 @@ export default function App() {
     }
   }, [view.position?.locId, errRetryable]);
 
+  /** 退出登录：先确认，再等服务端确认成功才清本地会话（失败保留并提示） */
+  const logoutNow = useCallback(() => {
+    if (!window.confirm("退出登录？")) return;
+    void (async () => {
+      const ok = await authLogout();
+      if (!ok) {
+        setErr("退出登录失败（网络异常）：服务端会话可能仍有效，请重试。");
+        return;
+      }
+      scopeRef.current.renew();
+      resetRoomUi();
+      setScenario(null);
+      setSavedRoomId("");
+      setScreen("title");
+    })();
+  }, [authLogout, resetRoomUi]);
+
+  if (!authReady) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card auth-loading">正在检查登录状态…</div>
+      </div>
+    );
+  }
+  if (!user) {
+    return <AuthScreen status={authStatus} notice={notice} onAuthed={onAuthed} onVisitor={enterVisitor} />;
+  }
+
   if (screen === "title") {
     return (
       <TitleScreen
@@ -441,12 +637,14 @@ export default function App() {
         scenariosLoading={scenariosLoading}
         onStart={(scenarioId) => void startNew(scenarioId)}
         onResume={savedRoomId ? () => void resumeLast() : null}
-        saves={saves}
+        savesState={savesState}
         onOpenSave={(save) => void openSave(save)}
         onDeleteSave={(save) => void removeSave(save)}
         savedRoomId={savedRoomId}
         busy={entering}
         err={err}
+        username={user.nickname || user.username}
+        onLogout={logoutNow}
       />
     );
   }
@@ -454,11 +652,7 @@ export default function App() {
   const panels = view.panels ?? {};
   const pos = view.position;
   const typing = getTw().activeLine;
-  /**
-   * 开场白打完了吗？建议按钮要等逐字动画收尾后再出现，
-   * 否则字还没打出来、按钮先摆在那儿，剧情的节奏就断了。
-   * 玩家点一下日志跳过打字时 typing 也会立刻变 false，按钮随即出现。
-   */
+  /** 开场白打完了吗？建议按钮要等逐字动画收尾后再出现 */
   const sceneSettled = !getTw().typing;
   /** 已经进行到第几回合（玩家开口次数） */
   const playedTurns = lines.filter((l) => l.kind === "player").length;
@@ -484,6 +678,9 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <button type="button" className="btn ghost auth-user" onClick={logoutNow} title="退出登录">
+          {user.nickname || user.username} · 退出
+        </button>
         <button
           type="button"
           className="btn ghost back-title"
@@ -542,12 +739,15 @@ export default function App() {
             heroId={scenario?.id ?? ""}
             onEnterScene={enterScene}
             onSkipLog={() => getTw().skip()}
+            hasEarlier={earlier.hasEarlier}
+            loadingEarlier={earlier.loading}
+            onLoadEarlier={() => void loadEarlier()}
           />
         )}
 
         {tab === "drafts" &&
           (roomId ? (
-            <DraftsPanel roomId={roomId} push={push} onRefreshState={refreshState} />
+            <DraftsPanel roomId={roomId} push={push} />
           ) : (
             <div className="panel-note">连接房间中…</div>
           ))}

@@ -23,6 +23,8 @@ export interface TurnHistoryLine {
   committedSeq: number;
   actorId: string;
   userId?: string;
+  /** 逻辑请求 ID：仅落盘，用于额度对账与重试核对（不下发） */
+  clientTurnId?: string;
   input: string;
   narrative: string;
   /** 预留：当前 3.1 的事件流只有叙事文本，没有逐句 speaker；恢复时按叙事整段重放 */
@@ -32,14 +34,21 @@ export interface TurnHistoryLine {
 }
 
 export interface HistoryQuery {
-  /** turnId（不含）或 committedSeq 数字（> 该 seq）；两种都支持，便于前端按游标翻页 */
+  /** 断流恢复时，用回合与角色精确匹配单条历史。 */
+  match?: Pick<TurnHistoryLine, "turnId" | "actorId">;
+  /** turnId（不含）或 committedSeq 数字（> 该 seq）；向前翻页 */
   fromTurn?: string;
+  /** 记录游标或旧版 committedSeq 数字，向后加载更早 */
+  before?: string;
   limit?: number;
 }
 
 export interface HistoryPage {
   lines: TurnHistoryLine[];
   lastCommittedSeq: number;
+  /** 是否还有更早的历史可加载 */
+  hasEarlier: boolean;
+  earlierCursor?: string;
 }
 
 function isHistoryLine(v: unknown): v is TurnHistoryLine {
@@ -65,6 +74,15 @@ function safeRoomFile(roomId: string): string {
   return `x_${createHash("sha256").update(roomId, "utf8").digest("hex").slice(0, 24)}`;
 }
 
+/** 去重作用域与引擎一致：房间内按 actorId + turnId（turnId 已包含 clientTurnId） */
+function historyKey(line: Pick<TurnHistoryLine, "actorId" | "turnId">): string {
+  return `${line.actorId}\u0000${line.turnId}`;
+}
+
+function historyCursor(line: TurnHistoryLine): string {
+  return `h_${createHash("sha256").update(historyKey(line)).digest("hex")}`;
+}
+
 export class TurnHistory {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly known = new Map<string, Set<string>>();
@@ -80,8 +98,9 @@ export class TurnHistory {
     let raw: string;
     try {
       raw = await readFile(this.fileFor(roomId), "utf8");
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw Object.assign(new Error("读取回合历史失败", { cause: error }), { code: "E_STORE_FAULT" });
     }
     const lines: TurnHistoryLine[] = [];
     for (const text of raw.split("\n")) {
@@ -100,8 +119,26 @@ export class TurnHistory {
 
   async list(roomId: string, query: HistoryQuery = {}): Promise<HistoryPage> {
     const all = await this.readAll(roomId);
-    let start = 0;
-    if (query.fromTurn) {
+    const rawLimit = query.limit ?? 50;
+    const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), 200);
+    let end = all.length;
+    let start = Math.max(0, end - limit);
+    if (query.match) {
+      const { turnId, actorId } = query.match;
+      const index = all.findIndex((item) => item.turnId === turnId && item.actorId === actorId);
+      start = Math.max(0, index);
+      end = index + 1;
+    } else if (query.before?.trim()) {
+      const before = query.before;
+      if (before.startsWith("h_")) {
+        end = Math.max(0, all.findIndex((line) => historyCursor(line) === before));
+      } else {
+        const seq = Number(before);
+        const index = all.findIndex((line) => line.committedSeq >= seq);
+        if (Number.isFinite(seq) && index >= 0) end = index;
+      }
+      start = Math.max(0, end - limit);
+    } else if (query.fromTurn) {
       const seq = Number(query.fromTurn);
       if (Number.isFinite(seq) && query.fromTurn.trim() !== "") {
         start = all.findIndex((line) => line.committedSeq > seq);
@@ -110,16 +147,19 @@ export class TurnHistory {
         start = index < 0 ? all.length : index + 1;
       }
       if (start < 0) start = all.length;
+      end = start + limit;
     }
-    const rawLimit = query.limit ?? 50;
-    const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), 200);
+    const lines = all.slice(start, end);
+    const first = lines[0];
     return {
-      lines: all.slice(start, start + limit),
+      lines,
       lastCommittedSeq: all.length ? all[all.length - 1]!.committedSeq : 0,
+      hasEarlier: Boolean(first && start > 0),
+      ...(first && start > 0 ? { earlierCursor: historyCursor(first) } : {}),
     };
   }
 
-  /** 同一 turnId 幂等：Turn 的 seen 缓存重放会再次产出 turn.commit，不能重复记账 */
+  /** 同一作用域（actorId + turnId）幂等：Turn 的 seen 缓存重放会再次产出 turn.commit，不能重复记账 */
   append(line: TurnHistoryLine): Promise<void> {
     const prev = this.chains.get(line.roomId) ?? Promise.resolve();
     const task = prev.then(() => this.doAppend(line));
@@ -129,17 +169,19 @@ export class TurnHistory {
 
   private async doAppend(line: TurnHistoryLine): Promise<void> {
     const known = await this.knownFor(line.roomId);
-    if (known.has(line.turnId)) return;
+    const key = historyKey(line);
+    if (known.has(key)) return;
     const file = this.fileFor(line.roomId);
     await mkdir(path.dirname(file), { recursive: true });
-    await appendFile(file, `${JSON.stringify(line)}\n`, "utf8");
-    known.add(line.turnId);
+    // 每条记录前先写换行：上次崩溃/短写留下的半截尾行不会粘住这条新历史
+    await appendFile(file, `\n${JSON.stringify(line)}\n`, "utf8");
+    known.add(key);
   }
 
   private async knownFor(roomId: string): Promise<Set<string>> {
     const cached = this.known.get(roomId);
     if (cached) return cached;
-    const set = new Set((await this.readAll(roomId)).map((line) => line.turnId));
+    const set = new Set((await this.readAll(roomId)).map(historyKey));
     this.known.set(roomId, set);
     return set;
   }
@@ -198,6 +240,7 @@ async function* recordRun(
         committedSeq: committed.seq,
         actorId: req.actorId,
         ...(userId ? { userId } : {}),
+        ...(req.clientTurnId ? { clientTurnId: req.clientTurnId } : {}),
         input: req.input,
         narrative,
         speakers: [],

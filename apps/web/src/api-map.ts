@@ -1,6 +1,6 @@
 /** 地图与场景草案的 HTTP 层（docs/06 §4）；只解析服务端返回，不做任何推演。 */
 import type { GameClock } from "../../../packages/shared/src/contract/types.ts";
-import { adminHeaders, jsonHeaders, request, unwrap } from "./http.ts";
+import { jsonHeaders, request, unwrap } from "./http.ts";
 
 // ---------------------------------------------------------------- 地图视图
 
@@ -181,29 +181,6 @@ export interface CreateDraftBody {
   y?: number;
 }
 
-export interface DraftActionBody {
-  action: "approve" | "reject";
-  note?: string;
-}
-
-/** 发布成功后服务端回的新场景（只声明前端用到的字段，其余字段忽略） */
-export interface PublishedScene {
-  id: string;
-  name: string;
-  desc?: string;
-  tags?: string[];
-  x?: number;
-  y?: number;
-  anchorLocId?: string;
-  dialogues?: GeneratedSceneDialogue[];
-  publishedAt?: number;
-}
-
-export interface PublishResult {
-  draft: SceneDraft;
-  scene?: PublishedScene;
-}
-
 export async function createDraft(body: CreateDraftBody): Promise<SceneDraft> {
   const res = await request<{ draft: SceneDraft }>("create draft", "/api/v1/map/drafts", {
     method: "POST",
@@ -215,39 +192,5 @@ export async function createDraft(body: CreateDraftBody): Promise<SceneDraft> {
 
 export async function getDraft(id: string): Promise<SceneDraft> {
   const res = await request<{ draft: SceneDraft }>("get draft", `/api/v1/map/drafts/${encodeURIComponent(id)}`);
-  return unwrap(res).draft;
-}
-
-export async function listDrafts(token: string): Promise<SceneDraft[]> {
-  const res = await request<{ drafts: SceneDraft[] }>("list drafts", "/api/v1/map/drafts", {
-    headers: { "x-admin-token": token },
-  });
-  return unwrap(res).drafts;
-}
-
-export async function reviewDraft(id: string, token: string, body: DraftActionBody): Promise<SceneDraft> {
-  const res = await request<{ draft: SceneDraft }>(
-    "review draft",
-    `/api/v1/admin/map/drafts/${encodeURIComponent(id)}/review`,
-    { method: "POST", headers: adminHeaders(token), body: JSON.stringify(body) },
-  );
-  return unwrap(res).draft;
-}
-
-export async function publishDraft(id: string, token: string, body: DraftActionBody): Promise<PublishResult> {
-  const res = await request<PublishResult>(
-    "publish draft",
-    `/api/v1/admin/map/drafts/${encodeURIComponent(id)}/publish`,
-    { method: "POST", headers: adminHeaders(token), body: JSON.stringify(body) },
-  );
-  return unwrap(res);
-}
-
-export async function retryGenerate(id: string, token: string): Promise<SceneDraft> {
-  const res = await request<{ draft: SceneDraft }>(
-    "generate draft",
-    `/api/v1/admin/map/drafts/${encodeURIComponent(id)}/generate`,
-    { method: "POST", headers: adminHeaders(token) },
-  );
   return unwrap(res).draft;
 }

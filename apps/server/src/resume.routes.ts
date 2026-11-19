@@ -9,6 +9,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { WorldState } from "../../../packages/shared/src/contract/types.ts";
 import type { AppDeps } from "./routes.ts";
+import { guardRoom } from "./room-guard.ts";
 import { maskNamesDeep, unknownPlaceholders } from "./view-names.ts";
 
 /** 从 routes.ts 注入，避免 routes ↔ resume.routes 的运行时循环依赖 */
@@ -51,36 +52,49 @@ export function registerResumeRoutes(app: FastifyInstance, deps: AppDeps, helper
       return reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "房间不存在" });
     }
 
-    // 权限：本房成员可读。老房间（3.1 之前建房、成员表没有 userId）退化为"可读"，
-    // 与 /state 的开放程度一致；世界层房间已在上面挡掉。
+    // 权限与其它房间端点同一 gate（issue #33）：成员可读；旧档在强制登录模式默认不开放
+    const access = await guardRoom(req, reply, deps, roomId, userIdOf);
+    if (!access) return reply;
+
     let state: WorldState;
     try {
       state = await deps.store.snapshot(roomId);
-    } catch {
-      return reply.code(404).send({ ok: false, code: "E_ROOM_NOT_FOUND", message: "房间不存在或事件日志不可读" });
-    }
-    const owners = state.room.members.flatMap((member) => (member.userId ? [member.userId] : []));
-    const userId = userIdOf(req, deps);
-    if (owners.length > 0 && (!userId || !owners.includes(userId))) {
-      return reply.code(403).send({ ok: false, code: "E_FORBIDDEN", message: "只有本房间成员可以读取历史" });
+    } catch (e) {
+      // guardRoom 刚刚成功读到过状态：再失败只能是存储故障，不能折叠成"房间不存在"
+      console.error(`[resume] 读取房间状态失败：${roomId}`, e);
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "房间状态读取失败，请稍后重试" });
     }
 
-    const query = req.query as { fromTurn?: string; limit?: string };
+    const query = req.query as { fromTurn?: string; before?: string; limit?: string; turnId?: unknown; actorId?: unknown };
+    const { turnId, actorId } = query;
+    const exact = turnId !== undefined || actorId !== undefined;
+    const match = typeof turnId === "string" && turnId.trim() && typeof actorId === "string" && actorId.trim()
+      ? { turnId, actorId }
+      : undefined;
+    if (exact && !match) {
+      return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "精确查询历史需要同时提供 turnId 和 actorId" });
+    }
     const limit = Number(query.limit ?? 50);
     const page = deps.history
       ? await deps.history.list(roomId, {
+          match,
           ...(query.fromTurn ? { fromTurn: query.fromTurn } : {}),
+          ...(query.before ? { before: query.before } : {}),
           limit: Number.isFinite(limit) ? limit : 50,
         })
-      : { lines: [], lastCommittedSeq: 0 };
-    // userId 只落盘用于归属/审计，不下发：合作房间里不向他人暴露账号 id
-    const history = page.lines.map((line) => {
-      const { userId: _owner, ...rest } = line;
-      return rest;
-    });
-    // 历史是"脱敏前"写入的原始叙事：回放时按**当前**认识状态重做一次脱敏，
-    // 否则续玩/刷新就能看到尚未认识的人的真名（审阅 P0-2）。
+      : { lines: [], lastCommittedSeq: 0, hasEarlier: false };
+    // 历史按当前认识状态脱敏。精确查询的两个标识由调用方提供，可原样返回供核对。
     const placeholders = unknownPlaceholders(state, deps.appearance);
-    return { ok: true, roomId, history: maskNamesDeep(history, placeholders), lastCommittedSeq: page.lastCommittedSeq };
+    const history = page.lines.map((line) => {
+      // userId/clientTurnId 只落盘用于归属、审计和对账。
+      const { userId: _owner, clientTurnId: _logical, ...rest } = line;
+      const masked = maskNamesDeep(rest, placeholders);
+      return match ? { ...masked, ...match } : masked;
+    });
+    return {
+      ok: true, roomId, history,
+      lastCommittedSeq: page.lastCommittedSeq, hasEarlier: page.hasEarlier,
+      ...("earlierCursor" in page ? { earlierCursor: page.earlierCursor } : {}),
+    };
   });
 }
