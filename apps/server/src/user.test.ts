@@ -93,6 +93,28 @@ describe("用户维度（P2）", () => {
     await app.close();
   });
 
+  it("GET /api/v1/me 也走房间授权：非成员 403、世界房间 404", async () => {
+    const deps = await createApp(testConfig());
+    const { roomId } = await deps.createRoom("solo", "u_a");
+    const app = Fastify();
+    registerRoutes(app, deps);
+
+    const other = await app.inject({
+      method: "GET",
+      url: `/api/v1/me?roomId=${roomId}&actorId=npc_lin`,
+      headers: { "x-user-id": "u_b" },
+    });
+    expect(other.statusCode).toBe(403);
+
+    const world = await app.inject({
+      method: "GET",
+      url: `/api/v1/me?roomId=${deps.worldRoom}&actorId=npc_lin`,
+      headers: { "x-user-id": "u_a" },
+    });
+    expect(world.statusCode).toBe(404);
+    await app.close();
+  });
+
   it("世界房间（room_world_*）对外的 state/events/turns 一律 404（审阅 P2-④）", async () => {
     const deps = await createApp(testConfig());
     const { roomId } = await deps.createRoom("solo", "u_a");
@@ -111,8 +133,8 @@ describe("用户维度（P2）", () => {
       payload: { input: "试着往世界层写点东西", clientTurnId: "w1" },
     });
     expect(turn.statusCode).toBe(404);
-    // 普通房间不受影响
-    const ok = await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/state` });
+    // 普通房间不受影响（成员身份访问）
+    const ok = await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/state`, headers: { "x-user-id": "u_a" } });
     expect(ok.statusCode).toBe(200);
     await app.close();
   });

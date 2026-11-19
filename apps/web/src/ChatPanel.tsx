@@ -50,6 +50,10 @@ export interface ChatPanelProps {
   /** 上一回合失败且服务端标记可重试：重发最后一次玩家输入 */
   onRetry: () => void;
   retryable: boolean;
+  /** 还有更早的已提交历史（服务端 hasEarlier）：显示"加载更早" */
+  hasEarlier: boolean;
+  loadingEarlier: boolean;
+  onLoadEarlier: () => void;
 }
 
 export default function ChatPanel({
@@ -73,6 +77,9 @@ export default function ChatPanel({
   onSkipLog,
   onRetry,
   retryable,
+  hasEarlier,
+  loadingEarlier,
+  onLoadEarlier,
 }: ChatPanelProps) {
   const [talking, setTalking] = useState<{ id: string; name: string } | null>(null);
   const [blocked, setBlocked] = useState<BlockedNpc | null>(null);
@@ -270,6 +277,20 @@ export default function ChatPanel({
           }}
           title="点击可跳过打字动画并定位到最新剧情"
         >
+          {hasEarlier && (
+            <button
+              type="button"
+              className="btn ghost load-earlier"
+              disabled={loadingEarlier}
+              onClick={(e) => {
+                // 不触发日志区的"跳过打字 + 滚到底部"
+                e.stopPropagation();
+                onLoadEarlier();
+              }}
+            >
+              {loadingEarlier ? "正在加载更早…" : "加载更早"}
+            </button>
+          )}
           {lines.map((l) => (
             <p key={l.id} className={`line ${l.kind}`}>
               {l.text}

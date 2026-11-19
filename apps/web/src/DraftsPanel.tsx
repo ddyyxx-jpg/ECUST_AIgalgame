@@ -1,24 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  createDraft,
-  getDraft,
-  getMap,
-  listDrafts,
-  publishDraft,
-  retryGenerate,
-  reviewDraft,
-} from "./api.ts";
+import { createDraft, getDraft, getMap } from "./api.ts";
 import type { MapScene, SceneDraft } from "./api.ts";
 import DraftCard from "./DraftCard.tsx";
 import { errorMessage, sceneName } from "./ui.ts";
 import type { LineKind } from "./ui.ts";
 
-const TOKEN_KEY = "galgame.adminToken";
-
 interface Props {
   roomId: string;
   push: (kind: LineKind, text: string) => void;
-  onRefreshState: () => void;
 }
 
 interface Form {
@@ -27,11 +16,9 @@ interface Form {
   anchorLocId: string;
 }
 
-/** 审核面板：玩家创建草案 + 管理员列表/审核/发布（docs/06 §5、§7） */
-export default function DraftsPanel({ roomId, push, onRefreshState }: Props) {
+/** 草案面板（玩家侧）：创建提案 + 按 id 查询进度；审核/发布只在服务端管理端进行 */
+export default function DraftsPanel({ roomId, push }: Props) {
   const [anchors, setAnchors] = useState<MapScene[]>([]);
-  const [token, setToken] = useState("");
-  const [drafts, setDrafts] = useState<SceneDraft[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const [form, setForm] = useState<Form>({ name: "", idea: "", anchorLocId: "" });
@@ -39,43 +26,27 @@ export default function DraftsPanel({ roomId, push, onRefreshState }: Props) {
   const [queryId, setQueryId] = useState("");
   const [queried, setQueried] = useState<SceneDraft | null>(null);
 
-  const loadDrafts = useCallback(async (adminToken: string) => {
-    if (!adminToken) return;
-    setBusy("list");
-    try {
-      setDrafts(await listDrafts(adminToken));
-      setErr("");
-    } catch (e) {
-      setErr(errorMessage(e));
-    } finally {
-      setBusy(null);
-    }
-  }, []);
-
   useEffect(() => {
+    let alive = true;
     void (async () => {
       try {
         const map = await getMap(roomId);
+        if (!alive) return;
         setAnchors(map.scenes);
         setForm((prev) => ({
           ...prev,
           anchorLocId: prev.anchorLocId || map.player.locId || map.scenes[0]?.id || "",
         }));
       } catch (e) {
-        setErr(errorMessage(e));
+        if (alive) setErr(errorMessage(e));
       }
     })();
-    const saved = window.localStorage.getItem(TOKEN_KEY) ?? "";
-    setToken(saved);
-    if (saved) void loadDrafts(saved);
-  }, [loadDrafts, roomId]);
+    return () => {
+      alive = false;
+    };
+  }, [roomId]);
 
-  const onTokenChange = (value: string) => {
-    setToken(value);
-    window.localStorage.setItem(TOKEN_KEY, value);
-  };
-
-  const submitCreate = async () => {
+  const submitCreate = useCallback(async () => {
     const name = form.name.trim();
     const idea = form.idea.trim();
     if (name.length < 2 || name.length > 24) return setErr("名称需 2–24 字");
@@ -89,15 +60,14 @@ export default function DraftsPanel({ roomId, push, onRefreshState }: Props) {
       setQueryId(draft.id);
       setForm((prev) => ({ ...prev, name: "", idea: "" }));
       push("system", `已提交场景草案「${draft.name}」（${draft.id}），等待管理员审核。`);
-      if (token) await loadDrafts(token);
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
       setBusy(null);
     }
-  };
+  }, [form, push]);
 
-  const submitQuery = async () => {
+  const submitQuery = useCallback(async () => {
     const id = queryId.trim();
     if (!id) return setErr("请输入草案 id");
     setBusy("query");
@@ -109,40 +79,7 @@ export default function DraftsPanel({ roomId, push, onRefreshState }: Props) {
     } finally {
       setBusy(null);
     }
-  };
-
-  const runAdmin = async (label: string, fn: () => Promise<void>) => {
-    if (!token) return setErr("先填写管理员 token");
-    setBusy(label);
-    setErr("");
-    try {
-      await fn();
-      await loadDrafts(token);
-    } catch (e) {
-      setErr(errorMessage(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onReview = (draft: SceneDraft, action: "approve" | "reject") =>
-    void runAdmin(`review:${draft.id}`, async () => {
-      await reviewDraft(draft.id, token, { action });
-    });
-
-  const onPublish = (draft: SceneDraft, action: "approve" | "reject") =>
-    void runAdmin(`publish:${draft.id}`, async () => {
-      const res = await publishDraft(draft.id, token, { action });
-      if (action === "approve") {
-        push("system", `场景「${res.scene?.name ?? draft.name}」已发布，可在地图中前往。`);
-        onRefreshState();
-      }
-    });
-
-  const onRetry = (draft: SceneDraft) =>
-    void runAdmin(`generate:${draft.id}`, async () => {
-      await retryGenerate(draft.id, token);
-    });
+  }, [queryId]);
 
   const disabled = busy !== null;
 
@@ -188,9 +125,11 @@ export default function DraftsPanel({ roomId, push, onRefreshState }: Props) {
         <button className="btn primary" onClick={() => void submitCreate()} disabled={disabled}>
           提交草案
         </button>
+        {err && <div className="err">{err}</div>}
+        {busy && <div className="muted">处理中：{busy}</div>}
         {created && (
           <div className="created">
-            <DraftCard draft={created} anchorName={sceneName(anchors, created.anchorLocId)} disabled admin={false} />
+            <DraftCard draft={created} anchorName={sceneName(anchors, created.anchorLocId)} />
           </div>
         )}
 
@@ -206,45 +145,7 @@ export default function DraftsPanel({ roomId, push, onRefreshState }: Props) {
           </button>
         </div>
         {queried && (
-          <DraftCard draft={queried} anchorName={sceneName(anchors, queried.anchorLocId)} disabled admin={false} />
-        )}
-      </section>
-
-      <section className="drafts-col">
-        <h2>管理员审核</h2>
-        <p className="muted">token 存在 localStorage，请求头 x-admin-token（未配置 GALGAME_ADMIN_TOKEN 时看服务端启动日志）。</p>
-        <div className="token-row">
-          <input
-            type="password"
-            value={token}
-            placeholder="管理员 token"
-            onChange={(e) => onTokenChange(e.target.value)}
-          />
-          <button className="btn" onClick={() => void loadDrafts(token)} disabled={disabled || !token}>
-            刷新列表
-          </button>
-        </div>
-        {err && <div className="err">{err}</div>}
-        {busy && <div className="muted">处理中：{busy}</div>}
-        {drafts === null ? (
-          <p className="muted">填入管理员 token 后加载草案列表。</p>
-        ) : drafts.length === 0 ? (
-          <p className="muted">暂无草案。</p>
-        ) : (
-          <div className="drafts-list">
-            {drafts.map((draft) => (
-              <DraftCard
-                key={draft.id}
-                draft={draft}
-                anchorName={sceneName(anchors, draft.anchorLocId)}
-                disabled={disabled}
-                admin
-                onReview={(action) => onReview(draft, action)}
-                onPublish={(action) => onPublish(draft, action)}
-                onRetry={() => onRetry(draft)}
-              />
-            ))}
-          </div>
+          <DraftCard draft={queried} anchorName={sceneName(anchors, queried.anchorLocId)} />
         )}
       </section>
     </div>

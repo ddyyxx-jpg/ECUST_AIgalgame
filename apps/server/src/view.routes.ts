@@ -4,7 +4,7 @@
  * 为什么独立成文件而不塞进 routes.ts：这一块只依赖 store+registry，和回合/地图无关；
  * 单独成文件也让并行开发的分支尽量少在同一段代码上打架。
  */
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Registry, RoomId, Store, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import { buildGalleryView } from "./gallery.ts";
 import type { ScenarioCatalog } from "./scenarios.ts";
@@ -24,6 +24,8 @@ export interface ViewRouteDeps {
   };
   registry: Registry;
   scenarios: ScenarioCatalog;
+  /** 房间授权 gate（issue #33）：拒绝时已写好响应并返回 false；缺省 = 不做成员校验（单元测试替身） */
+  authorize?: (req: FastifyRequest, reply: FastifyReply, roomId: string) => Promise<boolean>;
   /** npcId → 外貌描述（未认识时的占位名） */
   appearance?: Map<string, string>;
 }
@@ -51,16 +53,22 @@ export function registerViewRoutes(app: FastifyInstance, deps: ViewRouteDeps): v
     let rooms: RoomId[];
     try {
       rooms = await deps.store.listRooms();
-    } catch {
-      return notFound(reply);
+    } catch (e) {
+      // listRooms 失败是存储故障，不是"房间不存在"；折叠成 404 会让客户端误清房间指针
+      console.error("[view] 读取房间列表失败", e);
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "房间列表读取失败，请稍后重试" });
     }
     if (!rooms.includes(roomId)) return notFound(reply);
+
+    if (deps.authorize && !(await deps.authorize(req, reply, roomId))) return reply;
 
     let state: WorldState;
     try {
       state = await deps.store.snapshot(roomId);
-    } catch {
-      return notFound(reply);
+    } catch (e) {
+      // 房间已由 listRooms 证实存在：这里再失败是存档损坏/IO 故障，不能报"房间不存在"
+      console.error(`[view] 读取房间状态失败：${roomId}`, e);
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "房间状态读取失败，请稍后重试" });
     }
     return {
       ok: true,

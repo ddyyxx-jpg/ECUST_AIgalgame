@@ -58,7 +58,7 @@ describe("roomId 路径穿越", () => {
     });
     expect(created.statusCode).toBe(200);
     const { roomId } = created.json() as { roomId: string };
-    expect((await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/state` })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/state`, headers: { "x-user-id": "u_safe" } })).statusCode).toBe(200);
     await app.close();
   });
 });

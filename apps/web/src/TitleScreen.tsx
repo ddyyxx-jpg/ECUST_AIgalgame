@@ -1,13 +1,11 @@
 /**
  * 标题页：进游戏前的入口。
- * 展示世界观一句话、给按钮（选身份开局 / 继续 / 接入真实模型 / 说明 / 关于），显示契约版本。
- * 不持有任何权威状态：点"开始"才让 App 去建房；模型 key 只交给服务端，前端不留副本。
+ * 展示世界观一句话、给按钮（选身份开局 / 继续 / 存档 / 说明 / 关于），显示契约版本。
+ * 不持有任何权威状态：点"开始"才让 App 去建房。模型配置只在服务端管理端，玩家界面不提供入口。
  */
 import { useEffect, useState } from "react";
-import { connectLlm, disconnectLlm, getLlmSettings } from "./api-settings.ts";
-import type { LlmSettingsView } from "./api-settings.ts";
-import { GameError } from "./http.ts";
 import type { SaveEntry } from "./api.ts";
+import type { SavesState } from "./use-saves.ts";
 import type { Scenario } from "./scenarios.ts";
 import { setSoundOn, soundOn } from "./sfx.ts";
 
@@ -22,17 +20,21 @@ export interface TitleScreenProps {
   onResume: (() => void) | null;
   /** 上一次存下的房间号，仅用于按钮上的小字 */
   savedRoomId: string;
-  /** 本人存档索引（issue #7）；服务异常时为空数组 */
-  saves: SaveEntry[];
+  /** 本人存档索引（issue #7）：加载/空/错误/无权限分开显示，不再静默当空列表 */
+  savesState: SavesState;
   /** 从存档进房：与"继续上次"同一条恢复路径 */
   onOpenSave: (save: SaveEntry) => void;
   /** 只从列表移除索引，不删房间 */
   onDeleteSave: (save: SaveEntry) => void;
   busy: boolean;
   err: string;
+  /** 当前登录账号（显示在右上角） */
+  username: string;
+  /** 退出登录：清会话并回到登录页 */
+  onLogout: () => void;
 }
 
-type Panel = "none" | "choose" | "model" | "saves" | "help" | "about";
+type Panel = "none" | "choose" | "saves" | "help" | "about";
 
 const HELP: { q: string; a: string }[] = [
   { q: "怎么玩", a: "在输入框里直接写你要做什么，不用选选项。例如「去图书馆找林老师问问昨天的传闻」。" },
@@ -48,8 +50,22 @@ const ABOUT: { k: string; v: string }[] = [
   { k: "团队", v: "shuaqiTeam" },
 ];
 
-const DEFAULT_BASE = "https://ai.ecustcic.com/api/v1";
-const DEFAULT_MODEL = "deepseek-v4.1-flash";
+/** 存档面板的非列表状态：各自给一句人话，而不是看起来像"没有存档" */
+function SavesNotice({ state }: { state: SavesState }) {
+  if (state.status === "loading" || state.status === "idle") {
+    return <p className="panel-note">正在加载存档…</p>;
+  }
+  if (state.status === "unauthorized") {
+    return <p className="panel-note">请先登录后再查看存档。</p>;
+  }
+  if (state.status === "forbidden") {
+    return <p className="panel-note">没有权限读取存档（403）。请联系管理员。</p>;
+  }
+  if (state.status === "error") {
+    return <p className="panel-note">无法加载存档：{state.error}</p>;
+  }
+  return <p className="panel-note">还没有存档——进入游戏玩一回合后，这里就会出现。</p>;
+}
 
 export default function TitleScreen({
   scenarios,
@@ -57,25 +73,19 @@ export default function TitleScreen({
   onStart,
   onResume,
   savedRoomId,
-  saves,
+  savesState,
   onOpenSave,
   onDeleteSave,
   busy,
   err,
+  username,
+  onLogout,
 }: TitleScreenProps) {
   const [panel, setPanel] = useState<Panel>("none");
   const [version, setVersion] = useState("");
   const [sfx, setSfx] = useState(soundOn);
 
-  // 模型接入状态 + 表单
-  const [llm, setLlm] = useState<LlmSettingsView | null>(null);
-  const [llmLoading, setLlmLoading] = useState(false);
-  const [llmErr, setLlmErr] = useState("");
-  const [base, setBase] = useState(DEFAULT_BASE);
-  const [model, setModel] = useState(DEFAULT_MODEL);
-  const [key, setKey] = useState("");
-
-  // 契约版本与模型状态都从服务端拿，拿不到就不显示（不写死，免得文档改了这里过期）
+  // 契约版本从服务端拿，拿不到就不显示（不写死，免得文档改了这里过期）
   useEffect(() => {
     let alive = true;
     fetch("/api/v1/health")
@@ -84,53 +94,13 @@ export default function TitleScreen({
         if (alive && typeof d.contract === "string") setVersion(d.contract);
       })
       .catch(() => undefined);
-    getLlmSettings()
-      .then((v) => {
-        if (alive) {
-          setLlm(v);
-          if (v.baseUrl) setBase(v.baseUrl);
-          if (v.model) setModel(v.model);
-        }
-      })
-      .catch(() => undefined);
     return () => {
       alive = false;
     };
   }, []);
 
   const pad = (n: number) => String(n).padStart(2, "0");
-
-  const applyModel = async () => {
-    setLlmLoading(true);
-    setLlmErr("");
-    try {
-      const view = await connectLlm({ baseUrl: base.trim(), model: model.trim(), apiKey: key.trim() });
-      setLlm(view);
-      setKey("");
-    } catch (e) {
-      setLlmErr(e instanceof GameError ? `${e.code}：${e.message}` : String(e));
-    } finally {
-      setLlmLoading(false);
-    }
-  };
-
-  const clearModel = async () => {
-    setLlmLoading(true);
-    setLlmErr("");
-    try {
-      setLlm(await disconnectLlm());
-    } catch (e) {
-      setLlmErr(e instanceof GameError ? `${e.code}：${e.message}` : String(e));
-    } finally {
-      setLlmLoading(false);
-    }
-  };
-
-  const llmStatus = llmLoading
-    ? "正在连接并测试…"
-    : llm?.mode === "remote"
-      ? `已接入真实模型：${llm.model}（${llm.persisted ? "已保存，重启服务后仍生效" : "环境变量配置"}）`
-      : "当前：离线叙述（场景白描）";
+  const saves = savesState.saves;
 
   const items: { id: string; label: string; hint: string; primary?: boolean; onClick: () => void }[] = [
     {
@@ -144,24 +114,29 @@ export default function TitleScreen({
   if (onResume) {
     items.push({ id: "resume", label: "继续上次", hint: savedRoomId, onClick: onResume });
   }
-  // 存档入口常驻（本地身份一定有）：空列表时进去是"还没有存档"的提示
   items.push({
     id: "saves",
     label: "我的存档",
-    hint: saves.length > 0 ? `${saves.length} 个房间 · 从上次的对话继续` : "还没有存档",
+    hint:
+      savesState.status === "ready" && saves.length > 0
+        ? `${saves.length} 个房间 · 从上次的对话继续`
+        : savesState.status === "loading" || savesState.status === "idle"
+          ? "正在加载…"
+          : savesState.status === "ready"
+            ? "还没有存档"
+            : "加载失败，点开查看",
     onClick: () => setPanel("saves"),
-  });
-  // 「玩法说明 / 关于本作」不是主推内容：入口挪到页面下方的小字区（见 footer）
-  items.push({
-    id: "model",
-    label: "接入真实模型",
-    hint: llm?.mode === "remote" ? `已接入：${llm.model}` : "自备 API Key，让剧情由模型生成",
-    onClick: () => setPanel("model"),
   });
 
   return (
     <div className="title-screen screen-in">
       <div className="title-grid" aria-hidden="true" />
+      <div className="title-auth">
+        <span className="muted">{username}</span>
+        <button type="button" className="btn ghost" onClick={onLogout}>
+          退出
+        </button>
+      </div>
 
       <div className="title-card">
         <p className="title-mark">ECUST · 奉贤校区 · 九月</p>
@@ -237,67 +212,14 @@ export default function TitleScreen({
               </>
             )}
 
-            {panel === "model" && (
-              <>
-                <p className="title-mark">接入真实模型</p>
-                <p className="muted scenario-note">
-                  不配也能玩（离线叙述）；接入后叙事由真实模型生成。配置会保存到服务端本地（重启后仍生效），前端不保留副本。
-                </p>
-                <div className="field">
-                  <label htmlFor="llm-base">接口地址</label>
-                  <input
-                    id="llm-base"
-                    value={base}
-                    onChange={(e) => setBase(e.target.value)}
-                    placeholder={DEFAULT_BASE}
-                    disabled={llmLoading}
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="llm-model">模型名</label>
-                  <input
-                    id="llm-model"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    placeholder={DEFAULT_MODEL}
-                    disabled={llmLoading}
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="llm-key">API Key</label>
-                  <input
-                    id="llm-key"
-                    type="password"
-                    value={key}
-                    onChange={(e) => setKey(e.target.value)}
-                    placeholder="sk-…"
-                    autoComplete="off"
-                    disabled={llmLoading}
-                  />
-                </div>
-                <div className="draft-actions">
-                  <button type="button" className="btn primary" onClick={() => void applyModel()} disabled={llmLoading || !key.trim()}>
-                    {llmLoading ? "连接中…" : "连接并启用"}
-                  </button>
-                  {llm?.mode === "remote" && (
-                    <button type="button" className="btn danger" onClick={() => void clearModel()} disabled={llmLoading}>
-                      断开并清除
-                    </button>
-                  )}
-                  <span className="muted">{llmStatus}</span>
-                </div>
-                {llmErr && <div className="err title-err">{llmErr}</div>}
-              </>
-            )}
-
             {panel === "saves" && (
               <>
                 <p className="title-mark">我的存档</p>
                 <p className="muted scenario-note">
-                  存档只认这台设备上的本地身份（开发期方案，可伪造）；删除存档只移除入口，房间与对话历史仍保留。
+                  存档索引跟随当前账号；「从列表移除」只移除入口，房间与对话历史仍保留，凭房间号还能回去。
                 </p>
-                {saves.length === 0 ? (
-                  <p className="panel-note">还没有存档——进入游戏玩一回合后，这里就会出现。</p>
+                {savesState.status !== "ready" || saves.length === 0 ? (
+                  <SavesNotice state={savesState} />
                 ) : (
                   <div className="save-list">
                     {saves.map((save) => {
@@ -316,8 +238,14 @@ export default function TitleScreen({
                             <button type="button" className="btn primary" disabled={busy} onClick={() => onOpenSave(save)}>
                               继续
                             </button>
-                            <button type="button" className="btn ghost" disabled={busy} onClick={() => onDeleteSave(save)}>
-                              删除存档
+                            <button
+                              type="button"
+                              className="btn ghost"
+                              disabled={busy}
+                              onClick={() => onDeleteSave(save)}
+                              title="只从列表移除入口，房间与对话历史不会被删除"
+                            >
+                              从列表移除
                             </button>
                           </div>
                         </div>

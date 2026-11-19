@@ -39,7 +39,7 @@ npm run dev:server                # http://127.0.0.1:8787；不配 key 时用离
 npm run dev:web                   # http://127.0.0.1:5173（/api 代理到 8787）
 ```
 
-接入真实模型（自备 OpenAI 兼容端点；不要把 key 写进仓库）——标题页「接入真实模型」可直接填，也可用环境变量：
+接入真实模型（自备 OpenAI 兼容端点；不要把 key 写进仓库）——模型接入是**管理员操作**（服务端 `.env`，或带 `x-admin-token` 调 `/api/v1/settings/llm`）；玩家界面不再提供模型/key 入口。环境变量：
 
 ```bash
 export GALGAME_LLM_BASE_URL=https://.../v1
@@ -55,6 +55,16 @@ export GALGAME_AUDIT_BASE_URL=https://.../v1
 export GALGAME_AUDIT_MODEL=<模型名>
 export GALGAME_AUDIT_API_KEY=...
 ```
+
+### 用户系统 / 本地开发（3.4.0）
+
+公开 demo 用「邀请注册 + 用户名密码登录 + HttpOnly Cookie 会话」。本地开发两种进入方式：
+
+- **访客进入**：`GALGAME_AUTH_REQUIRED=0`（默认）时，可直接以访客进入。退出后再次点击访客入口，同一浏览器会继续使用原访客存档。
+- **完整注册**：启动服务端前设置 `GALGAME_AUTH_REQUIRED=1`、`GALGAME_INVITE_CODE=<邀请码>` 和 `GALGAME_PUBLIC_ORIGIN=http://127.0.0.1:5173`。Origin 必须与浏览器地址栏的协议、主机和端口完全一致。注册页填写邀请码（共享码可重复用，适合组内测试）。部署时将 Origin 改为实际访问地址，并在可信反向代理后启用 `GALGAME_TRUST_PROXY=1`。
+- **管理员 / 一次性邀请**：直接运行 Node 服务时，停服后在同一工作目录用与服务端相同的 `GALGAME_DATA_DIR` 执行 `GALGAME_ADMIN_PASSWORD=<密码> npx tsx scripts/admin-init.ts <用户名>`。Docker 部署按容器步骤初始化；已有账号提权需用该账号当前密码。[管理端点](docs/03-接口总表.md) · [Docker 初始化](deploy/README.md#初始化管理员)
+
+账号数据在 `data/auth/auth.json`（单进程串行写，损坏 fail-fast 不覆盖）；登录态只在 Cookie，清 localStorage 不影响账号。
 
 验证命令（成功时退出码 0；用例数、契约项数等随分支变化的统计见 [MEMORY.md](MEMORY.md) §0 快照，不要手抄进文档）：
 
@@ -91,7 +101,7 @@ npm run replay -- --file data/rooms/<room>.jsonl   # 回放事件日志，查 se
 - **单人单房可玩**；联机 WS、房间回收、`Last-Event-ID` 续传协议已在 [docs/04-联机与多Agent.md](docs/04-联机与多Agent.md)，代码未落地。
 - **阶段**：夜间 tick/密谋、导演真调 LLM、记忆压缩后台调度、canonize 定时任务尚未实现（M1+）。
 - **审核**：审核模型必须独立于叙事模型（不同模型/端点），代码里无默认模型名；缺配置即放行并告警。
-- **契约**：接口名/op/事件/错误码只在 [docs/03-接口总表.md](docs/03-接口总表.md)；改语义先改 03 并 bump 版本，再改代码。12 个 op 是闭集。
+- **契约**：接口名/op/事件/错误码只在 [docs/03-接口总表.md](docs/03-接口总表.md)；改语义先改 03 并 bump 版本，再改代码。13 个 op 是闭集（`dev/v2` 起含第 13 个 `msg.send`，对应 CONTRACT 3.6.0 minor）。
 - **权限角色**：`packages/engine` 是引擎核心——**引擎改动需项目所有者批准**，不能自行修改；`content/canon/**` 与 `docs/v1/**` 只读。完整权限分级与 AI 协作规则见 [AGENTS.md §3](AGENTS.md)。
 - **部署**：当前仅支持单实例；多实例/多副本禁止共同写同一 `data/` 目录，备份/升级需停写窗口，运维检查清单见 [docs/10-部署与一致性边界.md](docs/10-部署与一致性边界.md)（issue #40）。
 - **已知临时债**：前端图鉴/开局数据仍有 issue #3 的临时债，下次涉及前端/图鉴的合并前收口（详见 [MEMORY.md](MEMORY.md) §3.3）。

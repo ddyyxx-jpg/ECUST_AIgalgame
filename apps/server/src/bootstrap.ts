@@ -24,6 +24,8 @@ import {
 } from "../../../packages/engine/src/index.ts";
 import { MockLlm, OpenAiCompatClient } from "../../../packages/llm/src/index.ts";
 import { CanonizeJob, worldRoomId } from "../../../packages/engine/src/index.ts";
+import { GossipAgent, GossipHost, MessageIndex, TalkBudget, loadGossipPolicy, loadConversationPolicy } from "../../../packages/engine/src/v2/index.ts";
+import { DEFAULT_CONVERSATION_POLICY } from "../../../packages/shared/src/index.ts";
 import type { ServerConfig } from "./config.ts";
 import { hasAudit, hasCanonize, hasLlm } from "./config.ts";
 import { DenyAllJudge, LlmCanonizeJudge } from "./canonize.ts";
@@ -32,6 +34,11 @@ import { SaveIndex } from "./saves.ts";
 import { TurnHistory, withTurnRecording } from "./turn-history.ts";
 import { LlmAudit } from "./audit.ts";
 import { MapService } from "./map.ts";
+import { AuthStore } from "./auth-store.ts";
+import { SessionStore } from "./sessions.ts";
+import { AuthService } from "./auth.ts";
+import { TurnLedger } from "./quota.ts";
+import { AdminLog } from "./admin-log.ts";
 import { loadSceneDescs, offlineNarrative } from "./offline-narrator.ts";
 import { LlmSwitch } from "./llm-switch.ts";
 import { LlmSettings, loadPersistedLlmSettings } from "./settings.ts";
@@ -80,6 +87,12 @@ export type App = AppDeps & {
   history: TurnHistory;
   /** 续玩（issue #7）：账号维度的存档索引 */
   saves: SaveIndex;
+  /** 简易用户系统：账号库 + 会话（HTTP 层用） */
+  auth: AuthService;
+  /** 行动额度账本（收敛稿 B1） */
+  ledger: TurnLedger;
+  /** 管理操作日志 */
+  adminLog: AdminLog;
 };
 
 export async function createApp(cfg: ServerConfig): Promise<App> {
@@ -214,6 +227,27 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   const dataRoot = path.resolve(cfg.dataDir);
   const history = new TurnHistory(path.join(dataRoot, "history"));
   const saves = new SaveIndex(path.join(dataRoot, "users"));
+  const users = new AuthStore(path.join(dataRoot, "auth", "auth.json"));
+  await users.load();
+  const sessions = new SessionStore((cfg.sessionTtlDays ?? 7) * 24 * 60 * 60 * 1000);
+  const auth = new AuthService({
+    store: users,
+    sessions,
+    envCode: cfg.inviteCode ?? "",
+    required: cfg.authRequired ?? false,
+    secureCookies: cfg.secureCookies ?? false,
+    ttlDays: cfg.sessionTtlDays ?? 7,
+    resetTtlMs: (cfg.resetTtlMin ?? 15) * 60_000,
+  });
+  const ledger = new TurnLedger(path.join(dataRoot, "auth", "ledger.jsonl"));
+  await ledger.load();
+  const adminLog = new AdminLog(path.join(dataRoot, "auth", "admin-actions.jsonl"));
+  if (auth.required && !cfg.inviteCode) {
+    console.warn("[auth] GALGAME_AUTH_REQUIRED=1 但未配置 GALGAME_INVITE_CODE：注册仅接受管理员签发的一次性邀请");
+  }
+  if (auth.required && !cfg.publicOrigin) {
+    console.warn("[auth] GALGAME_AUTH_REQUIRED=1 但未配置 GALGAME_PUBLIC_ORIGIN：Cookie 写请求的 CSRF Origin 校验将拒绝缺失 Origin 的请求");
+  }
   const rawTurn = new DefaultTurn({ store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions });
   const turn = withTurnRecording(rawTurn, { history, saves, store, now });
 
@@ -296,6 +330,40 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   await store.load(worldRoom);
   memory.rebuild(worldRoom, await store.events(worldRoom, 0));
 
+
+  // ---------------------------------------------------------------- dev/v2 微信私信宿主
+  const messageIndex = new MessageIndex();
+  for (const roomId of await store.listRooms()) {
+    messageIndex.rebuild(roomId, await store.events(roomId, 0));
+  }
+  const contentRoot = path.resolve(cfg.contentDir);
+  const gossipPolicy = await loadGossipPolicy(path.join(contentRoot, "v2", "gossip-policy.json"));
+  const conversationPolicy = await loadConversationPolicy(path.join(contentRoot, "v2", "conversation-policy.json"));
+  const talkBudget = new TalkBudget(conversationPolicy, now);
+  const gossipAgent = new GossipAgent({ llm, policy: gossipPolicy, conversation: conversationPolicy });
+  const gossip = new GossipHost({
+    store, arbiter, messages: messageIndex, budget: talkBudget, agent: gossipAgent,
+    policy: gossipPolicy, conversation: conversationPolicy, now,
+    audit, auditPolicy, memory,
+  });
+  // 后台波次：玩家离线也能互相回消息。unref + try/catch，失败等下一轮（仿 canonize 补扫）
+  const gossipScanMs = Number(process.env.GALGAME_GOSSIP_SCAN_MS ?? 30_000);
+  if (gossipScanMs > 0) {
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          for (const roomId of await store.listRooms()) {
+            if (roomId === worldRoom) continue;
+            await gossip.step(roomId);
+          }
+        } catch (e) {
+          console.warn("[gossip] 定时波次失败：", e instanceof Error ? e.message : e);
+        }
+      })();
+    }, gossipScanMs);
+    timer.unref?.();
+  }
+
   const map = new MapService({
     store,
     turn,
@@ -320,6 +388,14 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     adminToken: cfg.adminToken,
     history,
     saves,
+    auth,
+    ledger,
+    adminLog,
+    gossip: {
+      send: (roomId, from, to, content, opts) => gossip.send(roomId, from, to, content, opts),
+      inbox: (roomId, to) => messageIndex.inbox(roomId, to),
+      subscribe: (roomId, viewer, cb) => gossip.subscribe(roomId, viewer, cb),
+    },
     turn,
     map,
     settings,
@@ -328,6 +404,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     appearance: appearanceById(scenarios),
     trustUserHeader: cfg.trustUserHeader,
     devUser: cfg.devUser,
+publicOrigin: cfg.publicOrigin,
     /** 解锁"玩家知道了这些 NPC 的名字"（由 narrative 里对方自报姓名触发，见 name-unlock.ts） */
     async learnNpcNames(roomId, npcIds) {
       if (npcIds.length === 0) return;

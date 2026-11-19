@@ -4,23 +4,10 @@ import { draftStatusLabel, formatTime } from "./ui.ts";
 interface Props {
   draft: SceneDraft;
   anchorName: string;
-  disabled: boolean;
-  admin: boolean;
-  onReview?: (action: "approve" | "reject") => void;
-  onPublish?: (action: "approve" | "reject") => void;
-  onRetry?: () => void;
 }
 
-/** 草案卡片：状态 + 生成预览 + 按状态机显示管理员按钮（docs/06 §5） */
-export default function DraftCard({
-  draft,
-  anchorName,
-  disabled,
-  admin,
-  onReview,
-  onPublish,
-  onRetry,
-}: Props) {
+/** 草案卡片（玩家侧）：状态 + 生成预览；审核/发布操作只在服务端管理端 */
+export default function DraftCard({ draft, anchorName }: Props) {
   const generated = draft.generated;
   return (
     <article className="draft">
@@ -63,47 +50,6 @@ export default function DraftCard({
               ))}
             </div>
           ))}
-        </div>
-      )}
-      {admin && (
-        <div className="draft-actions">
-          {draft.status === "pending_review" && onReview && (
-            <>
-              <button className="btn primary" disabled={disabled} onClick={() => onReview("approve")}>
-                通过
-              </button>
-              <button className="btn danger" disabled={disabled} onClick={() => onReview("reject")}>
-                拒绝
-              </button>
-            </>
-          )}
-          {draft.status === "approved" && (
-            <>
-              {onRetry && (
-                <button className="btn" disabled={disabled} onClick={onRetry}>
-                  重试生成
-                </button>
-              )}
-              {onPublish && (
-                <button className="btn danger" disabled={disabled} onClick={() => onPublish("reject")}>
-                  拒绝
-                </button>
-              )}
-            </>
-          )}
-          {draft.status === "generated_pending_review" && onPublish && (
-            <>
-              <button className="btn primary" disabled={disabled} onClick={() => onPublish("approve")}>
-                发布
-              </button>
-              <button className="btn danger" disabled={disabled} onClick={() => onPublish("reject")}>
-                拒绝
-              </button>
-            </>
-          )}
-          {draft.status === "generating" && <span className="muted">AI 生成中…</span>}
-          {draft.status === "published" && <span className="muted">已发布</span>}
-          {draft.status === "rejected" && <span className="muted">已拒绝</span>}
         </div>
       )}
       <div className="muted history">
