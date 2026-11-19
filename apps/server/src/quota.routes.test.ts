@@ -3,6 +3,7 @@
  * 提交结案、重复逻辑 ID 幂等、行动核对端点与历史对账。断言状态码/错误码/结构，不断言文案。
  */
 import { describe, expect, it } from "vitest";
+import { mkdir } from "node:fs/promises";
 import Fastify from "fastify";
 import { tempDir } from "@galgame/testkit";
 import { createApp } from "./bootstrap.ts";
@@ -208,6 +209,35 @@ describe("行动核对端点", () => {
     await app.close();
   });
 
+  it("人工结案未记录 turnId 时，核对从本账号、角色和逻辑 ID 匹配的历史补齐", async () => {
+    const { app, deps, cookie, roomId, actorId } = await setup();
+    try {
+      const me = await app.inject({ url: "/api/v1/auth/me", headers: { cookie } });
+      const { userId } = me.json().user as { userId: string };
+      const scope = { userId, roomId, clientTurnId: "c1" };
+      deps.ledger.reserve({ ...scope, actorId, dailyLimit: null, actionsEnabled: true });
+      deps.ledger.transition(scope, "unconfirmed");
+      for await (const event of deps.turn.run({ ...scope, actorId, input: "你好" })) {
+        if (event.type === "turn.commit") break;
+      }
+      const [history] = await deps.history.readAll(roomId);
+
+      const resolved = await app.inject({
+        method: "POST", url: "/api/v1/admin/quota/c1/resolve", headers: { ...ADMIN, ...ORIGIN },
+        payload: { resolution: "committed", committedSeq: history.committedSeq },
+      });
+      expect(resolved.statusCode).toBe(200);
+      expect(resolved.json().entry.turnId).toBeUndefined();
+
+      const status = await app.inject({ url: `/api/v1/rooms/${roomId}/turns/c1`, headers: { cookie } });
+      expect(status.statusCode).toBe(200);
+      expect(status.json()).toMatchObject({ state: "committed", turnId: history.turnId, committedSeq: history.committedSeq });
+      expect(deps.ledger.get(scope)?.turnId).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("自动对账写盘失败 → 503 E_STORE_FAULT，不伪装成待核对", async () => {
     const { app, deps, cookie, roomId, turn } = await setup();
     await turn("c1");
@@ -219,6 +249,25 @@ describe("行动核对端点", () => {
     expect(res.statusCode).toBe(503);
     expect((res.json() as { code: string }).code).toBe("E_STORE_FAULT");
     await app.close();
+  });
+
+  it("自动对账读取历史失败 → 503，账本仍待核对", async () => {
+    const { app, deps, cookie, roomId, actorId } = await setup();
+    try {
+      const me = await app.inject({ url: "/api/v1/auth/me", headers: { cookie } });
+      const { userId } = me.json().user;
+      const scope = { userId, roomId, clientTurnId: "c1" };
+      deps.ledger.reserve({ ...scope, actorId, dailyLimit: null, actionsEnabled: true });
+      deps.ledger.transition(scope, "unconfirmed");
+      await mkdir(deps.history.fileFor(roomId), { recursive: true });
+      const response = await app.inject({ url: `/api/v1/rooms/${roomId}/turns/c1`, headers: { cookie } });
+      expect(response.statusCode).toBe(503);
+      expect(response.json().code).toBe("E_STORE_FAULT");
+      expect(deps.ledger.get(scope)?.state).toBe("unconfirmed");
+      await deps.ledger.flush();
+    } finally {
+      await app.close();
+    }
   });
 
   it("对账只认本账号+角色的历史：同房间同名 ID 不被他人回合冒充", async () => {

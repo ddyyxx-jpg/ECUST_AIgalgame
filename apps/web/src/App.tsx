@@ -41,12 +41,12 @@ const scenarioKey = (roomId: string) => `ecust.galgame.scenario.${roomId}`;
 let lineId = 0;
 
 interface EarlierState {
-  firstSeq: number | null;
+  before: string | number | null;
   hasEarlier: boolean;
   loading: boolean;
 }
 
-const NO_EARLIER: EarlierState = { firstSeq: null, hasEarlier: false, loading: false };
+const NO_EARLIER: EarlierState = { before: null, hasEarlier: false, loading: false };
 
 export default function App() {
   const { user, authReady, authStatus, notice, onAuthed, enterVisitor, logout: authLogout, expireSession } = useAuth();
@@ -228,13 +228,14 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
         sc = opts.scenarioId ? scenarios.find((s) => s.id === opts.scenarioId) ?? fallback : fallback;
       }
 
-      // 历史 = 已提交回合的投影：默认恢复最新片段（服务端 tail 语义）；
-      // 读不到（老房间/网络异常）退回序章，但 401 必须上抛走会话失效。
+      // 续玩时读历史失败则留在标题页，保留存档供玩家重试。
       let page: HistoryPage = { history: [], lastCommittedSeq: 0, hasEarlier: false };
       try {
         page = await fetchHistory(id);
       } catch (e) {
+        if (!current()) return;
         if (isUnauthorized(e)) throw e;
+        if (opts.resumed) throw new Error("对话历史暂不可用，请稍后重试", { cause: e });
       }
       if (!current()) return;
       const tw = getTw();
@@ -249,7 +250,7 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
         tw.enqueue(restored.opening);
       }
 
-      setEarlier({ firstSeq: earlierCursor(page.history), hasEarlier: page.hasEarlier, loading: false });
+      setEarlier({ before: page.earlierCursor ?? earlierCursor(page.history), hasEarlier: page.hasEarlier, loading: false });
       setScenario(sc);
       setState(snapshot);
       setActorId(resolvedActorId);
@@ -483,16 +484,19 @@ await runTurn(
           pendingTurn.current = null;
           setUnconfirmed(null);
           setErrRetryable(false);
-          // 断流时没收到的叙事/facts：按 committedSeq 从历史补齐，只追加差集
-          if (status.committedSeq !== undefined) {
+          // 世界序号可能被多个回合共用，按回合与角色补齐断流前未收到的内容。
+          if (status.turnId) {
+            const turnId = status.turnId;
             try {
-              const page = await fetchHistory(roomId, { fromTurn: String(status.committedSeq - 1), limit: 1 });
+              const page = await fetchHistory(roomId, { match: { turnId, actorId } });
               if (!current()) return;
-              const line = page.history.find((h) => h.committedSeq === status.committedSeq);
+              const line = page.history.find((h) => h.turnId === turnId && h.actorId === actorId);
               if (line) {
                 const missing = missingTurnContent(line, received);
                 if (missing.narrative) push("narrative", missing.narrative);
                 for (const fact of missing.facts) push("fact", fact);
+              } else {
+                push("system", "该行动已提交，暂未找到可恢复的回合叙事。");
               }
             } catch (e) {
               if (!current()) return;
@@ -535,7 +539,7 @@ await runTurn(
         if (current()) setBusy(false);
       }
     },
-    [roomId, dispatchTurn, push, refreshState, fail],
+    [roomId, actorId, dispatchTurn, push, refreshState, fail],
   );
 
   /** 重试上一回合：失败（尤其 E_LLM_FORMAT）时对话区出现按钮，不自动重试 */
@@ -562,18 +566,18 @@ await runTurn(
     void dispatchTurn(last.text, last.target, false);
   }, [dispatchTurn, reconcileThenRetry, unconfirmed, state, view.position?.locId]);
 
-  /** 加载更早的历史：before = 已加载段第一行的 committedSeq，前插到对话流顶部 */
+  /** 使用服务端页首游标加载更早的历史，前插到对话流顶部。 */
   const loadEarlier = useCallback(async () => {
-    if (!roomId || earlier.loading || !earlier.hasEarlier || earlier.firstSeq === null) return;
+    if (!roomId || earlier.loading || !earlier.hasEarlier || earlier.before === null) return;
     const token = scopeRef.current.current();
-    const before = earlier.firstSeq;
+    const before = earlier.before;
     setEarlier((s) => ({ ...s, loading: true }));
     try {
       const page = await fetchHistory(roomId, { before });
       if (!scopeRef.current.isCurrent(token.version)) return;
       const older = historyToLines(page.history, () => ++lineId);
       setLines((prev) => [...older, ...prev]);
-      setEarlier({ firstSeq: earlierCursor(page.history) ?? before, hasEarlier: page.hasEarlier, loading: false });
+      setEarlier({ before: page.earlierCursor ?? earlierCursor(page.history), hasEarlier: page.hasEarlier, loading: false });
     } catch (e) {
       if (!scopeRef.current.isCurrent(token.version)) return;
       setEarlier((s) => ({ ...s, loading: false }));

@@ -99,10 +99,11 @@ export async function deleteSave(roomId: string): Promise<boolean> {
 }
 
 export interface HistoryCursor {
+  match?: Pick<HistoryLine, "turnId" | "actorId">;
   /** turnId 或 committedSeq：向前翻页 */
   fromTurn?: string;
-  /** committedSeq（不含）：加载更早的一段 */
-  before?: number;
+  /** 服务端记录游标或旧版 committedSeq：加载更早的一段 */
+  before?: string | number;
   limit?: number;
 }
 
@@ -110,11 +111,17 @@ export interface HistoryPage {
   history: HistoryLine[];
   lastCommittedSeq: number;
   hasEarlier: boolean;
+  earlierCursor?: string;
 }
 
 /** 游标 → query string（纯函数）：无游标 = 服务端返回最近 limit 条（tail） */
 export function buildHistoryQuery(cursor: HistoryCursor = {}): string {
   const q = new URLSearchParams({ limit: String(cursor.limit ?? 200) });
+  if (cursor.match) {
+    q.set("turnId", cursor.match.turnId);
+    q.set("actorId", cursor.match.actorId);
+    return q.toString();
+  }
   if (cursor.fromTurn) q.set("fromTurn", cursor.fromTurn);
   if (cursor.before !== undefined) q.set("before", String(cursor.before));
   return q.toString();
@@ -130,6 +137,7 @@ export async function fetchHistory(roomId: string, cursor: HistoryCursor = {}): 
     history: Array.isArray(d.history) ? d.history : [],
     lastCommittedSeq: typeof d.lastCommittedSeq === "number" ? d.lastCommittedSeq : 0,
     hasEarlier: d.hasEarlier === true,
+    earlierCursor: typeof d.earlierCursor === "string" ? d.earlierCursor : undefined,
   };
 }
 

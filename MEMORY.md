@@ -3,7 +3,7 @@
 > **用途**：让新会话 / 新协作者在 5 分钟内恢复上下文——代码架构、工程规范、工程进度、各分支的关键决策与遗留。
 > **维护规则**：见 `AGENTS.md` §11（读取时机、按分支写入、提交/审阅合并时的写法）。
 > **定位**：活文档，只追加、不覆盖；不是契约。与 `docs/03-接口总表.md` 冲突时以 `docs/03` 为准。
-> **最后更新**：2026-11-18（`v0.5.4` 已发；main 含 PR #52/#55/#56；CONTRACT 3.4.1；本分支已与 upstream/main `2748be8` 合并，契约顺延 3.5.0）
+> **最后更新**：2026-11-18（未授权合并 `8784b3b` 已按打回意见回滚，PR #71 落 main；修复版重提为 PR #72（head `13d85f9`），本分支 CONTRACT 3.5.0）
 
 ---
 
@@ -11,12 +11,12 @@
 
 | 项 | 值 |
 |---|---|
-| 主分支 | `main`（sha 见 `git rev-parse --short main`；PR #4/#5、PR #9–#13（`v0.5.0`）、PR #22–#24（`v0.5.1` @ `42690c9`）、PR #43–#45（`v0.5.2`）、PR #50（Turn 幂等 `2c51028`，`v0.5.3`）、PR #52（NPC 认识与名字解锁 `f328bc3`，`v0.5.4`）、PR #55（地图出站脱敏 `4c85797`）、PR #56（档案下发收窄 `2547d73`）依次合入） |
+| 主分支 | `main`（sha 见 `git rev-parse --short main`；PR #4/#5、PR #9–#13（`v0.5.0`）、PR #22–#24（`v0.5.1` @ `42690c9`）、PR #43–#45（`v0.5.2`）、PR #50（Turn 幂等 `2c51028`，`v0.5.3`）、PR #52（NPC 认识与名字解锁 `f328bc3`，`v0.5.4`）、PR #55（地图出站脱敏 `4c85797`）、PR #56（档案下发收窄 `2547d73`）、PR #71（回滚未授权合并 `8784b3b` → `35e0c57`）依次合入） |
 | `CONTRACT_VERSION` | **本分支 3.5.0（main 为 3.4.1）**（3.2.0 minor：只增端点/类型/可选字段；3.2.1 patch：三条 issue 修复；3.3.0 minor：房间 404 拒绝路径 + tick 单批原子 + 记忆内部修复，新增 `E_ROOM_NOT_FOUND`；3.4.0 minor：NPC 认识/名字解锁（`TurnRequest.targetNpcId?`、`knows_name`、占位名视图、`/state`+`/history` 脱敏）；3.4.1 patch：#53 地图出站脱敏 + #54 档案下发收窄（派生视图，不进 schema）；**3.5.0 minor（本分支）：简易用户系统/管理端点/额度与行动核对 + 房间授权 gate（#33）**；`SCHEMA_VERSION 2`，`API_VERSION 2`，`WORLD_MEM_VERSION 1`） |
 | `PROMPT_VERSION` | **2026-11-18.1**（S1 增「只有在场者能说话/行动」；多 NPC 记忆按人分段） |
-| 测试 | **60 文件 / 418 用例全过**（含上游 NPC 认识/脱敏/引入模块用例，及本分支 auth/admin/quota 用例）；`check:contract` **8 项全过**（3.5.0，错误码 35/35）；`typecheck` 0 错；`build:web` 293.44 kB / gzip 93.58 kB |
+| 测试 | **63 文件 / 441 用例全过**（含上游 NPC 认识/脱敏/引入模块用例，及本分支 auth/admin/quota 用例；main 回滚后为 49 文件/332）；`check:contract` **8 项全过**（3.5.0，错误码 35/35）；`typecheck` 0 错；`build:web` 293.69 kB / gzip 93.64 kB |
 | 已具备 | M0 骨架、地图模块（旅行/场景/草案双审）、引擎 3.0.0（原子结算 + 持久化闭环）、内容审核层、现实锚定层、前端体验与运行时模型接入、记忆子系统 3.1.0（P0–P4）、地图交互打磨 + 图鉴 registry 收口（PR #5）、**图鉴 GalleryView/scenarios 数据化（PR #12）、存档索引/回合历史/会话恢复 MVP（PR #13）、store 鲁棒性（PR #9）、整回合预算显式化（PR #11）、文档职责整理（PR #10）、多 NPC 各自记忆注入与工作记忆滚动（PR #24）、LLM 格式容错/自动重问（PR #23）、点不在场 NPC 隔离与可重试错误重试（PR #22）、房间入口 404 守卫 + tick 单批原子（PR #44）、部署一致性边界文档（PR #43）、记忆可信边界/repair 补写/compact 接线（PR #45）、Turn 幂等（同 `clientTurnId` 只结算一次，进程内；PR #50）、NPC 认识与名字解锁（陌生人占位名/问名字解锁/图鉴同步；PR #52）、地图出站脱敏（#53，PR #55）、`/scenarios` 公开字段收窄与气泡档案门控（#54，PR #56）** |
-| 下一步 | M1：单房单 NPC 完整玩法、夜间 tick/密谋编排；M2 模块宿主验收（`study` 只加目录）；issue #3 余项：`/state` 原始 attrs 过滤 + `self` 看自己口径；存档 MVP 后续：多槽/导出/跨设备、历史一次 200 行上限；PR #19（登录/部署）暂缓（用户 2026-11-18 决定暂不处理，保持 0.5 版本线）；后续：roomGate 存在性缓存、compact 非事件持久化的已知限制、Turn 幂等跨重启持久化（需 EventLog 变更）；#33 房间授权、#35 users.json 保护待做；认识机制后续：#53（`/map/travel`、`/map/tick` 响应 events 未脱敏）、#54（`/scenarios` 无条件下发 NPC 档案）；旧房间无 `knows_name` 需重认识（不迁移） |
+| 下一步 | M1：单房单 NPC 完整玩法、夜间 tick/密谋编排；M2 模块宿主验收（`study` 只加目录）；issue #3 余项：`/state` 原始 attrs 过滤 + `self` 看自己口径；存档 MVP 后续：多槽/导出/跨设备、历史一次 200 行上限；PR #19（登录/部署）已按复审要求回滚（PR #71），修复版重提为 **PR #72**（待复审）；后续：roomGate 存在性缓存、compact 非事件持久化的已知限制、Turn 幂等跨重启持久化（需 EventLog 变更）；#33 房间授权、#35 users.json 保护待做；认识机制后续：#53（`/map/travel`、`/map/tick` 响应 events 未脱敏）、#54（`/scenarios` 无条件下发 NPC 档案）；旧房间无 `knows_name` 需重认识（不迁移） |
 | 已知遗留 | 见 §3.3（均为 MINOR，不阻断当前 main） |
 
 ---
@@ -176,6 +176,8 @@
 - 2026-11-18 ｜ `fix/turn-idempotency-only` ｜ squash `2c51028` ｜ merge ｜ PR #50 squash 合入 main（39 文件/283 用例）；复审通过，P2 记录：失败路径 waiter 竞态、waiter 无超时、跨重启不幂等仅注释 ｜ issue #34 关闭 ｜ — ｜ 无
 
 ### main
+
+- 2026-11-18 ｜ main ｜ `35e0c57` ｜ merge ｜ 合并 PR #71（`revert/pr19-merge`，revert commit `cbf84f1`）：撤销 PR #19 未经复审的合并 `8784b3b`，main 回到 CONTRACT 3.4.1；修复版改由 PR #72 重新提交 ｜ 复审（ddyyxx-jpg 2026-11-18 14:49）明确要求先回滚再重提，用户「是的，回滚吧」授权 ｜ typecheck 0；49 文件/332 用例；check:contract 8/8（3.4.1） ｜ PR #72 待复审
 
 - 2026-11-18 ｜ main ｜ 本提交（tag `v0.5.4`） ｜ release ｜ `CONTRACT_VERSION 3.4.0 → 3.4.1`；CHANGELOG v0.5.4 定稿（PR #52/#55/#56）；docs/03 §10.19；MEMORY 快照/时间线/遗留/分支同步 ｜ 把 3.4.0（PR #52）与 #53/#54 的 security patch 收进同一个对外版本 ｜ tsc 0；47 文件/320 用例；8 项契约（3.4.1）；build 287.14 kB / gzip 91.02 kB ｜ #33/#35 仍暂缓
 - 2026-11-18 ｜ main ｜ `2547d73` ｜ merge（squash PR #56） ｜ `/scenarios` 收窄为 id/appearance；mutter 改由 `/gallery` met=true 下发；web 气泡从图鉴取（5 条测试） ｜ 全局公开端点不下发任何档案（已知也不带）；气泡由房间图鉴供给 ｜ tsc 0；46 文件/317 用例（合并 main 后 47/320）；8 项契约（3.4.0）；build 287.14 ｜ CampusMap 气泡刷新依赖重挂载（低优先）
@@ -366,6 +368,48 @@
 - 2026-11-18 ｜ feat/demo-multiuser ｜ `faad626` ｜ docs ｜ 已推送 origin feat/simple-auth（ff `f99b043..cf77479`）；PR #19 标题改为「简易用户系统 + 房间授权/行动额度（CONTRACT 3.5.0）」，正文补合并章节/418 用例/3.5.0 契约并回读 MERGEABLE；发布合并说明评论（issuecomment-6981800374，含 Qoder 徽章） ｜ 推送与 PR 更新获用户明确授权 ｜ headRefOid=cf77479、mergeable=MERGEABLE ｜ 本条回填 sha 后推送
 
 - 2026-11-18 ｜ feat/demo-multiuser ｜ `db969c9` ｜ fix ｜ 按 ddyyxx-jpg 打回意见（review 2026-11-18 14:49）修 4 项 P1 + 文档：① `admin-token.ts` 统一 sha256+`timingSafeEqual`；显式 `GALGAME_ADMIN_TOKEN` <16 字符或 <96 bit 拒绝启动；带令牌的失败按 IP 10 次/60s → 429 `E_RATE_LIMITED`+`Retry-After`，routes/room-guard/admin/canonize/stats 共用同一 gate，单请求 verdict 缓存防重复计数；② CSRF hook 移到 auth 路由注册之前，`/api/v1/auth/*` 写（register/login/logout/password/reset）也校 `Origin=GALGAME_PUBLIC_ORIGIN`；③ 账本 `append` 改 `open`+`writeFile`+`fsync`（`transitionDurable` 崩溃不丢最后一条），坏行跳过计数 + 启动 `[quota]` 告警，`/admin/quota` 增 `skippedLines`；④ `guardRoom`/`gallery`/`history` 的 snapshot 异常改 503 `E_STORE_FAULT` 不再报 404；deploy/README 补部署约束（会话内存重启重登/单进程单写者/额度 null=不限/token 不自动轮换/PUBLIC_ORIGIN/TRUST_PROXY），docs/03 §5.2.8/§5.2.9/§5.2.10/§10.20 同步 ｜ 拒绝把 `running` 等任意 snapshot 异常折叠为"房间不存在"（客户端会误清房间指针）；auth 写也做 Origin 校验以堵 login CSRF；令牌强度只在显式配置时强制（未配置仍旧每进程随机） ｜ typecheck 0；`npm test` **61 文件/429 用例全过**；`check:contract` 8/8（3.5.0，35/35 码）；`build:web` 293.44 kB / gzip 93.58 kB ｜ 未修：`App.tsx` 708 行拆分（超 300 行规约，建议单独 PR）；PR #19 已于 2026-11-18 14:42 被合并为 `8784b3b`，按打回意见需回滚该 merge 后重提 PR（属共享主线操作，待负责人授权）；本地提交未推送
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `cbf84f1` / merge `35e0c57` ｜ merge ｜ 按 ddyyxx-jpg 打回意见回滚未授权合并 `8784b3b`：从 upstream/main 建 `revert/pr19-merge`，`git revert -m 1` 生成 `cbf84f1`，PR #71 经用户授权后 merged（`35e0c57`，15:07Z）；main 恢复 CONTRACT 3.4.1 ｜ 复审要求「未经审阅的合并须先回滚再重提」，回滚保持 main 可发布状态；不动分支历史，修复版从新 main 重提 ｜ typecheck 0；`npm test` 49 文件/332 用例；check:contract 8/8（3.4.1） ｜ 修复版重提见下条
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `3dfcf43` → `13d85f9` ｜ merge ｜ 修复版重提：先合 upstream 回滚前 tip `3e13f3c`（2 条地图修复）得 `3dfcf43`，再合回滚后的 upstream/main（`35e0c57`）解冲突得 `13d85f9`——恢复 `3dfcf43` 的完整树（避免回滚的删除静默抹掉本分支文件），并 `git rm` 被回滚复活的 `apps/web/src/api-settings.ts`；建 PR #72，正文含 4 项 P1 修法/部署约束/验证输出/Qoder 徽章；PR #19 发布逐条回应（issuecomment-6982566446，含徽章） ｜ 回滚后的 main 与本分支 merge-base 在 `1e537ac`，直接解冲突会把上游删除应用到未改文件上，故以树为准；契约仍 3.5.0（只增端点/错误码） ｜ typecheck 0；`npm test` **63 文件/441 用例全过**；check:contract 8/8（3.5.0，35/35 码）；`build:web` 293.69 kB / gzip 93.64 kB；PR #72 回读 MERGEABLE/CLEAN（head `13d85f9`） ｜ 待上游复审；`App.tsx` 拆分仍后置（单独 PR）
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `13d85f9` ｜ review ｜ PR #72 建议打回：提交后姓名解锁失败会把已提交回合改为 failed（`routes.ts:525`）；半截账本尾行会吞掉下一条追加记录（`quota.ts:255`）；个人 null 额度被当成沿用默认值（`routes.ts:412`）；登录门和管理路由仍重复计算同次令牌失败（`admin.routes.ts:46`） ｜ 临时账本复验人工结案重启后退回 unconfirmed；本地注入验证历史已提交但 SSE 报错且账本为 failed，以及个人 null 遇全局 0 返回 429 ｜ typecheck 通过；63 文件/441 用例通过；契约 8/8（通过 Node 加载 tsx 执行）；Web 构建通过 ｜ 修复后补回归用例；结论仅记录在本地
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `974ab7d` ｜ fix ｜ 按 PR #72 复审修复 6 项：① `routes.ts` 收到 `turn.commit` 后姓名解锁/脱敏快照异常只告警，账本保持 committed，兜底异常不再送 retryable；② `quota.ts` 每次 append 前先写换行，加载/短写留下的半截尾行都不会吞掉下一条记录；③ 新增 `dailyLimitFor`（auth-store）统一解析，个人显式 `null`=不限、显式 `0` 覆盖全局 `null`，回合入口与管理列表共用；④ `admin.routes` 复用主路由请求级 verdict 缓存，同一请求只计一次令牌失败；⑤ `room-guard` 也复用该缓存，CSRF 钩子与房间写入口不再重复计数；⑥ 补 6 个回归用例，docs/03 §5.2.9/§5.2.10 同步 ｜ 提交态与响应生成解耦（已提交不可回退）；每条记录前先写换行，不删除运维可见的坏行计数；额度解析按"键存在"而非 `??`；令牌计数按请求而非按入口 ｜ typecheck 0；`npm test` **63 文件/447 用例全过**；check:contract 8/8（3.5.0，35/35 码）；build:web 293.69 kB / gzip 93.89 kB；PR #72 head `974ab7d` MERGEABLE/CLEAN ｜ 已推送 origin；MEMORY 本条按要求不提交；`App.tsx` 拆分仍后置（单独 PR）
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `dbfcd9c` ｜ review ｜ 本地复审仍建议暂缓合并；远端 PR #72 复核时仍为 `13d85f9` ｜ 上轮四个回归用例通过；P1 `quota.ts:261` 在进程内短写后未隔离尾行，临时账本模拟 reserved 部分写入后抛错，紧接着 running 确认写盘但下次加载无该条目；P2 `room-guard.ts:58` 房间写入口仍绕过 CSRF 钩子共用的令牌判定缓存 ｜ typecheck、63 文件/445 用例、契约 8/8（Node 加载 tsx）、Web 构建通过 ｜ 修复写失败后的尾行恢复，房间守卫复用令牌判定
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `974ab7d` ｜ review ｜ PR #72 最终复审通过，远端 head 与本地一致、与 base `35e0c57` 合并无冲突 ｜ 前两轮六个回归场景均通过；额外注入半行写入后抛错，后续 running 经 fsync 后重载为 unconfirmed，坏行单独计数；room-guard 与 CSRF 共用一次判定 ｜ typecheck、63 文件/447 用例、契约 8/8（Node 加载 tsx）、Web 构建通过 ｜ 非阻断：room-guard 的 429 仍缺契约承诺的 Retry-After（`room-guard.ts:63`）
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `974ab7d` ｜ review ｜ PR #72 独立复审改判为暂缓合并 ｜ P1 全局暂停仅拦 /turns，地图 tick 仍可推进时段，travel 仍结算回合且未记额度（`routes.ts:643-655`）；P2 关闭注册后在途请求可按哈希前旧设置创建账号（`auth-store.ts:238`）；P2 人工结案持久化失败仍报告成功，重载回到待核对（`quota.ts:230`） ｜ 主审用本地实际路由复现地图行为；子 Agent 用临时存储复现后两项 ｜ 统一暂停入口、在注册事务内检查最新开关、人工结案确认落盘后再成功返回
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `39fc9b8` ｜ fix ｜ 按 PR #72 第三轮复审修复 3 项：① `actionsEnabled=false` 时地图 `travel`/`tick`/`dialogue` 与回合入口一样 429，暂停期间不推进时段/不写历史；② 账号创建事务内复核最新 `doc.settings.registrationOpen`，哈希期间关闭注册不会再用旧开关建号；③ 人工结案先 `append` 落盘再更新内存，写失败 503 `E_STORE_FAULT` 且保持 `unconfirmed` 可重试；补 4 个回归用例，docs/03 §5.2.8/§5.2.10 同步 ｜ 地图写入口不能绕过全局暂停；注册开关以串行事务内最新状态为准；结案确认必须在持久化之后 ｜ typecheck 0；`npm test` **63 文件/451 用例全过**；check:contract 8/8（3.5.0，35/35 码）；build:web 293.69 kB / gzip 93.89 kB；PR #72 head `39fc9b8` MERGEABLE/CLEAN ｜ 已推送 origin；MEMORY 本条按要求不提交
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ `39fc9b8` ｜ review ｜ PR #72 暂缓合并：上一轮三项回归通过，但人工结案新增并发竞态（`quota.ts:221`） ｜ 临时账本并发提交 committed / failed，两个调用都返回成功，重载为 failed 且接受同一逻辑 ID 重试；须串行化同一条目的状态检查、落盘、发布，并覆盖历史自动对账 ｜ typecheck、63 文件/451 用例、契约 8/8（Node 加载 tsx）、Web 构建通过；模拟合并无冲突 ｜ 非阻断的 Retry-After 缺头仍可见
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `63b7f63` ｜ fix ｜ 按 PR #72 第四轮复审修复并发结案：`resolve` 的状态检查/落盘/内存更新放入同一串行队列，并发结案仅首个成功、其余 409 `E_ILLEGAL_OP`；新增 `reconcileCommitted` 让人工结案与历史自动对账共用状态规则（committed 幂等、failed 不被覆盖）；补并发单元/端点与对账规则 3 个回归用例，docs/03 §5.2.10 同步 ｜ 结案决策必须整体串行，append 队列只保证写入顺序不能保证读-判-写一致 ｜ typecheck 0；`npm test` **63 文件/454 用例全过**；check:contract 8/8（3.5.0，35/35 码）；build:web 293.69 kB / gzip 93.89 kB；PR #72 head `63b7f63` MERGEABLE/CLEAN ｜ 已推送 origin；MEMORY 本条按要求不提交
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ `63b7f63` ｜ review ｜ PR #72 并发结案修复复审通过；远端与本地一致，模拟合并无冲突 ｜ 两个并发人工结案只有一个 200，另一请求为 409；临时账本双顺序验证人工结案和历史自动对账共用队列，重载结果与首个落盘结论一致，已提交后不接受同一逻辑 ID 重试 ｜ typecheck、63 文件/454 用例、契约 8/8（Node 加载 tsx）、Web 构建通过 ｜ 已知非阻断：房间守卫 429 缺 Retry-After
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ `63b7f63` ｜ review ｜ PR #72 第二次独立复审：并发人工结案的 P1 已修，另发现两个 P2 ｜ 自动对账忽略落盘失败（`routes.ts:578`），本地 HTTP 注入及临时账本均验证有提交历史时仍返回 200/unconfirmed；断流核对到 committed 只刷新状态、不补历史叙事（`App.tsx:458`，代码路径确认） ｜ 子 Agent 聚焦 7 文件/76 用例、typecheck、契约 8/8 通过；主审另行复现对账故障 ｜ 可复用人工结案的 503 处理，回合确认后按提交游标补齐对话
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ `63b7f63` ｜ review ｜ 独立复审补充 P2：历史在同房间按裸 turnId 去重（`turn-history.ts:149`），与引擎按房间/角色/clientTurnId 执行的作用域不一致 ｜ 子 Agent 临时历史验证两个角色使用同一 clientTurnId 时只保留首条，第二条无法续玩或用于重启对账 ｜ 建议历史去重与回合执行同作用域，补双角色同 ID 测试
+
+- 2026-11-18 ｜ feat/demo-multiuser ｜ `cc6ca48` ｜ fix ｜ 按 PR #72 第五轮复审修复 3 项 P2：① 历史去重改为房间内 `actorId+turnId`，与引擎幂等作用域一致，同房不同角色同 ID 两条历史都保留；② 历史自动对账 `E_STORE_FAULT` 映射 503，不再返回 200 unconfirmed；③ 前端核对到 committed 后按 `committedSeq` 拉历史，只补断流前未收到的叙事/facts；补 5 个回归用例，docs/03 §5.2.9/§5.2.10 同步 ｜ 历史去重必须与引擎同一作用域；对账写失败要可区分；断流补齐要按已收前缀做差集 ｜ typecheck 0；`npm test` **63 文件/459 用例全过**；check:contract 8/8（3.5.0，35/35 码）；build:web 294.89 kB / gzip 94.34 kB ｜ 本地提交未推送；待独立子 Agent 全量审查；MEMORY 本条按要求不提交
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ `2e1b86e` / `84f2704` ｜ review ｜ 独立子 Agent 全量审查 `35e0c57...HEAD`：无 P0/P1，有条件通过；合并前建议修 P2-1 `/me` 未过房间授权、P2-2 存储故障 200/500 且回显路径、P2-3 历史半截尾行；P2-4 `reserve` 只认 running、P2-5 token-only 房间入口、P2-6 登录文案、P2-7 玩家草案入口、P2-8 admin-init 裸提权、P2-9 404 重发、P2-10 MapPanel scope、P2-11 Retry-After 列为后置 ｜ 本分支只读审查，未改文件；按审查修复 P2-1/2/3/5/6/8/11 与两条审查回归（safe 存储故障/保留 Fastify 4xx），并补 8 个回归用例 ｜ typecheck 0；`npm test` **63 文件/467 用例全过**；check:contract 8/8（3.5.0，35/35 码）；build:web 295.03 kB / gzip 94.37 kB；本地 head `84f2704` ｜ 已推送 origin（PR #72 head `84f2704`，MERGEABLE/CLEAN），PR 描述/评论已更新；P2-4/7/9/10 后置；MEMORY 本条不提交
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ `84f2704` ｜ review ｜ 复审 PR #72：历史按角色去重及自动对账写盘失败返回 503 已通过回归；断流恢复仍建议修复后合并 ｜ P2 `App.tsx:489` 仅按 committedSeq 取首行，实际路由复现 3 个 turnId 均 seq=49、恢复第三条却返回第一条；P2 `turn-history.ts:94` 吞非 ENOENT 读取失败，实际将临时历史文件替换为目录后 GET history 仍 200 空列表 ｜ typecheck、63 文件/467 用例、契约 8/8（Node 加载 tsx）、Web 构建通过，模拟合并无冲突 ｜ 恢复应按回合标识与角色精确取历史；仅缺文件作为空历史，其余 I/O 故障返回 503
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ 本地未提交 ｜ fix ｜ 修复 PR #72 最新复审两项 P2：断流恢复按 `turnId + actorId` 精确查询历史，避免共享提交序号时取错回合；历史读取仅 ENOENT 为空，其他故障在历史和对账端点返回脱敏的 503 `E_STORE_FAULT` ｜ docs/03 §5.2.7/§5.2.10、docs/09 同步；可选查询参数并入本 PR 尚未发布的 3.5.0 ｜ typecheck、63 文件/471 用例、契约 8/8（Node 加载 tsx）、Web 构建及 diff 检查通过 ｜ 本地修改未推送
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ 本地未提交 ｜ review ｜ 独立审查两项本地修复，建议补齐人工结案路径 ｜ P2 `App.tsx:487` 只在状态含 turnId 时补叙事；临时账本实测重启后管理员按 committedSeq 人工结案，状态无 turnId 但历史有该回合；应从已匹配的账号/角色/逻辑 ID 获取精确身份 ｜ 子 Agent 的 35 项聚焦用例、typecheck、契约 8/8、git diff --check 通过，主审独立复现人工结案场景 ｜ 业务补丁保持未提交
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ 本地未提交 ｜ fix ｜ 人工结案已提交但缺 turnId 时，从同账号/角色/clientTurnId 的历史补齐行动核对响应；精确历史查询保留调用方提供的标识并继续脱敏叙事 ｜ 补人工结案与历史标识脱敏两项路由回归；docs/03 §5.2.7/§5.2.10 同步 ｜ typecheck、63 文件/473 用例、契约 8/8（Node 加载 tsx）、Web 构建、diff 检查通过 ｜ 未提交或推送，继续全量独立审查
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ `84f2704` + 本地补丁 ｜ review ｜ 从 `35e0c57` 全量独立审查：本地人工结案与精确历史修复通过，无新增 P0/P1；建议先修两个 P2 ｜ `turn-history.ts:124` 分页只用 seq，临时历史 201 条同 seq 实测少一条且 hasEarlier=false；`App.tsx:234` 续玩首屏吞掉历史 503 后展示序章；P3 `README.md:64` 本地强制登录缺 Origin 配置，实测未配置注册 403 ｜ 子 Agent 7 文件/76 项定向测试通过，主审另复现分页与本地注册配置路径；未跑浏览器、容器与真实反代 ｜ 审查包含本地未提交改动
+
+- 2026-11-19 ｜ feat/demo-multiuser ｜ 本提交 ｜ fix ｜ 修复 PR #72 全量复审项：历史按页首记录游标翻页，旧数字游标仍支持；续玩遇历史故障保留标题页与重试；README 补本地强制登录的 Origin ｜ 连同同序号精确恢复、人工结案补回合标识和历史读取 503 一并交付；docs/03 §5.2.7/§5.2.10、docs/09 同步，仍属未发布的 3.5.0 ｜ typecheck、63 文件/475 用例、契约 8/8（Node 加载 tsx）、Web 构建、diff 检查通过；浏览器验证首次 503 留标题页、重试恢复历史 ｜ 目标为 PR #72 的源分支
 
 ### fix/scene-isolation-web（issue #21-1 + #21-3，已 squash 合并 `cad0cf1`）
 

@@ -65,26 +65,36 @@ export function registerResumeRoutes(app: FastifyInstance, deps: AppDeps, helper
       return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "房间状态读取失败，请稍后重试" });
     }
 
-    const query = req.query as { fromTurn?: string; before?: string; limit?: string };
+    const query = req.query as { fromTurn?: string; before?: string; limit?: string; turnId?: unknown; actorId?: unknown };
+    const { turnId, actorId } = query;
+    const exact = turnId !== undefined || actorId !== undefined;
+    const match = typeof turnId === "string" && turnId.trim() && typeof actorId === "string" && actorId.trim()
+      ? { turnId, actorId }
+      : undefined;
+    if (exact && !match) {
+      return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "精确查询历史需要同时提供 turnId 和 actorId" });
+    }
     const limit = Number(query.limit ?? 50);
     const page = deps.history
       ? await deps.history.list(roomId, {
+          match,
           ...(query.fromTurn ? { fromTurn: query.fromTurn } : {}),
           ...(query.before ? { before: query.before } : {}),
           limit: Number.isFinite(limit) ? limit : 50,
         })
       : { lines: [], lastCommittedSeq: 0, hasEarlier: false };
-    // userId/clientTurnId 只落盘用于归属/审计/对账，不下发
-    const history = page.lines.map((line) => {
-      const { userId: _owner, clientTurnId: _logical, ...rest } = line;
-      return rest;
-    });
-// 历史是"脱敏前"写入的原始叙事：回放时按**当前**认识状态重做一次脱敏，
-    // 否则续玩/刷新就能看到尚未认识的人的真名（审阅 P0-2）。
+    // 历史按当前认识状态脱敏。精确查询的两个标识由调用方提供，可原样返回供核对。
     const placeholders = unknownPlaceholders(state, deps.appearance);
+    const history = page.lines.map((line) => {
+      // userId/clientTurnId 只落盘用于归属、审计和对账。
+      const { userId: _owner, clientTurnId: _logical, ...rest } = line;
+      const masked = maskNamesDeep(rest, placeholders);
+      return match ? { ...masked, ...match } : masked;
+    });
     return {
-      ok: true, roomId, history: maskNamesDeep(history, placeholders),
+      ok: true, roomId, history,
       lastCommittedSeq: page.lastCommittedSeq, hasEarlier: page.hasEarlier,
+      ...("earlierCursor" in page ? { earlierCursor: page.earlierCursor } : {}),
     };
   });
 }

@@ -595,14 +595,17 @@ const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!entry) {
       return reply.code(404).send({ ok: false, code: "E_REF_NOT_FOUND", message: "没有该行动记录" });
     }
-    // 与历史提交事实对账：待核对/执行中但历史已落盘 → 结案为 committed。
-    // 历史按「账号 + 角色 + 逻辑 ID」匹配（P1-1 复审）：同房间不同账号可能使用相同 clientTurnId，
-    // 只比 ID 会把别人的回合当成本次行动的提交凭据。
-    if (scope && (entry.state === "unconfirmed" || entry.state === "running" || entry.state === "reserved") && deps.history) {
+    const needsReconciliation = entry.state === "unconfirmed" || entry.state === "running" || entry.state === "reserved";
+    const needsHistoryIdentity = entry.state === "committed" && !entry.turnId;
+    let recoveredTurn: { turnId: string; committedSeq: number } | undefined;
+    // 历史按账号、角色和逻辑 ID 匹配。人工结案已提交但缺 turnId 时，仅补充查询响应。
+    if (scope && deps.history && (needsReconciliation || needsHistoryIdentity)) {
       const line = (await deps.history.readAll(roomId)).find(
         (l) => l.clientTurnId === clientTurnId && l.userId === userId && l.actorId === entry.actorId,
       );
-      if (line) {
+      if (line && needsHistoryIdentity) {
+        recoveredTurn = { turnId: line.turnId, committedSeq: line.committedSeq };
+      } else if (line) {
         const reconciled = await deps.ledger?.reconcileCommitted(scope, { turnId: line.turnId, committedSeq: line.committedSeq });
         // 账本写失败不能伪装成"结果待核对"：玩家/运维需要区分存储故障与真的未决
         if (reconciled && !reconciled.ok && reconciled.code === "E_STORE_FAULT") {
@@ -611,7 +614,9 @@ const access = await guardRoom(req, reply, deps, roomId, userIdOf);
       }
     }
     const current = (scope ? deps.ledger?.get(scope) : undefined) ?? entry;
-    return { ok: true, state: current.state, ...(current.turnId ? { turnId: current.turnId } : {}), ...(current.committedSeq !== undefined ? { committedSeq: current.committedSeq } : {}) };
+    const turnId = current.turnId ?? recoveredTurn?.turnId;
+    const committedSeq = current.committedSeq ?? recoveredTurn?.committedSeq;
+    return { ok: true, state: current.state, ...(turnId ? { turnId } : {}), ...(committedSeq !== undefined ? { committedSeq } : {}) };
   });
 
   // ---------------------------------------------------------------- 世界层永久记忆（docs/08 §9.3，管理员）

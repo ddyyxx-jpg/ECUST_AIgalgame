@@ -33,6 +33,19 @@ describe("buildHistoryQuery（历史游标）", () => {
     expect(new URLSearchParams(buildHistoryQuery({ fromTurn: "t3" })).get("fromTurn")).toBe("t3");
     expect(new URLSearchParams(buildHistoryQuery({ before: 0 })).get("before")).toBe("0");
   });
+
+  it("向更早翻页时原样传回服务端游标", () => {
+    const before = "h_server-cursor";
+    expect(new URLSearchParams(buildHistoryQuery({ before })).get("before")).toBe(before);
+  });
+
+  it("断流恢复同时发送 turnId 和 actorId，并保留回合 ID 中的特殊字符", () => {
+    const match = { turnId: "turn_a&b#c", actorId: "plr_x" };
+    const q = new URLSearchParams(buildHistoryQuery({ match, before: 49 }));
+    expect(q.get("turnId")).toBe(match.turnId);
+    expect(q.get("actorId")).toBe(match.actorId);
+    expect(q.has("before")).toBe(false);
+  });
 });
 
 describe("historyToLines / earlierCursor（恢复投影）", () => {

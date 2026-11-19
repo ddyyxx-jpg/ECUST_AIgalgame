@@ -61,7 +61,7 @@ export GALGAME_AUDIT_API_KEY=...
 公开 demo 用「邀请注册 + 用户名密码登录 + HttpOnly Cookie 会话」。本地开发两种进入方式：
 
 - **访客进入**：`GALGAME_AUTH_REQUIRED=0`（默认）时，标题页提供「以访客身份进入（本地开发）」，无需登录/邀请码。
-- **完整注册**：设 `GALGAME_AUTH_REQUIRED=1` + `GALGAME_INVITE_CODE=<邀请码>`，注册页填该码即可（共享码可重复用，适合组内测试）。反代部署还需 `GALGAME_PUBLIC_ORIGIN=<浏览器地址栏的源>`（CSRF 校验）与 `GALGAME_TRUST_PROXY=1`（按真实 IP 限流）。
+- **完整注册**：启动服务端前设置 `GALGAME_AUTH_REQUIRED=1`、`GALGAME_INVITE_CODE=<邀请码>` 和 `GALGAME_PUBLIC_ORIGIN=http://127.0.0.1:5173`。Origin 必须与浏览器地址栏的协议、主机和端口完全一致。注册页填写邀请码（共享码可重复用，适合组内测试）。部署时将 Origin 改为实际访问地址，并在可信反向代理后启用 `GALGAME_TRUST_PROXY=1`。
 - **管理员 / 一次性邀请**：停服后跑 `GALGAME_ADMIN_PASSWORD=<密码> npx tsx scripts/admin-init.ts <用户名>` 建管理员（已存在账号需该账号当前密码才能提权）；管理端点见 [docs/03 §5.2.9](docs/03-接口总表.md)，部署细节见 [deploy/README.md](deploy/README.md)。
 
 账号数据在 `data/auth/auth.json`（单进程串行写，损坏 fail-fast 不覆盖）；登录态只在 Cookie，清 localStorage 不影响账号。

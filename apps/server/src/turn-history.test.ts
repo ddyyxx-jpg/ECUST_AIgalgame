@@ -3,7 +3,8 @@
  * 断言结构与游标，不断言叙事文案——文案由模型生成，不可断言。
  */
 import { describe, expect, it } from "vitest";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import Fastify from "fastify";
 import { tempDir } from "@galgame/testkit";
 import type { Store, Turn, TurnEvent } from "../../../packages/shared/src/index.ts";
@@ -233,6 +234,119 @@ describe("withTurnRecording", () => {
 });
 
 describe("HTTP：/rooms/:roomId/history 与 /me/saves", () => {
+  it("分页保留同一提交序号的全部历史，翻页期间追加也不改变页首边界", async () => {
+    const deps = await createApp(testConfig());
+    const { roomId, actorId } = await deps.createRoom("solo", "u_a");
+    const app = Fastify();
+    registerRoutes(app, deps);
+    try {
+      const line = {
+        formatVersion: 1 as const, roomId, actorId, committedSeq: 49,
+        input: "", narrative: "", speakers: [], facts: [], createdAt: 1,
+      };
+      const records = Array.from({ length: 201 }, (_, index) => ({ ...line, turnId: `turn_${index}` }));
+      const file = deps.history.fileFor(roomId);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+
+      const url = `/api/v1/rooms/${roomId}/history`;
+      const headers = { "x-user-id": "u_a" };
+      const first = await app.inject({ url: `${url}?limit=200`, headers });
+      expect(first.statusCode).toBe(200);
+      const page = first.json();
+      expect(page.history).toHaveLength(200);
+      expect(page.history[0].turnId).toBe("turn_1");
+      expect(page.hasEarlier).toBe(true);
+      expect(page.earlierCursor).toEqual(expect.any(String));
+
+      await deps.history.append({ ...line, turnId: "turn_201" });
+      const before = new URLSearchParams({ before: page.earlierCursor });
+      const second = await app.inject({ url: `${url}?${before}`, headers });
+      expect(second.statusCode).toBe(200);
+      expect(second.json()).toMatchObject({ history: [records[0]], hasEarlier: false });
+      expect(second.json()).not.toHaveProperty("earlierCursor");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("精确查询按回合与角色定位，即使多个历史条目共享提交序号", async () => {
+    const deps = await createApp(testConfig());
+    const { roomId, actorId } = await deps.createRoom("solo", "u_a");
+    const app = Fastify();
+    registerRoutes(app, deps);
+    try {
+      const line = {
+        formatVersion: 1 as const, roomId, actorId, turnId: "turn_target", committedSeq: 49,
+        input: "", narrative: "", speakers: [], facts: [], createdAt: 1,
+      };
+      await deps.history.append({ ...line, turnId: "turn_earlier" });
+      await deps.history.append({ ...line, actorId: "plr_other" });
+      await deps.history.append(line);
+
+      const path = `/api/v1/rooms/${roomId}/history`;
+      const headers = { "x-user-id": "u_a" };
+      const response = await app.inject({ url: `${path}?turnId=turn_target&actorId=${actorId}&before=49`, headers });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().history).toEqual([line]);
+      const missing = await app.inject({ url: `${path}?turnId=turn_missing&actorId=${actorId}`, headers });
+      expect(missing.json().history).toEqual([]);
+      const incomplete = await app.inject({ url: `${path}?turnId=turn_target`, headers });
+      expect(incomplete.statusCode).toBe(400);
+      expect(incomplete.json().code).toBe("E_SCHEMA_INVALID");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("精确查询保留调用方提供的回合标识，并继续遮盖未认识 NPC 的叙事姓名", async () => {
+    const deps = await createApp(testConfig());
+    const { roomId, actorId } = await deps.createRoom("solo", "u_a");
+    const state = await deps.store.snapshot(roomId);
+    const npc = Object.values(state.entities).find((entity) => entity.kind === "npc");
+    if (!npc) throw new Error("测试房间缺少 NPC");
+    const turnId = `turn_${npc.name}`;
+    const app = Fastify();
+    registerRoutes(app, deps);
+    try {
+      await deps.history.append({
+        formatVersion: 1, roomId, actorId, turnId, committedSeq: 49,
+        input: npc.name, narrative: npc.name, speakers: [npc.name], facts: [npc.name], createdAt: 1,
+      });
+      const params = new URLSearchParams({ turnId, actorId });
+      const response = await app.inject({ url: `/api/v1/rooms/${roomId}/history?${params}`, headers: { "x-user-id": "u_a" } });
+      expect(response.statusCode).toBe(200);
+      const [line] = response.json().history;
+      expect(line).toMatchObject({ turnId, actorId });
+      const { input, narrative, speakers, facts } = line;
+      expect(JSON.stringify({ input, narrative, speakers, facts })).not.toContain(npc.name);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("历史文件不存在返回空列表，读取故障返回 503 且不暴露文件路径", async () => {
+    const deps = await createApp(testConfig());
+    const { roomId } = await deps.createRoom("solo", "u_a");
+    const app = Fastify();
+    registerRoutes(app, deps);
+    try {
+      const url = `/api/v1/rooms/${roomId}/history`;
+      const headers = { "x-user-id": "u_a" };
+      const empty = await app.inject({ url, headers });
+      expect(empty.statusCode).toBe(200);
+      expect(empty.json().history).toEqual([]);
+      const file = deps.history.fileFor(roomId);
+      await mkdir(file, { recursive: true });
+      const unreadable = await app.inject({ url, headers });
+      expect(unreadable.statusCode).toBe(503);
+      expect(unreadable.json()).toMatchObject({ ok: false, code: "E_STORE_FAULT" });
+      expect(unreadable.body).not.toContain(file);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("回合后历史可读，成员可读、非成员 403、世界房间 404", async () => {
     const deps = await createApp(testConfig());
     const { roomId, actorId } = await deps.createRoom("solo", "u_a");

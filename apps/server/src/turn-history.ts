@@ -34,9 +34,11 @@ export interface TurnHistoryLine {
 }
 
 export interface HistoryQuery {
+  /** 断流恢复时，用回合与角色精确匹配单条历史。 */
+  match?: Pick<TurnHistoryLine, "turnId" | "actorId">;
   /** turnId（不含）或 committedSeq 数字（> 该 seq）；向前翻页 */
   fromTurn?: string;
-  /** committedSeq 数字（< 该 seq，不含）；向后加载更早。缺省且无 fromTurn 时返回最近 limit 条 */
+  /** 记录游标或旧版 committedSeq 数字，向后加载更早 */
   before?: string;
   limit?: number;
 }
@@ -46,6 +48,7 @@ export interface HistoryPage {
   lastCommittedSeq: number;
   /** 是否还有更早的历史可加载 */
   hasEarlier: boolean;
+  earlierCursor?: string;
 }
 
 function isHistoryLine(v: unknown): v is TurnHistoryLine {
@@ -76,6 +79,10 @@ function historyKey(line: Pick<TurnHistoryLine, "actorId" | "turnId">): string {
   return `${line.actorId}\u0000${line.turnId}`;
 }
 
+function historyCursor(line: TurnHistoryLine): string {
+  return `h_${createHash("sha256").update(historyKey(line)).digest("hex")}`;
+}
+
 export class TurnHistory {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly known = new Map<string, Set<string>>();
@@ -91,8 +98,9 @@ export class TurnHistory {
     let raw: string;
     try {
       raw = await readFile(this.fileFor(roomId), "utf8");
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw Object.assign(new Error("读取回合历史失败", { cause: error }), { code: "E_STORE_FAULT" });
     }
     const lines: TurnHistoryLine[] = [];
     for (const text of raw.split("\n")) {
@@ -113,13 +121,24 @@ export class TurnHistory {
     const all = await this.readAll(roomId);
     const rawLimit = query.limit ?? 50;
     const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), 200);
-    let lines: TurnHistoryLine[];
-    if (query.before !== undefined && query.before.trim() !== "") {
-      const seq = Number(query.before);
-      const earlier = Number.isFinite(seq) ? all.filter((line) => line.committedSeq < seq) : all;
-      lines = earlier.slice(-limit);
+    let end = all.length;
+    let start = Math.max(0, end - limit);
+    if (query.match) {
+      const { turnId, actorId } = query.match;
+      const index = all.findIndex((item) => item.turnId === turnId && item.actorId === actorId);
+      start = Math.max(0, index);
+      end = index + 1;
+    } else if (query.before?.trim()) {
+      const before = query.before;
+      if (before.startsWith("h_")) {
+        end = Math.max(0, all.findIndex((line) => historyCursor(line) === before));
+      } else {
+        const seq = Number(before);
+        const index = all.findIndex((line) => line.committedSeq >= seq);
+        if (Number.isFinite(seq) && index >= 0) end = index;
+      }
+      start = Math.max(0, end - limit);
     } else if (query.fromTurn) {
-      let start = 0;
       const seq = Number(query.fromTurn);
       if (Number.isFinite(seq) && query.fromTurn.trim() !== "") {
         start = all.findIndex((line) => line.committedSeq > seq);
@@ -128,16 +147,15 @@ export class TurnHistory {
         start = index < 0 ? all.length : index + 1;
       }
       if (start < 0) start = all.length;
-      lines = all.slice(start, start + limit);
-    } else {
-      // 默认恢复最近片段（3.4.0 起；此前为最早 limit 条，长房间只展示序章）
-      lines = all.slice(-limit);
+      end = start + limit;
     }
-    const firstSeq = lines.length ? lines[0]!.committedSeq : 0;
+    const lines = all.slice(start, end);
+    const first = lines[0];
     return {
       lines,
       lastCommittedSeq: all.length ? all[all.length - 1]!.committedSeq : 0,
-      hasEarlier: all.some((line) => line.committedSeq < firstSeq),
+      hasEarlier: Boolean(first && start > 0),
+      ...(first && start > 0 ? { earlierCursor: historyCursor(first) } : {}),
     };
   }
 
