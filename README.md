@@ -114,7 +114,7 @@ npm run replay -- --file data/rooms/<room>.jsonl   # 回放事件日志，查 se
 |---|---|
 | [AGENTS.md](AGENTS.md) | 给 AI 协作者与人类的仓库执行约束：读什么、能改什么、任务配方、禁区、提交自查 |
 | [MEMORY.md](MEMORY.md) | 离线入口页：只告诉你去哪找真源；任务状态看 GitHub Issues / PR |
-| [docs/03-接口总表.md](docs/03-接口总表.md) | **唯一名字来源**：内部接口、12 op、事件、HTTP/SSE、错误码、配置键 |
+| [docs/03-接口总表.md](docs/03-接口总表.md) | **唯一名字来源**：内部接口、13 op（dev/v2 起含 `msg.send`，CONTRACT 3.6.0）、事件、HTTP/SSE、错误码、配置键 |
 | [docs/00-总方案-v2.md](docs/00-总方案-v2.md) | 架构、扩展点矩阵、明确不做的事、里程碑 |
 | [docs/01-模块规范.md](docs/01-模块规范.md) | 写玩法模块的手册：目录、manifest、生命周期、模板、review 清单 |
 | [docs/02-数据格式.md](docs/02-数据格式.md) | 属性注册表、实体、事件、存储与投影、存档与迁移 |
