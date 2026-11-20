@@ -5,10 +5,12 @@
  * 对话框始终在底部（叙事要一直看得见），点 NPC 之后标题变成"和谁在说话"，
  * 输入框的提示也跟着换 —— 但输入仍然是自然语言，不受对话对象限制。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ViewPatch, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import CampusMap from "./CampusMap.tsx";
+import CandidatePanel from "./CandidatePanel.tsx";
 import MiniMap from "./MiniMap.tsx";
+import { buildCandidates } from "./candidates.ts";
 import { getMap } from "./api.ts";
 import type { MapView } from "./api.ts";
 import { planNpcTalk } from "./npc-presence.ts";
@@ -216,6 +218,32 @@ export default function ChatPanel({
   const v2Check = v2Active && v2Modes ? validateUtteranceDraft(draft, v2Modes) : { ok: true };
   const submitDisabled = busy || !state || !v2Check.ok;
 
+  // 候选行动：只依赖 suggestions，分类/去重/编号都在纯函数里做（见 candidates.ts）
+  const candidates = useMemo(() => buildCandidates(suggestions), [suggestions]);
+
+  // 数字键 1–6 快选：只在聊天面板挂载时生效（切到地图等页面就没有这套语义）；
+  // 输入框/文本域/可编辑元素里不抢键，玩家正在打字时数字就是数字。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      // 输入框之外，v2 的 <select> 也属于「正在操作表单」：数字键应留给它的选项跳转
+      if (
+        el &&
+        (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (busy || !state) return;
+      const n = Number(e.key);
+      if (!Number.isInteger(n) || n < 1 || n > candidates.length) return;
+      e.preventDefault();
+      onPick(candidates[n - 1].text, talking ? { id: talking.id, name: talkingName } : null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [candidates, busy, state, talking, talkingName, onPick]);
+
   return (
     <div className="world-page">
       <div className="world-shell">
@@ -389,23 +417,13 @@ export default function ChatPanel({
           </div>
         )}
 
-        {suggestions.length > 0 && (
-          <div className="suggestions">
-            <span className="muted">你可以：</span>
-            {suggestions.map((s) => (
-              <button
-                key={s}
-                type="button"
-                className="suggest-chip"
-                onClick={() => onPick(s, talking ? { id: talking.id, name: talkingName } : null)}
-                disabled={busy || !state}
-                title={`说出：${s}`}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        )}
+        <CandidatePanel
+          candidates={candidates}
+          disabled={busy}
+          ready={Boolean(state)}
+          target={talking ? { id: talking.id, name: talkingName } : null}
+          onPick={onPick}
+        />
 
         {/* v2 demo：说话类型选择 + @谁（点场景里的 NPC 即 talking）。老流程无 v2Modes 时不显示 */}
         {v2Active && v2Modes && (
