@@ -22,6 +22,7 @@ import { turnSuggestions } from "./suggestions.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
 import { shouldDropRetryOnMove } from "./turn-error.ts";
+import { decideSessionSync, type SessionSyncTrigger } from "./session-signal.ts";
 import { fetchRoomEvents } from "./events-replay.ts";
 import { npcLocIdFromLinks, targetStillInScene } from "./npc-presence.ts";
 import { phaseLabel } from "./ui.ts";
@@ -108,6 +109,12 @@ export default function App() {
   const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null; utterance?: UtteranceDraft } | null>(null);
   /** 断流前已收到的叙事/facts：核对到 committed 后只补历史里的差集，避免重复刷屏 */
   const pendingTurn = useRef<{ clientTurnId: string; narrative: string; facts: string[] } | null>(null);
+  /** PR-3：上次成功进房/同步的时刻；0 = 还没同步过（首次不节流） */
+  const lastSyncAtRef = useRef(0);
+  /** PR-3：本次隐藏开始的时刻；null = 当前可见，或本轮没经过 visibilitychange */
+  const hiddenSinceRef = useRef<number | null>(null);
+  /** PR-3：重进房防重入（visibilitychange 与 focus 常成对触发，只放行第一个） */
+  const resyncingRef = useRef(false);
   /** 全屏地图层：点对话页左上角的小地图打开 */
   const [mapOpen, setMapOpen] = useState(false);
 const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
@@ -368,6 +375,9 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
       setRoomId(id);
       setTab("chat");
       setScreen("game");
+      // PR-3：进房成功 = 已同步；同时清掉本次隐藏的起点，避免旧的离开时长被再次计入。
+      lastSyncAtRef.current = Date.now();
+      hiddenSinceRef.current = null;
       // v2 服务端（issue #89）探测：探不到 /conversation 就保持 v1 /turns，老流程零回归。
       // 探测放在 UI 呈现之后，不阻塞进房；失败/切房都会由 current() 拦掉。
       void detectConversation(id, token.signal).then((v2) => {
@@ -388,6 +398,59 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
     },
     [roomKey, scenarios, resetRoomUi],
   );
+
+  /**
+   * PR-3 客户端轻唤醒：合盖/切后台/断网再回来时 SSE 可能已经断了，画面停在旧状态。
+   * 服务端没有 plot.ping 发射点，所以只信「回到前台 / 网络恢复」这类本地信号，
+   * 满足条件就重走一次 enterRoom（全量重拉权威状态 + 历史 + 事件回放）。
+   * 决策在 session-signal.ts（纯函数），这里只负责接线与防重入。
+   */
+  useEffect(() => {
+    const attempt = (trigger: SessionSyncTrigger, awayOverride?: number) => {
+      if (resyncingRef.current) return;
+      const now = Date.now();
+      const awayMs = awayOverride ?? (hiddenSinceRef.current === null ? 0 : now - hiddenSinceRef.current);
+      const d = decideSessionSync({
+        trigger,
+        visible: document.visibilityState === "visible",
+        online: navigator.onLine,
+        screen,
+        roomId,
+        busy,
+        composing: input.trim().length > 0,
+        awayMs,
+        sinceLastSyncMs: now - lastSyncAtRef.current,
+      });
+      if (!d.resync) return;
+      // 先记时刻再发请求：失败也按一次同步计，避免断网时 focus/online 反复重拉
+      lastSyncAtRef.current = now;
+      resyncingRef.current = true;
+      void enterRoom(roomId, { resumed: true })
+        .catch((e) => setEventsNotice(fail(e)))
+        .finally(() => {
+          resyncingRef.current = false;
+        });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenSinceRef.current = Date.now();
+        return;
+      }
+      const awayMs = hiddenSinceRef.current === null ? 0 : Date.now() - hiddenSinceRef.current;
+      hiddenSinceRef.current = null;
+      attempt("foreground", awayMs);
+    };
+    const onFocus = () => attempt("foreground");
+    const onOnline = () => attempt("online");
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("online", onOnline);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("online", onOnline);
+    };
+  }, [screen, roomId, busy, input, enterRoom, fail]);
 
   const startNew = useCallback(
     async (scenarioId: string) => {
