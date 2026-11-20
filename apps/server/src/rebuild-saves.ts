@@ -107,13 +107,15 @@ function parseRoom(text: string, roomId: string): RoomFacts {
         continue;
       }
       owners.set(actorId, userId);
-    } else if (env.type === "turn.commit") {
+    } else if (env.type === "turn.committed") {
+      // 引擎真正落 EventLog 的提交标记（arbiter.commitMarker）；turn.commit 只是 SSE 事件，
+      // 从不写日志（#123 P0-A：fixture 必须与发射处逐字一致）。
       const turnId = record(env, ["payload", "turnId"]);
-      const seq = record(env, ["payload", "seq"]);
-      if (typeof turnId !== "string" || typeof seq !== "number" || !Number.isInteger(seq) || seq < 1) {
-        throw new Error("turn.commit 缺少合法 turnId/seq");
+      const committedSeq = record(env, ["payload", "committedSeq"]);
+      if (typeof turnId !== "string" || typeof committedSeq !== "number" || !Number.isInteger(committedSeq) || committedSeq < 1) {
+        throw new Error("turn.committed 缺少合法 turnId/committedSeq");
       }
-      commits.set(seq, turnId);
+      commits.set(committedSeq, turnId);
     }
   }
   return { roomId, owners, commits, createdAt };
@@ -169,7 +171,9 @@ function merge(existing: SavesFile | undefined, candidates: SaveEntry[]): SaveEn
     const old = byRoom.get(candidate.roomId);
     if (!old || candidate.lastCommittedSeq > old.lastCommittedSeq ||
         (candidate.lastCommittedSeq === old.lastCommittedSeq && candidate.updatedAt > old.updatedAt)) {
-      byRoom.set(candidate.roomId, candidate);
+      // #123 P1-E：命名槽关联挂在已有条目上；候选条目替换时保留，避免重建后 listSlots() 失联。
+      const next = old?.slotId && !candidate.slotId ? { ...candidate, slotId: old.slotId } : candidate;
+      byRoom.set(candidate.roomId, next);
     }
   }
   return [...byRoom.values()].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_SAVES);
@@ -247,7 +251,13 @@ export async function rebuildSavesIndex(opts: RebuildOptions): Promise<RebuildRe
     const merged = merge(existing, candidates);
     report.rebuilt.set(userId, merged);
     if (existing && JSON.stringify(existing.saves) === JSON.stringify(merged)) continue;
-    if (opts.write) await persist(saveFilePath(opts.savesDir, userId), { version: 1, userId, saves: merged }, report);
+    if (opts.write) {
+      // #123 P1-E：slots 是独立于 saves 的投影，重建只能补 saves，不能把命名槽整段抹掉。
+      await persist(saveFilePath(opts.savesDir, userId), {
+        version: 1, userId, saves: merged,
+        ...(existing?.slots !== undefined ? { slots: existing.slots } : {}),
+      }, report);
+    }
   }
   return report;
 }

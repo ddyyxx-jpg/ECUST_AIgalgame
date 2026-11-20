@@ -158,9 +158,17 @@ export function conspiracyProposals(plot: NormalizedPlot): Proposal[] {
     },
   ];
   // 视角化写入三硬规则（docs/04 §7.4）：每人不同叙述、逐 ownerId 写、秘密原文不进文本。
+  // #123 P1-G：不能只换"第 N 视角"前缀；叙述本身按参与者轮换，避免多视角记忆正文雷同。
+  const angles = [
+    "你先开口把话引到「__HINT__」附近，随即察觉有人不愿接话。",
+    "你多半在听，只记住有人反复提到「__HINT__」，语气比平时紧。",
+    "你试着探口风，对方把话岔开，但「__HINT__」还是漏了出来。",
+    "你负责望风，没听全，只记得「__HINT__」和某个人不安的停顿。",
+  ];
   plot.actors.forEach((actor, index) => {
     const hint = plot.leakPoints[index % Math.max(plot.leakPoints.length, 1)] ?? "现场";
-    const content = `第${index + 1}视角：今晚与在场者谈到一件还不能明说的事，只记得线索在「${hint}」附近，细节先压在心底。`;
+    const angle = angles[index % angles.length].replace("__HINT__", hint);
+    const content = `第${index + 1}视角：今晚与在场者谈到一件还不能明说的事。${angle}细节先压在心底。`;
     const safe = scrub(plot.forbidReveal, content);
     if (!safe) return;
     proposals.push({
@@ -242,7 +250,8 @@ const director: DialogueDirector = {
   id: "npc.plot",
 
   async nextTurn(session: DialogueSession, ctx: ModuleContext): Promise<DialogueStep> {
-    const turn = session.turn + 1; // DialogueHost 已在 advance 里 +1；这里保持与占位版同口径
+    // #123 P0-D：DialogueHost 在 advance 里已把 session.turn +1；这里再加 1 会让首轮判断永不成立。
+    const turn = session.turn;
     const base = { sessionId: session.id, turn };
     const participants = session.participants;
 

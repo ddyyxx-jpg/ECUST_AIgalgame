@@ -179,5 +179,11 @@ describe("Turn × Memory（P1）", () => {
     const working = memory.all(ROOM).filter((r) => r.tags.includes("最近对话") && r.status !== "tombstoned");
     expect(working).toHaveLength(1);
     expect(working[0]!.content).toContain("修复版台词");
+
+    // #123 P1-2：跨重启标记必须记录"真正提交"的修复版，而不是被拒首版
+    const marker = (await store.events(ROOM, 0)).find((e) => e.type === "turn.committed");
+    const payload = marker?.payload as { narrative?: string } | undefined;
+    expect(payload?.narrative).toContain("修复版叙事");
+    expect(payload?.narrative).not.toContain("首版叙事");
   });
 });

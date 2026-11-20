@@ -575,10 +575,14 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
 
     const openOrReuse = async (roomId: string, actorId: string, state: WorldState) => {
       const cached = sessions.get(roomId);
-      const session = cached ? host.get(cached) : undefined;
+      // #123 P0-C：重启后进程内映射为空，但快照恢复的会话已经在 host 里；
+      // 只查 sessions 会新开 conv_2，把恢复的会话变成孤儿。缓存 miss 时回退 getByRoom。
+      const session = (cached ? host.get(cached) : undefined)
+        ?? (typeof host.getByRoom === "function" ? host.getByRoom(roomId) : undefined);
       if (session && session.roomId === roomId && session.status === "open") {
         // #104：复用时 participants 以 host 内会话为准（这里不重算/不覆盖），
         // 后续回合的可见性投影读 host.get(sessionId).participants，而非本函数的入参快照。
+        if (cached !== session.id) sessions.set(roomId, session.id);
         return { sessionId: session.id, opened: undefined as ConversationEvent | undefined };
       }
       const present = [...state.room.scene.presentIds];
@@ -612,8 +616,11 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       // #104：与 v1 /turns 共用同一 TurnLedger 计量。按逻辑请求预留，拒绝必须在 SSE 头之前，
       // 未登录（本地无 auth/无 userId）不结算额度；成功后 committed，失败/提前 EOF 按状态机回收。
       const userId = access.userId;
-      const turnScope = userId ? { userId, roomId, clientTurnId: body.clientTurnId } : undefined;
-      const ledger = userId ? deps.ledger : undefined;
+      // #123 P1-J：interject-only 只切 phase，不产出 conversation.committed；
+      // 不应预留额度，否则会被记成 unconfirmed 占住当天额度（与 docs/03 §5.2.11 不一致）。
+      const interjectOnly = body.utterance === undefined && body.interject !== undefined;
+      const turnScope = userId && !interjectOnly ? { userId, roomId, clientTurnId: body.clientTurnId } : undefined;
+      const ledger = turnScope ? deps.ledger : undefined;
       // charged=false：本请求不新增计费（未登录，或 v2 的同 ID 重放命中 host 幂等缓存、无 LLM 调用）
       let charged = false;
       // #104：预留与 host.run 共用房间串行锁（MAJOR-2）。v2 并发首回合的多个不同 clientTurnId

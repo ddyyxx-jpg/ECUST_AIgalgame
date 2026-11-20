@@ -96,7 +96,7 @@ export class DefaultTurn implements Turn {
    */
   private async restoreSeen(roomId: RoomId): Promise<void> {
     if (this.restoredRooms.has(roomId)) return;
-    this.restoredRooms.add(roomId);
+    // #123 P1-4：扫描完成后再标记房间，避免并发首回合在扫描中途看到"已恢复"而漏掉标记。
     for (const env of await this.deps.store.events(roomId, 0)) {
       const evidence = parseCommitEvidence(env);
       if (!evidence) continue;
@@ -114,6 +114,7 @@ export class DefaultTurn implements Turn {
         this.seen.set(key, replay);
       }
     }
+    this.restoredRooms.add(roomId);
   }
 
   constructor(deps: TurnDeps) {
@@ -221,11 +222,15 @@ export class DefaultTurn implements Turn {
         const gate = await this.gate.review({ roomId: req.roomId, actorId: req.actorId, input: req.input, text: first.text });
         if (gate.kind === "blocked") {
           const punishArgs = { roomId: req.roomId, actorId: req.actorId, clientTurnId: req.clientTurnId };
-          for (const ev of await this.gate.punish(punishArgs, causeForBudget, gate.verdict, state, seqNow, evidence)) {
-            emit(ev);
-            yield ev;
-          }
+          // #123 P1-3：被拒正文不能进提交证据；标记会随处置同批落库，重启后 /events 可读。
+          evidence.narrative = undefined;
+          evidence.facts = undefined;
+          const punished = await this.gate.punish(punishArgs, causeForBudget, gate.verdict, state, seqNow, evidence);
+          for (const ev of punished) emit(ev);
+          // #123 P0-B：消费者收到 turn.commit 即 break，yield 之后的代码不会执行；
+          // 幂等缓存必须在首个 yield 之前写好，否则同 key 重发会重复结算。
           this.seen.set(key, events);
+          for (const ev of punished) yield ev;
           return;
         }
         if (gate.kind === "ok") {
@@ -285,14 +290,22 @@ export class DefaultTurn implements Turn {
               const punishArgs = { roomId: req.roomId, actorId: req.actorId, clientTurnId: req.clientTurnId };
               evidence.narrative = undefined;
               evidence.facts = undefined;
-              for (const ev of await this.gate.punish(punishArgs, causeForBudget, gate.verdict, state, this.deps.store.seq(req.roomId), evidence)) {
-                emit(ev);
-                yield ev;
-              }
+              const punished = await this.gate.punish(punishArgs, causeForBudget, gate.verdict, state, this.deps.store.seq(req.roomId), evidence);
+              for (const ev of punished) emit(ev);
               this.seen.set(key, events);
+              for (const ev of punished) yield ev;
               return;
             }
             narrative = gate.kind === "ok" ? repaired.text : this.gate.policy.unavailableText;
+            // #123 P1-2：修复版才是真正提交的正文/用量；标记必须同步，否则重启重放会放出被拒首版。
+            if (gate.kind === "ok") {
+              evidence.narrative = repaired.narrative;
+              evidence.facts = [];
+              evidence.usage = repaired.usage;
+            } else {
+              evidence.narrative = undefined;
+              evidence.facts = undefined;
+            }
             llmProposals.length = 0;
             // #39：修复成功后必须用**修复版产物**重建整份记忆计划；被拒首版的记忆不落库。
             memoryProposals = [];

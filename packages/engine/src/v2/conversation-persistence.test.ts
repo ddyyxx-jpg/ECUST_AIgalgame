@@ -138,6 +138,52 @@ describe("issue #90：会话快照跨重启恢复", () => {
     expect(envs.map((e) => e.seq)).toEqual(envs.map((_, i) => i + 1)); // seq 连续无断档
   });
 
+  it("#123 P1-1：幂等缓存随快照持久化，重启后同 clientTurnId 原样重放，不重新结算", async () => {
+    const store1 = new EventSourcedStore({ worldId: "w1", locId: GATE });
+    seed(store1);
+    const { host: host1, llm: llm1 } = await makeHost(store1, [speak("utt_a", "你好"), think("暗想")], { t: 1000 });
+    const s1 = await host1.open({ roomId: ROOM, participants: [PLR, LIN, MA] });
+    const req = {
+      clientTurnId: "idem-restart",
+      utterance: { id: "utt_player", speaker: PLR, mode: "broadcast" as const, content: "我们接着聊" },
+    };
+    const first = await collect(host1.run(s1.id, req));
+    const seqAfterFirst = await store1.seq(ROOM);
+    expect(llm1.calls).toBeGreaterThan(0);
+
+    const snap = host1.exportSessions(ROOM);
+    expect(snap.idempotency?.length).toBeGreaterThan(0);
+    const dir = await mkdtemp(path.join(os.tmpdir(), "dsh-conv-"));
+    const file = sessionSnapshotPath(dir, ROOM);
+    await saveSnapshot(file, snap);
+    const loaded = await loadSnapshot(file);
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+
+    const store2 = new EventSourcedStore({ worldId: "w1", locId: GATE });
+    store2.append(ROOM, await store1.events(ROOM, 0));
+    const { host: host2, llm: llm2 } = await makeHost(store2, [], { t: 1000 });
+    expect(host2.restoreSessions(loaded.snapshot, ROOM).restored).toBe(1);
+    const s2 = host2.getByRoom(ROOM);
+    expect(s2?.id).toBe(s1.id);
+
+    const replay = await collect(host2.run(s2!.id, req));
+    expect(llm2.calls).toBe(0); // 命中持久化幂等缓存，没有重新调模型
+    expect(await store2.seq(ROOM)).toBe(seqAfterFirst); // 没有新落库
+    expect(replay).toEqual(first); // 原样回放
+  });
+
+  it("#123 P1-5：坏快照只关闭目标房间的会话，其他房间不受影响", async () => {
+    const store = new EventSourcedStore({ worldId: "w1", locId: GATE });
+    seed(store);
+    const { host } = await makeHost(store, [], { t: 1000 });
+    const a = await host.open({ roomId: ROOM, participants: [PLR, LIN, MA] });
+    const b = await host.open({ roomId: "room_other_chat", participants: [PLR, LIN, MA] });
+    expect(host.restoreSessions(undefined, ROOM)).toMatchObject({ degraded: true, restored: 0 });
+    expect(host.get(a.id)?.status).toBe("closed");
+    expect(host.get(b.id)?.status).toBe("open"); // 另一房不被坏档连坐
+  });
+
   it("快照文件往返、重复导入幂等、房间过滤与 closed 会话归一", async () => {
     const store = new EventSourcedStore({ worldId: "w1", locId: GATE });
     seed(store);

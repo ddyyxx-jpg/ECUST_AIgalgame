@@ -4,6 +4,30 @@
 
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）。
 
+## PR #123 批次（fix/backend-issues-unified，待合并；CONTRACT 3.6.0 不变）— 2026-11-20
+
+> 本批修复 PR #123 打回的 4 个 P0 与相关 P1（验收口径见 AGENTS.md §12：测试全绿 ≠ 功能正确）。契约按「补缺失条目 / 纯修复」处理，不 bump 3.6.0；13 op、错误码闭集、`apiVersion`、`PROMPT_VERSION` 均不变。
+
+### 修复
+
+- **#76 幂等标记真正落盘**：`turn.committed` 登记 `content/registry/events.json` 并补 payload（`clientTurnId/turnId/actorId/committedSeq` + 可选 `narrative/facts/usage`）；SSE 消费器收到 `turn.commit` 即 break 时，`seen` 已在首个 yield 前写入，同 key 重发不重复结算；审核阻断先清证据正文，修复成功回填修复版叙事/用量（P0-B、P1-2、P1-3）。
+- **#90 会话快照恢复闭环**：群聊提交后落盘；重启后路由 `getByRoom` 复用恢复会话而非新开 conv_2（P0-C）；幂等缓存随快照持久化，重启后同 `clientTurnId` 原样回放、不重复调模型/落库（P1-1）；坏快照只降级本房（P1-5）。
+- **#96 npc.plot**：导演不再对宿主已推进的 `session.turn` 再加 1（首轮密谋真正触发，P0-D）；私忆按视角生成不同正文（P1-G）；首轮/坏 JSON 测试补齐。
+- **#122 rebuild-saves**：只认真实 `turn.committed` 证据（原先只认 SSE 的 `turn.commit`，真实日志全被跳过，P0-A）；保留 `slots[]` 与 `entry.slotId`（P1-E）。
+- **#98/#99 存档工具**：rebuild 保留命名槽；`export-save --out` 拒绝写入 `dataDir/{rooms,history,users}` 权威目录（P1-F）。
+- **#104/#106 群聊额度**：interject-only 不建 turnScope / 不 reserve，避免落 `unconfirmed` 占额度（P1-J），与 docs/03 §5.2.11 口径一致。
+
+### 验证（本地实跑）
+
+- `npm test` → 94 文件 / 731 用例全过；`npm run typecheck` → 0 错；`npm run check:contract` → 8/8（3.6.0、13 op、36 错误码）；`npm run build:web` → 379.79 kB / gzip 117.72 kB。
+- 真实链路探针（FileStore → DefaultTurn → 真实 `turn.committed` → `rebuild-saves`）：重建出 `u_probe / room_probe` 条目，`lastCommittedSeq=4` 与 marker 一致（PROBE PASS），未再依赖手造 fixture。
+
+### 已知边界
+
+- #96 的 discovery / attitude 接线仍按 PR 现状留待后续 Issue；本期只修首轮触发与多视角私忆，端到端夜间调度不在本 PR。
+- 历史 `updatedAt` 取 history 游标；缺失 history 时回退 `createdAt`。
+- 旧日志中无 `turn.committed` 的历史回合不重建（与 docs/11 §8 一致）。
+
 ## 3.6.0（dev/v2，2026-11-19）
 
 - 第 13 个 op `msg.send`：NPC 之间/玩家给 NPC 的模拟私信（只有目标+内容），`Envelope.audience` 在 Transport 前过滤；模块 `apiVersion 2→3`。

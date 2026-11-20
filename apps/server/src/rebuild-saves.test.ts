@@ -29,7 +29,12 @@ function roomLog(opts: {
     payload: { member: { actorId: opts.joinActorId ?? "plr_a", role: "player", joinedSeq: 2, online: true, ...(opts.joinUserId ? { userId: opts.joinUserId } : {}) } },
   });
   for (const c of opts.commits ?? []) {
-    lines.push({ v: 1, id: `evt_commit_${c.seq}`, roomId, seq: c.seq, ts: 2000, actorId: "plr_a", type: "turn.commit", payload: { turnId: c.turnId, seq: c.seq } });
+    // 真实引擎写出的是 turn.committed（arbiter.commitMarker），不是 SSE 的 turn.commit —— #123 P0-A
+    lines.push({
+      v: 1, id: `evt_commit_${c.seq}`, roomId, seq: c.seq, ts: 2000, actorId: "plr_a",
+      type: "turn.committed",
+      payload: { clientTurnId: `client_${c.seq}`, turnId: c.turnId, actorId: "plr_a", committedSeq: c.seq },
+    });
   }
   return lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
 }
@@ -125,5 +130,29 @@ describe("rebuildSavesIndex (#122)", () => {
     expect(await readFile(`${target}.bak`, "utf8")).toBe("{ broken json");
     const after = JSON.parse(await readFile(target, "utf8")) as { saves: unknown[] };
     expect(after.saves).toHaveLength(1);
+  });
+
+  it("重建保留命名槽：slots[] 与 entry.slotId 不被覆盖写丢（#123 P1-E）", async () => {
+    const { rooms, history, saves } = await setup();
+    await writeFile(path.join(rooms, "room_a.jsonl"), roomLog({
+      joinUserId: "u_a", commits: [{ seq: 3, turnId: "t3" }],
+    }), "utf8");
+    const target = saveFilePath(saves, "u_a");
+    await mkdir(path.dirname(target), { recursive: true });
+    const slot = { slotId: "slot_1", label: "旧档", roomId: "room_a", createdAt: 10, updatedAt: 20 };
+    await writeFile(target, JSON.stringify({
+      version: 1, userId: "u_a",
+      saves: [{ roomId: "room_a", scenarioId: "default", createdAt: 1, updatedAt: 2, lastTurnId: "t2", lastCommittedSeq: 2, actorId: "plr_a", formatVersion: 1, slotId: "slot_1" }],
+      slots: [slot],
+    }), "utf8");
+
+    await rebuildSavesIndex({ roomsDir: rooms, historyDir: history, savesDir: saves, write: true });
+
+    const after = JSON.parse(await readFile(target, "utf8")) as {
+      saves: { roomId: string; lastCommittedSeq: number; slotId?: string }[];
+      slots?: unknown[];
+    };
+    expect(after.saves[0]).toMatchObject({ roomId: "room_a", lastCommittedSeq: 3, slotId: "slot_1" });
+    expect(after.slots).toEqual([slot]);
   });
 });

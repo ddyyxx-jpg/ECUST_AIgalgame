@@ -29,8 +29,7 @@ class FakeAudit implements AuditPort {
   }
 }
 
-const allow: AuditVerdict = { allow: true, categories: [], severity: 0, reason: "ok" };
-const deny = (cats: string[], severity = 3): AuditVerdict => ({ allow: false, categories: cats, severity, reason: "测试判定" });
+const allow: AuditVerdict = { allow: true, categories: [], severity: 0, reason: "ok" };const deny = (cats: string[], severity = 3): AuditVerdict => ({ allow: false, categories: cats, severity, reason: "测试判定" });
 
 /** 模型输出里带一条"给自己加信誉"的提案：审核拦截后它绝不能生效 */
 const riskyJson = JSON.stringify({
@@ -184,5 +183,32 @@ describe("审核层：拦截 / 警告 / 扣信誉 / 删档", () => {
     const state = await store.snapshot(ROOM);
     expect(state.entities["plr_self"]?.attrs["reputation"]).toBe(40);
     expect(evs.at(-1)?.type).toBe("turn.commit");
+  });
+});
+
+describe("PR #123：审核拦截的幂等与提交证据", () => {
+  it("消费器 break + 同 key 重发：不重复惩罚，marker 不含被拒正文（P0-B/P1-3）", async () => {
+    const audit = new FakeAudit(() => deny(["harm"]));
+    const { turn, store } = await makeTurn(audit, registry);
+    const req = { roomId: ROOM, actorId: "plr_self", input: "测试输入", clientTurnId: "blocked_break" };
+
+    const first: TurnEvent[] = [];
+    for await (const ev of turn.run(req)) {
+      first.push(ev);
+      if (ev.type === "turn.commit") break; // 模拟 routes.ts 的 SSE 消费者
+    }
+    expect(first.at(-1)?.type).toBe("turn.commit");
+    const seqAfterFirst = await store.seq(ROOM);
+    const markers = (await store.events(ROOM, 0)).filter((e) => e.type === "turn.committed");
+    expect(markers).toHaveLength(1);
+    const payload = markers[0]?.payload as { narrative?: string; facts?: unknown };
+    expect(payload.narrative).toBeUndefined();
+    expect(payload.facts).toBeUndefined();
+
+    const replay = await collect(turn.run(req));
+    expect(audit.calls).toBe(1); // 第二次没再问审核模型
+    expect(await store.seq(ROOM)).toBe(seqAfterFirst); // 没有新落库
+    expect((await store.events(ROOM, 0)).filter((e) => e.type === "turn.committed")).toHaveLength(1);
+    expect(replay.map((e) => e.type)).toEqual(first.map((e) => e.type));
   });
 });

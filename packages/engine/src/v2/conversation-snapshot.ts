@@ -65,6 +65,9 @@ export const conversationSnapshotSchema = z.object({
   version: z.literal(1),
   savedAt: z.number().optional(),
   sessions: z.array(sessionSchema),
+  // #123 P1-1：会话宿主的幂等缓存也要跨重启；否则同一 clientTurnId 重试会被当新回合重新结算。
+  // 键与事件都由引擎自身写出，读回时按 ConversationEvent 使用（内部投影，不做逐事件 zod 展开）。
+  idempotency: z.array(z.object({ key: z.string(), events: z.array(z.unknown()) })).optional(),
 });
 
 export type ConversationSnapshot = z.infer<typeof conversationSnapshotSchema>;

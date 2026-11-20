@@ -51,6 +51,11 @@
       "type": "memory.impression.queued",
       "when": "canonize 发布世界层记忆并生成世界印象后（P4 保留：用户投影走 onImpression，事件暂不发射）",
       "broadcast": false
+    },
+    {
+      "type": "turn.committed",
+      "when": "一回合提交后（Arbiter 写入 commitMarker，payload 为提交证据；与 SSE 的 turn.commit 是两回事）",
+      "broadcast": false
     }
   ]
 }

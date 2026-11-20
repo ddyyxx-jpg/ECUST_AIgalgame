@@ -32,6 +32,15 @@ const out = path.resolve(args.get("out") ?? path.join(dataDir, "archives", `${ro
 const dryRun = args.has("dry-run");
 const userId = args.get("user");
 
+// #123 P1-F：--out 必须落在数据目录中的非权威区域；否则一条命令就能把事件日志/存档索引覆盖掉。
+if (!dryRun) {
+  const guarded = ["rooms", "history", "users"].map((d) => path.join(dataDir, d) + path.sep);
+  if (guarded.some((dir) => out === dir.slice(0, -1) || out.startsWith(dir))) {
+    console.error(`[export-save] 拒绝写入权威数据目录（rooms/history/users）：${out}`);
+    process.exit(2);
+  }
+}
+
 try {
   const store = new FileStore(path.join(dataDir, "rooms"));
   const seq = await store.load(roomId!);

@@ -236,6 +236,40 @@ describe("dev/v2 群聊 HTTP 端点（issue #89）", () => {
     await app.close();
   });
 
+  it("#123 P0-C：进程内会话 Map 为空但 host 有快照恢复的会话时，复用 getByRoom 而不是新开", async () => {
+    let opens = 0;
+    const ran: string[] = [];
+    const { app, roomId, actorId } = await appWithHost((rid, actor) => {
+      const restored: ConversationSessionV2 = {
+        id: "conv_restored", roomId: rid, participants: [actor], phase: "speaking",
+        turn: 2, maxTurns: 10, status: "open",
+        queue: [], injected: [], sceneBeats: [], npcSpeechStreak: 0, visibility: "scene",
+      };
+      return {
+        async open(): Promise<ConversationSessionV2> { opens += 1; throw new Error("不应新开会话"); },
+        get(): ConversationSessionV2 | undefined { return undefined; }, // 模拟重启后进程内 Map 为空
+        getByRoom(room: string): ConversationSessionV2 | undefined { return room === rid ? restored : undefined; },
+        close(): boolean { return true; },
+        exportSessions() { return { version: 1 as const, sessions: [restored] }; },
+        async *run(sessionId: string): AsyncIterable<ConversationEvent> {
+          ran.push(sessionId);
+          yield { type: "conversation.phase", sessionId, phase: "speaking" } as ConversationEvent;
+        },
+      } as unknown as ConversationHostV2;
+    });
+
+    const res = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: payload(actorId, "restart-reuse"),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(opens).toBe(0); // 没有新开 conv_2
+    expect(ran).toEqual(["conv_restored"]); // 重用了恢复的 conv_1
+    expect(sse(res.body).some((e) => e.type === "conversation.phase")).toBe(true);
+    await app.close();
+  });
+
   it("#104：会话 Map 淘汰旧 room 时调用 host.close() 清理（不泄漏）", async () => {
     const prevMax = process.env.GALGAME_CONVERSATION_MAX_SESSIONS;
     process.env.GALGAME_CONVERSATION_MAX_SESSIONS = "2";

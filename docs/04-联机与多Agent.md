@@ -91,7 +91,7 @@ interface RoomMember {
 | `clock.advanced` | 全场 | 全量 |
 | `scene.changed` | 全场 | 只发 `locationId` + 在场者 |
 | `actor.moved` | 全场 | 非在场者只发"离开了房间"粗粒度 |
-| `turn.committed` | 全场 | `{turnId, seq, actorId}` |
+| `turn.committed` | 全场 | `{clientTurnId, turnId, actorId, committedSeq, narrative?, facts?, usage?}` |
 | `room.member.joined` / `room.member.left` | 全场 | 全量 |
 | `entity.created` / `entity.tombstoned` | 全场 | 只发 `{id, kind, name}`，`attrs` 待拉取 |
 | `plot.upserted` / `plot.resolved` | 全场 | **剥掉** `leakPoints`/`forbidReveal`/`goal`，只留 `plotId`+标题级摘要 |

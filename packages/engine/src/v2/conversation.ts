@@ -131,7 +131,23 @@ export class ConversationHostV2 implements ConversationTurnV2 {
     const sessions = [...this.sessions.values()]
       .filter((s) => !roomId || s.roomId === roomId)
       .map((s) => structuredClone(s));
-    return { version: 1, savedAt: this.deps.now?.() ?? Date.now(), sessions };
+    const ids = new Set(sessions.map((s) => s.id));
+    // #123 P1-1：把本房会话的幂等缓存一并导出；重启后同 key 才能原样重放而不重新结算。
+    const idempotency = [...this.seen.entries()]
+      .filter(([key]) => {
+        try {
+          const [sid] = JSON.parse(key) as [string];
+          return ids.has(sid);
+        } catch {
+          return false;
+        }
+      })
+      .slice(-MAX_SEEN)
+      .map(([key, events]) => ({ key, events: structuredClone(events) as unknown[] }));
+    return {
+      version: 1, savedAt: this.deps.now?.() ?? Date.now(), sessions,
+      ...(idempotency.length > 0 ? { idempotency } : {}),
+    };
   }
 
   /**
@@ -143,7 +159,10 @@ export class ConversationHostV2 implements ConversationTurnV2 {
   restoreSessions(raw: unknown, roomId?: RoomId): RestoreResult {
     const parsed = conversationSnapshotSchema.safeParse(raw);
     if (!parsed.success) {
-      for (const s of this.sessions.values()) s.status = "closed";
+      // #123 P1-5：坏快照只降级它影响的房间，不能把所有房间的会话一起关掉。
+      for (const s of [...this.sessions.values()]) {
+        if (!roomId || s.roomId === roomId) s.status = "closed";
+      }
       return { restored: 0, degraded: true, sessions: [] };
     }
     const restored: string[] = [];
@@ -159,6 +178,19 @@ export class ConversationHostV2 implements ConversationTurnV2 {
       restored.push(s.id);
     }
     // 只要出现 roomId 不一致的会话就降级：调用方应告警/重新加载正确快照（不静默吞掉）
+    // #123 P1-1：幂等缓存随快照恢复；只恢复仍 open、且属于本房间的条目。
+    for (const entry of parsed.data.idempotency ?? []) {
+      try {
+        const [sid] = JSON.parse(entry.key) as [string];
+        const s = this.sessions.get(sid);
+        if (!s || s.status === "closed") continue;
+        if (roomId && s.roomId !== roomId) continue;
+        this.seen.set(entry.key, entry.events as ConversationEvent[]);
+      } catch {
+        // 坏 key 跳过：缓存是加速/幂等投影，单条坏了不影响会话本体
+      }
+    }
+    this.trim(this.seen, MAX_SEEN);
     return { restored: restored.length, degraded: mismatched, sessions: restored };
   }
 
