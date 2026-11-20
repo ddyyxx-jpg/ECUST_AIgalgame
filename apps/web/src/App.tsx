@@ -1091,6 +1091,8 @@ await runTurn(
             lines={convMode === "v2" ? [...lines, ...convLines] : lines}
             typing={typing}
             busy={busy}
+            // 地图是全屏遮罩，不会卸载 ChatPanel：打开时数字键快选必须停用，否则会穿透真发回合（PR #127 P1）
+            overlayOpen={mapOpen}
             err={err}
             input={input}
             onInput={setInput}
