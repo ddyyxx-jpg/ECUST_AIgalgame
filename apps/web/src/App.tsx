@@ -22,7 +22,7 @@ import { turnSuggestions } from "./suggestions.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
 import { shouldDropRetryOnMove } from "./turn-error.ts";
-import { decideSessionSync, type SessionSyncTrigger } from "./session-signal.ts";
+import { createSessionResync } from "./session-wiring.ts";
 import { fetchRoomEvents } from "./events-replay.ts";
 import { npcLocIdFromLinks, targetStillInScene } from "./npc-presence.ts";
 import { phaseLabel } from "./ui.ts";
@@ -69,6 +69,9 @@ export default function App() {
   const [debugPass, setDebugPass] = useState("");
   const [debugErr, setDebugErr] = useState("");
   const [roomId, setRoomId] = useState<string>("");
+  /** 每次渲染同步：enterRoom 是 useCallback，异步流程里要判断「当前画面属于哪个房间」 */
+  const roomIdRef = useRef("");
+  roomIdRef.current = roomId;
   /** 当前房间的玩家角色 id：由服务端签发（建房返回值 / 房间成员表），不在前端猜 */
   const [actorId, setActorId] = useState<string>("");
   const [savedRoomId, setSavedRoomId] = useState<string>("");
@@ -85,6 +88,9 @@ export default function App() {
    * v2 事件行单独存在 convLines，渲染时接在 v1 历史之后——老流程一行不改。
    */
   const [convMode, setConvMode] = useState<"v1" | "v2">("v1");
+  /** resetRoomUi 会把 convMode 置 v1；同房间重进房要恢复已探测的值（PR #126 P2） */
+  const convModeRef = useRef<"v1" | "v2">("v1");
+  convModeRef.current = convMode;
   const [convLines, setConvLines] = useState<Line[]>([]);
   /** v2 说话类型清单（GET /conversation/modes）；空数组 = 老流程或取清单失败 */
   const [v2Modes, setV2Modes] = useState<UtteranceModeInfo[]>([]);
@@ -95,6 +101,9 @@ export default function App() {
   const stateRef = useRef<WorldState | null>(null);
   stateRef.current = state;
   const [input, setInput] = useState("");
+  /** 草稿：enterRoom 在 reset 前捕获、成功后恢复（PR #126 P2），异步流程里读最新值 */
+  const inputRef = useRef("");
+  inputRef.current = input;
   const [busy, setBusy] = useState(false);
   /** v2 回合的乐观玩家行：点发送到 committed 之间先浅色显示，引擎把本人 delivery 投回来就清掉 */
   const [pendingLines, setPendingLines] = useState<{ kind: LineKind; text: string }[]>([]);
@@ -103,18 +112,16 @@ export default function App() {
   const [errRetryable, setErrRetryable] = useState(false);
   /** 流结束但没有 commit/error：重试前必须先向服务端核对（不盲目重发） */
   const [unconfirmed, setUnconfirmed] = useState<{ clientTurnId: string } | null>(null);
-  /** #87：/events 回放降级提示（actorId 传错 → 不渲染私信）；空字符串 = 不显示 */
+  /**
+   * #87：/events 回放降级提示（actorId 传错 → 不渲染私信）；空字符串 = 不显示。
+   * PR-3：前台恢复失败也复用这条提示位——失败同样计入一次同步（session-wiring 在发起前
+   * 就刷新了同步时刻），但不会 reset，所以旧画面、草稿与可重试状态都保留。
+   */
   const [eventsNotice, setEventsNotice] = useState<string>("");
   /** 最近一次玩家行动：重试时原样再发，不重复打印玩家行 */
   const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null; utterance?: UtteranceDraft } | null>(null);
   /** 断流前已收到的叙事/facts：核对到 committed 后只补历史里的差集，避免重复刷屏 */
   const pendingTurn = useRef<{ clientTurnId: string; narrative: string; facts: string[] } | null>(null);
-  /** PR-3：上次成功进房/同步的时刻；0 = 还没同步过（首次不节流） */
-  const lastSyncAtRef = useRef(0);
-  /** PR-3：本次隐藏开始的时刻；null = 当前可见，或本轮没经过 visibilitychange */
-  const hiddenSinceRef = useRef<number | null>(null);
-  /** PR-3：重进房防重入（visibilitychange 与 focus 常成对触发，只放行第一个） */
-  const resyncingRef = useRef(false);
   /** 全屏地图层：点对话页左上角的小地图打开 */
   const [mapOpen, setMapOpen] = useState(false);
 const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
@@ -318,14 +325,15 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
   }, []);
 
   /**
-   * 进入一个已存在的房间：先作废上一局的在途请求并清画面，再拉权威状态与历史。
-   * 开场只由前端渲染（不在前端推演世界）；之后玩家输入与叙事接在它下面。
+   * 进入一个已存在的房间：**先把数据拉全，成功后才 reset 并切换 UI**。
+   * PR #126 P1-2：旧实现第一行 resetRoomUi() 会清 state/lines/input，resumed 拉取失败时
+   * 画面被清空、草稿丢失；现在失败直接抛给调用方（前台恢复走 onNotice），旧画面、草稿与
+   * 可重试状态都保持原样。首次进房/普通换房同样走这条路径，只是没有旧画面可保。
    */
   const enterRoom = useCallback(
     async (id: string, opts: { resumed?: boolean; scenarioId?: string; actorId?: string } = {}) => {
       const token = scopeRef.current.renew();
       const current = () => scopeRef.current.isCurrent(token.version);
-      resetRoomUi();
       const snapshot = await fetchState(id);
       if (!current()) return;
       // actorId 的优先级：调用方（建房/存档）→ 房间成员表 → 旧房间兼容值。
@@ -346,7 +354,7 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
         sc = opts.scenarioId ? scenarios.find((s) => s.id === opts.scenarioId) ?? fallback : fallback;
       }
 
-      // 续玩时读历史失败则留在标题页，保留存档供玩家重试。
+      // 续玩时读历史失败则留在标题页/旧画面，保留存档与当前状态供玩家重试。
       let page: HistoryPage = { history: [], lastCommittedSeq: 0, hasEarlier: false };
       try {
         page = await fetchHistory(id);
@@ -356,16 +364,25 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
         if (opts.resumed) throw new Error("对话历史暂不可用，请稍后重试", { cause: e });
       }
       if (!current()) return;
-      const tw = getTw();
-      tw.reset();
-      lastFacts.current = "";
+
+      // 数据齐了才动手，reset 前先捕获要跨「重进房」保留的本地 UI 状态（PR #126 P2）：
+      // - 草稿：旧实现 reset 会清空输入框，所以才有「composing 不重拉」的保护；现在同房间
+      //   重进房会保留草稿，输入中也能恢复（换房/新开局仍清空，草稿只属于写它的那个房间）；
+      // - convMode：同房间重进房保留已探测的 v2，避免 reset 成 v1 后、detect 回来前误走 v1 回合。
+      const sameRoom = opts.resumed === true && id === roomIdRef.current;
+      const keepDraft = sameRoom ? inputRef.current : "";
+      const keepConvMode = sameRoom ? convModeRef.current : "v1";
+      resetRoomUi();
+      if (keepDraft) setInput(keepDraft);
+      if (keepConvMode === "v2") setConvMode("v2");
+
       const restored = restoreConversation(page.history, sc, opts.resumed === true, () => ++lineId);
       if (restored.lines.length > 0) {
         setLines(restored.lines);
       } else {
         // 开场 = 对话流的第一屏：身份 → 正文。没有预设剧本时只留一行提示，不编造内容。
         setLines([]);
-        tw.enqueue(restored.opening);
+        getTw().enqueue(restored.opening);
       }
 
       setEarlier({ before: page.earlierCursor ?? earlierCursor(page.history), hasEarlier: page.hasEarlier, loading: false });
@@ -375,9 +392,6 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
       setRoomId(id);
       setTab("chat");
       setScreen("game");
-      // PR-3：进房成功 = 已同步；同时清掉本次隐藏的起点，避免旧的离开时长被再次计入。
-      lastSyncAtRef.current = Date.now();
-      hiddenSinceRef.current = null;
       // v2 服务端（issue #89）探测：探不到 /conversation 就保持 v1 /turns，老流程零回归。
       // 探测放在 UI 呈现之后，不阻塞进房；失败/切房都会由 current() 拦掉。
       void detectConversation(id, token.signal).then((v2) => {
@@ -401,56 +415,35 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
 
   /**
    * PR-3 客户端轻唤醒：合盖/切后台/断网再回来时 SSE 可能已经断了，画面停在旧状态。
-   * 服务端没有 plot.ping 发射点，所以只信「回到前台 / 网络恢复」这类本地信号，
-   * 满足条件就重走一次 enterRoom（全量重拉权威状态 + 历史 + 事件回放）。
-   * 决策在 session-signal.ts（纯函数），这里只负责接线与防重入。
+   * 服务端没有 plot.ping 发射点，所以只信「回到前台 / 网络恢复」这类本地信号。
+   * 接线（事件注册、离开时长、节流、防重入、失败提示）全部在 session-wiring.ts，
+   * 用 fake 事件源可在 node 里测；这里只注入真实 DOM 与最新 React 状态。
+   *
+   * 实例只建一次，deps 用 ref 读最新值：若把 busy/input 放进依赖，每次按键都会重建
+   * 实例，隐藏起点与同步时刻随之丢失。
    */
+  const resyncLive = useRef({ screen, roomId, busy, enterRoom, fail });
+  resyncLive.current = { screen, roomId, busy, enterRoom, fail };
   useEffect(() => {
-    const attempt = (trigger: SessionSyncTrigger, awayOverride?: number) => {
-      if (resyncingRef.current) return;
-      const now = Date.now();
-      const awayMs = awayOverride ?? (hiddenSinceRef.current === null ? 0 : now - hiddenSinceRef.current);
-      const d = decideSessionSync({
-        trigger,
-        visible: document.visibilityState === "visible",
-        online: navigator.onLine,
-        screen,
-        roomId,
-        busy,
-        composing: input.trim().length > 0,
-        awayMs,
-        sinceLastSyncMs: now - lastSyncAtRef.current,
-      });
-      if (!d.resync) return;
-      // 先记时刻再发请求：失败也按一次同步计，避免断网时 focus/online 反复重拉
-      lastSyncAtRef.current = now;
-      resyncingRef.current = true;
-      void enterRoom(roomId, { resumed: true })
-        .catch((e) => setEventsNotice(fail(e)))
-        .finally(() => {
-          resyncingRef.current = false;
-        });
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        hiddenSinceRef.current = Date.now();
-        return;
-      }
-      const awayMs = hiddenSinceRef.current === null ? 0 : Date.now() - hiddenSinceRef.current;
-      hiddenSinceRef.current = null;
-      attempt("foreground", awayMs);
-    };
-    const onFocus = () => attempt("foreground");
-    const onOnline = () => attempt("online");
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("online", onOnline);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("online", onOnline);
-    };
-  }, [screen, roomId, busy, input, enterRoom, fail]);
+    const resync = createSessionResync({
+      now: () => Date.now(),
+      on: (target, type, handler) => {
+        const el: EventTarget = target === "document" ? document : window;
+        el.addEventListener(type, handler);
+        return () => el.removeEventListener(type, handler);
+      },
+      isVisible: () => document.visibilityState === "visible",
+      isOnline: () => navigator.onLine,
+      screen: () => resyncLive.current.screen,
+      roomId: () => resyncLive.current.roomId,
+      busy: () => resyncLive.current.busy,
+      enterRoom: (id) => resyncLive.current.enterRoom(id, { resumed: true }),
+      // 失败也计一次同步（接线在发起前已刷新同步时刻）；提示复用 eventsNotice 降级提示位。
+      // enterRoom 先拉数据后 reset，失败时旧画面、草稿与可重试状态原样保留。
+      onNotice: (e) => setEventsNotice(resyncLive.current.fail(e)),
+    });
+    return () => resync.dispose();
+  }, []);
 
   const startNew = useCallback(
     async (scenarioId: string) => {

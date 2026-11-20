@@ -9,6 +9,9 @@
  * 事件回放」，复用它一次就能对齐全部投影；若在前端按 seq 自建事件归并，等于把
  * 服务端的归并逻辑复制一份，契约一演进就会出现两套真相。代价是一次全量拉取，
  * 用「离开够久 + 距上次同步够久」把触发频率压到可接受范围。
+ *
+ * 输入草稿不是门槛（PR #126 审查 P2）：重进房会在 reset 前捕获、成功后恢复草稿，
+ * 不需要「输入中不打断」的保护；旧实现反而让带草稿的玩家永远等不到恢复。
  */
 
 /** 唤醒来源：前台可见性恢复 / 网络恢复 */
@@ -23,8 +26,6 @@ export interface SessionSyncInput {
   screen: "title" | "game";
   roomId: string;
   busy: boolean;
-  /** 输入框有内容：重进房会清画面，不打断玩家正在打的字 */
-  composing: boolean;
   /** 本次从隐藏到可见的时长；不是从隐藏恢复时传 0 */
   awayMs: number;
   /** 距上次成功进房/同步的时长；没同步过传一个很大的数即可 */
@@ -41,7 +42,6 @@ export type SessionSyncReason =
   | "not-playing"
   | "no-room"
   | "busy"
-  | "composing"
   | "too-soon"
   | "throttled";
 
@@ -50,9 +50,16 @@ export interface SessionSyncDecision {
   reason: SessionSyncReason;
 }
 
-/** 快速切标签（<5s）不重拉：避免 alt-tab 抖动带来一串全量请求 */
+/**
+ * 离开至少 5s 才重拉：低于此值视为 alt-tab 抖动（visibilitychange 与 focus 常成对触发），
+ * 一次全量拉取不便宜，快速切标签不值得。online 触发不受这个下限限制。
+ */
 export const DEFAULT_MIN_AWAY_MS = 5000;
-/** 两次同步的最小间隔：SSE 正常时的一次多余全量拉取也要受限 */
+/**
+ * 两次重进房的最小间隔 30s：SSE 正常时按 30s 一次全量对齐已足够，也避免多个信号
+ * （visible/focus/online）叠加成请求风暴。失败同样计入一次同步（见 session-wiring），
+ * 否则断网时 focus/online 会反复触发全量拉取。
+ */
 export const DEFAULT_MIN_INTERVAL_MS = 30000;
 
 /**
@@ -68,7 +75,6 @@ export function decideSessionSync(input: SessionSyncInput): SessionSyncDecision 
   if (input.screen !== "game") return { resync: false, reason: "not-playing" };
   if (!input.roomId) return { resync: false, reason: "no-room" };
   if (input.busy) return { resync: false, reason: "busy" };
-  if (input.composing) return { resync: false, reason: "composing" };
   if (input.trigger === "foreground" && input.awayMs < minAwayMs) return { resync: false, reason: "too-soon" };
   if (input.sinceLastSyncMs < minIntervalMs) return { resync: false, reason: "throttled" };
   return { resync: true, reason: "ok" };

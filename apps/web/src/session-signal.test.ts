@@ -11,7 +11,6 @@ function base(over: Partial<SessionSyncInput> = {}): SessionSyncInput {
     screen: "game",
     roomId: "room_1",
     busy: false,
-    composing: false,
     awayMs: 60_000,
     sinceLastSyncMs: 120_000,
     ...over,
@@ -41,8 +40,11 @@ describe("decideSessionSync（前台恢复决策）", () => {
     expect(decideSessionSync(base({ busy: true }))).toEqual({ resync: false, reason: "busy" });
   });
 
-  it("玩家正在输入（composing）不打断：重进房会清掉输入框", () => {
-    expect(decideSessionSync(base({ composing: true }))).toEqual({ resync: false, reason: "composing" });
+  it("输入草稿不再是门槛（PR #126 P2）：重进房会保留草稿，决策不读输入状态", () => {
+    // 旧实现把 composing 当硬条件，导致带草稿的玩家永远等不到恢复；现在草稿由 App
+    // 在 reset 前捕获、成功后恢复。这里显式塞一个旧字段，确认它不参与判定。
+    const withDraft = { ...base(), composing: true } as SessionSyncInput;
+    expect(decideSessionSync(withDraft)).toEqual({ resync: true, reason: "ok" });
   });
 
   it("节流：距上次同步不足 30s 不重复全量拉取", () => {
@@ -57,9 +59,9 @@ describe("decideSessionSync（前台恢复决策）", () => {
     });
   });
 
-  it("优先级：更靠前的硬条件先于节流与离开时长生效", () => {
+  it("优先级：更靠前的硬条件先于离开时长与节流生效", () => {
     expect(decideSessionSync(base({ visible: false, online: false, busy: true })).reason).toBe("hidden");
-    expect(decideSessionSync(base({ busy: true, composing: true })).reason).toBe("busy");
+    expect(decideSessionSync(base({ busy: true, sinceLastSyncMs: 1_000 })).reason).toBe("busy");
   });
 
   it("阈值可覆盖（测试与以后调参用）", () => {
