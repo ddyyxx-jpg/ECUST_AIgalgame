@@ -4,6 +4,16 @@
 
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）。
 
+## 3.7.0（未合并，PR #124 / `pr/engine`；CONTRACT 3.6.0 → 3.7.0）
+
+> 3.7.0 是 **minor**：只新增可选参数，不改已有语义；**不新增 op 原语**（仍 13 个）、**不新增错误码**（仍 36 个），不改 `apiVersion` / `PROMPT_VERSION`。本 PR **无生产调用方**（Turn/结算路径未接入），`expectAttrs` 保持纯可选能力。
+
+- 新增 `ApplyOptions.expectAttrs`（`AttrExpectation[]`，可选）：`apply` 前逐条比对当前快照 `{ entityId, key, expected: AttrValue | null }`（`null` = 该属性必须不存在）；任一条失配 → 整批拒绝 `E_PRECONDITION`，不进入试算（simulate）、不落库、不消耗回合预算；校验顺序为先 `expectedSeq`、后本项；空数组/未传时行为与 3.6.0 完全一致。校验只承诺**标量精确相等**（`AttrValue` 只有 number/string/boolean），**不承诺深比较/数组语义**（docs/03 §2.3）。
+- 失配返回在预算记账与事件追加之前，预算账本与 `seq` 均不变；`E_PRECONDITION` 为既有错误码，仅补触发场景说明（docs/03 §7、§10.24）。
+- 测试：新增 `packages/engine/src/arbiter.expect.test.ts` 补 §12.2 四问闭环——①失配不消耗预算（同一预算随后提交成功，证明额度未被白吃）②多条 `expectAttrs` 逐条校验、首个失配即整批拒绝且无部分写入 ③同房间并发两次 `apply` 仍串行（`exclusive` 链）④真实 `FileStore` 写入后重开、`load`/`snapshot` 再 `apply`，`expectAttrs` 在重启后仍按持久化值正确校验。
+- 验证（本 worktree 实跑）：`npx vitest run packages/engine/src/arbiter.test.ts packages/engine/src/arbiter.expect.test.ts` → 2 文件 / 22 用例全过；`npm run typecheck` → 0 错；`npm run check:contract` → 8/8（CONTRACT_VERSION=3.7.0，13/13 op，36/36 错误码）。
+- 遗留：Turn/结算路径尚未接入 `expectAttrs`（本 PR 仅提供能力）；实际接入与全量测试留待后续 PR。
+
 ## 3.6.0（dev/v2，2026-11-19）
 
 - 第 13 个 op `msg.send`：NPC 之间/玩家给 NPC 的模拟私信（只有目标+内容），`Envelope.audience` 在 Transport 前过滤；模块 `apiVersion 2→3`。

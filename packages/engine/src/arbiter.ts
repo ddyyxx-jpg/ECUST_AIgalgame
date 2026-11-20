@@ -148,15 +148,16 @@ export class DefaultArbiter {
   }
 
   /**
-   * 结算前置条件（3.6.1）：逐条比对当前快照，返回首条失配的可读原因，全部满足返回 null。
+   * 结算前置条件（3.7.0）：逐条比对当前快照，返回首条失配的可读原因，全部满足返回 null。
    * expected===null 表示属性必须不存在；实体或属性不存在时实际值视为 undefined。
+   * AttrValue 只有 number/string/boolean，用 === 精确比较（契约只承诺标量相等，不承诺深比较）。
    */
   private firstAttrMismatch(expect: AttrExpectation[] | undefined, state: WorldState): string | null {
     if (!expect || expect.length === 0) return null;
     for (const e of expect) {
       const actual = state.entities[e.entityId]?.attrs[e.key];
       const present = actual !== undefined;
-      const matched = e.expected === null ? !present : present && JSON.stringify(actual) === JSON.stringify(e.expected);
+      const matched = e.expected === null ? !present : present && actual === e.expected;
       if (!matched) {
         const wanted = e.expected === null ? "不存在" : JSON.stringify(e.expected);
         const got = present ? JSON.stringify(actual) : "不存在";
