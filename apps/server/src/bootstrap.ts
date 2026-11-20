@@ -114,9 +114,51 @@ export type App = AppDeps & {
   jobLedger: JobLedger;
   /** 每房间单飞 + 看门狗的后台调度器（PR-2） */
   background: BackgroundCycle;
+  /** 本次启动的对账结果（PR-2）：inflight→failed 计数 + prepared backlog 计数，供运维/测试断言 */
+  jobReconcile: JobReconcileSummary;
   /** 管理操作日志 */
   adminLog: AdminLog;
 };
+
+/** 启动对账结果：只反映 job 投影，不写世界状态 */
+export interface JobReconcileSummary {
+  /** 扫描到的真实房间数（来自 FileStore.listRooms()） */
+  rooms: number;
+  /** 发现的重启前 inflight（无人认领）条数 */
+  orphaned: number;
+  /** 实际转为 failed 的条数 */
+  failed: number;
+  /** prepared 条数：留 backlog，启动时**不自动重放**（重放需要人工/后续 backlog 决策） */
+  runnable: number;
+}
+
+/**
+ * 启动对账（PR-2）：进程重启后仍 inflight 的任务没人认领，按失败处理；
+ * prepared 只计数留在 backlog，本轮不自动重放。单房读坏只影响该房（list 内部跳过坏行）。
+ */
+export async function reconcileBackgroundJobs(
+  jobLedger: JobLedger,
+  store: { listRooms(): Promise<string[]> },
+): Promise<JobReconcileSummary> {
+  const summary: JobReconcileSummary = { rooms: 0, orphaned: 0, failed: 0, runnable: 0 };
+  for (const roomId of await store.listRooms()) {
+    summary.rooms += 1;
+    const { runnable, orphaned } = await jobLedger.reconcile(roomId);
+    summary.orphaned += orphaned.length;
+    summary.runnable += runnable.length;
+    for (const job of orphaned) {
+      const next = await jobLedger.transition(roomId, job.id, {
+        status: "failed",
+        lastError: "进程重启时仍在 inflight，按失败处理",
+      });
+      if (next?.status === "failed") summary.failed += 1;
+    }
+    if (runnable.length > 0) {
+      console.info(`[background] ${roomId} 有 ${runnable.length} 个可重放任务（本轮不自动重放，留 backlog）`);
+    }
+  }
+  return summary;
+}
 
 export async function createApp(cfg: ServerConfig): Promise<App> {
   const contentDir = path.resolve(cfg.contentDir);
@@ -327,22 +369,16 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
 
   // ---------------------------------------------------------------- 后台任务投影与单飞调度（PR-2）
   // job 生命周期是投影，不写世界状态；写失败只 warn，不阻断后台工作。
-  const jobLedger = new JobLedger(path.join(path.resolve(cfg.dataDir), "jobs"));
-  const background = new BackgroundCycle({ ledger: jobLedger, defaultStallMs: cfg.backgroundStallMs });
-  // 启动对账：进程重启后仍 inflight 的没人认领，按失败处理；prepared/deferred 只报数量，留 backlog 等后续重放。
+  const jobLedger = new JobLedger(path.join(path.resolve(cfg.dataDir), "jobs"), now);
+  const background = new BackgroundCycle({
+    ledger: jobLedger,
+    now,
+    defaultStallMs: cfg.backgroundStallMs,
+  });
+  // 启动对账：进程重启后仍 inflight 的没人认领，按失败处理；prepared 只计数留 backlog，不自动重放。
+  let jobReconcile: JobReconcileSummary = { rooms: 0, orphaned: 0, failed: 0, runnable: 0 };
   try {
-    for (const roomId of await store.listRooms()) {
-      const { runnable, orphaned } = await jobLedger.reconcile(roomId);
-      for (const job of orphaned) {
-        await jobLedger.transition(roomId, job.id, {
-          status: "failed",
-          lastError: "进程重启时仍在 inflight，按失败处理",
-        });
-      }
-      if (runnable.length > 0) {
-        console.info(`[background] ${roomId} 有 ${runnable.length} 个可重放任务（本轮不自动重放）`);
-      }
-    }
+    jobReconcile = await reconcileBackgroundJobs(jobLedger, store);
   } catch (e) {
     console.warn("[background] 启动 reconcile 失败：", e instanceof Error ? e.message : e);
   }
@@ -357,6 +393,8 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
           for (const roomId of await store.listRooms()) {
             if (roomId === worldRoom) continue;
             await store.load(roomId);
+            // store.seq() 是 FileStore 的进程内快捷方式（上面刚 load 过）；换远程/异步存储时
+            // 应改用 await store.load(roomId) 的返回值，别依赖 seq() 的本地缓存。
             await background.run(roomId, { kind: "canonize", basedOnSeq: store.seq(roomId) }, async ({ signal }) => {
               if (signal.aborted) return;
               await canonize.retireRoom(roomId);
@@ -430,7 +468,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
         try {
           for (const roomId of await store.listRooms()) {
             if (roomId === worldRoom) continue;
-            await store.load(roomId);
+            await store.load(roomId); // 同理，seq() 依赖这里先 load
             await background.run(roomId, { kind: "gossip", basedOnSeq: store.seq(roomId) }, async ({ signal }) => {
               if (signal.aborted) return;
               await gossip.step(roomId);
@@ -476,6 +514,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     ledger,
     jobLedger,
     background,
+    jobReconcile,
     adminLog,
     gossip: {
       send: (roomId, from, to, content, opts) => gossip.send(roomId, from, to, content, opts),

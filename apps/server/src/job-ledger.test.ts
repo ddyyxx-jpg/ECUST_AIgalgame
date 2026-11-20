@@ -32,9 +32,9 @@ describe("JobLedger", () => {
     expect(list.find((r) => r.id === "j2")).toMatchObject({ kind: "gossip", status: "prepared" });
   });
 
-  it("transition 合并 patch、保留未给字段并刷新 updatedAt", async () => {
+  it("transition 合并 patch、保留未给字段并用注入的时钟刷新 updatedAt", async () => {
     const dir = tempDir("job-ledger-");
-    const ledger = new JobLedger(dir);
+    const ledger = new JobLedger(dir, () => 4242);
     await ledger.append(rec("j1", { attempts: 2, receipt: { old: true } }));
     const next = await ledger.transition("room_a", "j1", { status: "failed", lastError: "boom" });
 
@@ -47,8 +47,23 @@ describe("JobLedger", () => {
       lastError: "boom",
       receipt: { old: true },
     });
-    expect(next!.updatedAt).toBeGreaterThanOrEqual(1000);
+    expect(next!.updatedAt).toBe(4242);
     expect(await ledger.transition("room_a", "missing", { status: "done" })).toBeNull();
+  });
+
+  it("终态只写一次：done/failed 不再被 transition 改写，也不追加新行", async () => {
+    const dir = tempDir("job-ledger-");
+    const ledger = new JobLedger(dir);
+    await ledger.append(rec("j1", { status: "inflight" }));
+    const failed = await ledger.transition("room_a", "j1", { status: "failed", lastError: "boom" });
+    expect(failed).toMatchObject({ status: "failed", lastError: "boom" });
+
+    // 模拟重复收尾（旧 abortAll 与 run 各写一次）：不能再改 lastError、不能再落一行
+    const again = await ledger.transition("room_a", "j1", { status: "failed", lastError: "shutdown" });
+    expect(again).toMatchObject({ status: "failed", lastError: "boom" });
+    const raw = await readFile(path.join(dir, "room_a.jsonl"), "utf8");
+    expect(raw.trim().split("\n")).toHaveLength(2);
+    expect(await ledger.transition("room_a", "j1", { status: "done" })).toMatchObject({ status: "failed" });
   });
 
   it("坏行跳过并 warn，不影响好记录", async () => {
@@ -72,16 +87,16 @@ describe("JobLedger", () => {
     }
   });
 
-  it("reconcile 把 prepared/deferred 归 runnable，inflight 归 orphaned", async () => {
+  it("reconcile 把 prepared 归 runnable，inflight 归 orphaned，done/failed 不出现", async () => {
     const dir = tempDir("job-ledger-");
     const ledger = new JobLedger(dir);
     await ledger.append(rec("p", { status: "prepared" }));
-    await ledger.append(rec("d", { status: "deferred" }));
     await ledger.append(rec("f", { status: "inflight" }));
     await ledger.append(rec("x", { status: "done" }));
+    await ledger.append(rec("e", { status: "failed" }));
 
     const { runnable, orphaned } = await ledger.reconcile("room_a");
-    expect(runnable.map((r) => r.id).sort()).toEqual(["d", "p"]);
+    expect(runnable.map((r) => r.id)).toEqual(["p"]);
     expect(orphaned.map((r) => r.id)).toEqual(["f"]);
   });
 

@@ -5,7 +5,8 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-export type JobStatus = "prepared" | "inflight" | "done" | "failed" | "deferred";
+/** 生命周期四态（PR #125 P2：deferred 没有写入点，已移除） */
+export type JobStatus = "prepared" | "inflight" | "done" | "failed";
 
 export interface JobRecord {
   id: string;
@@ -26,13 +27,24 @@ export interface JobReconcile {
 }
 
 const ROOM_ID_RE = /^[A-Za-z0-9._-]+$/;
-const STATUSES = new Set<JobStatus>(["prepared", "inflight", "done", "failed", "deferred"]);
+const STATUSES = new Set<JobStatus>(["prepared", "inflight", "done", "failed"]);
+/** 终态只写一次：只允许 活着 → inflight → done/failed；done/failed 不再被改写 */
+const TRANSITIONS: Record<JobStatus, JobStatus[]> = {
+  prepared: ["inflight", "failed"],
+  inflight: ["done", "failed"],
+  done: [],
+  failed: [],
+};
 
 /** 同文件在进程内串行 append，避免并发写互相穿插；键为绝对文件路径 */
 const appendQueues = new Map<string, Promise<void>>();
 
 export class JobLedger {
-  constructor(private readonly dir: string) {}
+  /** now 可注入：让 transition 的 updatedAt 与 BackgroundCycle 的时钟同源，测试可复现 */
+  constructor(
+    private readonly dir: string,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   /** roomId 进文件名，必须挡住路径穿越 */
   private fileOf(roomId: string): string {
@@ -84,7 +96,10 @@ export class JobLedger {
     }
   }
 
-  /** 找最新记录 → 合并 patch 与 updatedAt → 追加；不存在返回 null */
+  /**
+   * 找最新记录 → 合并 patch 与 updatedAt → 追加；不存在返回 null。
+   * 终态（done/failed）不再改写：重复收尾时返回当前记录而不追加，保证 failed 只写一次。
+   */
   async transition(
     roomId: string,
     id: string,
@@ -92,7 +107,8 @@ export class JobLedger {
   ): Promise<JobRecord | null> {
     const current = (await this.list(roomId)).find((r) => r.id === id);
     if (!current) return null;
-    const next: JobRecord = { ...current, ...patch, updatedAt: Date.now() };
+    if (patch.status && !TRANSITIONS[current.status].includes(patch.status)) return current;
+    const next: JobRecord = { ...current, ...patch, updatedAt: this.now() };
     await this.append(next);
     return next;
   }
@@ -100,7 +116,7 @@ export class JobLedger {
   async reconcile(roomId: string): Promise<JobReconcile> {
     const all = await this.list(roomId);
     return {
-      runnable: all.filter((r) => r.status === "prepared" || r.status === "deferred"),
+      runnable: all.filter((r) => r.status === "prepared"),
       orphaned: all.filter((r) => r.status === "inflight"),
     };
   }
