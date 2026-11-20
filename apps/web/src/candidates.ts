@@ -25,14 +25,36 @@ export interface Candidate {
 
 export const DEFAULT_MAX_CANDIDATES = 6;
 
+/** 「去某地」→ move；与 suggestions.ts 的 `去${e.name}` 模板对应 */
+const MOVE_PREFIX = /^去/;
+/** 「和/跟/找/与某人说话」→ talk；与 suggestions.ts 的 `和${a.name}说话` 模板对应 */
+const TALK_PREFIX = /^(和|跟|找|与)/;
+
 /**
- * 只看句子开头的动词，不做语义理解：建议本来就是模板生成的
- * （`去${地点}` / `和${人名}说话`），前缀就是最可靠的信号。
+ * 分级规则表：**仅展示层启发式**，不是语义理解。
+ *
+ * 建议由 suggestions.ts 的模板生成（`去${地点}` / `和${人名}说话`），
+ * 开头动词就是最可靠的信号，所以这里只看前缀、不做 NLP。顺序即优先级，先命中先生效。
+ * 这张表只决定候选条的分组/配色，不参与服务端判定，也不进任何契约。
+ *
+ * 将来 suggestions 若在契约里带上 kind（需要改 docs/03 并 bump 版本），
+ * 可以改成直通并删掉这张表；本轮不改契约，避免为一个 UI 分组牵动服务端。
+ * 配置化也只需替换这张表，classifySuggestion 与测试不用动。
+ */
+const CLASSIFY_RULES: readonly { kind: CandidateKind; prefix: RegExp }[] = [
+  { kind: "move", prefix: MOVE_PREFIX },
+  { kind: "talk", prefix: TALK_PREFIX },
+];
+
+/**
+ * 只看句子开头的动词，不做语义理解：建议本来就是模板生成的，
+ * 前缀就是最可靠的信号；未命中规则的一律归到 action（其他）。
  */
 export function classifySuggestion(text: string): CandidateKind {
   const t = text.trim();
-  if (/^去/.test(t)) return "move";
-  if (/^(和|跟|找|与)/.test(t)) return "talk";
+  for (const rule of CLASSIFY_RULES) {
+    if (rule.prefix.test(t)) return rule.kind;
+  }
   return "action";
 }
 

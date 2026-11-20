@@ -10,6 +10,7 @@ import type { ViewPatch, WorldState } from "../../../packages/shared/src/contrac
 import CampusMap from "./CampusMap.tsx";
 import CandidatePanel from "./CandidatePanel.tsx";
 import MiniMap from "./MiniMap.tsx";
+import { candidateKeyIndex } from "./candidate-keys.ts";
 import { buildCandidates } from "./candidates.ts";
 import { getMap } from "./api.ts";
 import type { MapView } from "./api.ts";
@@ -32,6 +33,12 @@ export interface ChatPanelProps {
   /** 正在打字的那一行（打字机状态）；null = 没有在打 */
   typing: { kind: LineKind; text: string } | null;
   busy: boolean;
+  /**
+   * 全屏遮罩（目前是地图 MapOverlay）是否打开。
+   * 遮罩只是叠在上面、不会卸载 ChatPanel，所以数字键快选必须显式关掉：
+   * 否则遮罩里按 1 会穿透成 onPick→send，真的发出一个回合（PR #127 P1）。
+   */
+  overlayOpen: boolean;
   err: string;
   input: string;
   onInput: (value: string) => void;
@@ -75,6 +82,7 @@ export default function ChatPanel({
   lines,
   typing,
   busy,
+  overlayOpen,
   err,
   input,
   onInput,
@@ -113,6 +121,16 @@ export default function ChatPanel({
   const logRef = useRef<HTMLDivElement | null>(null);
   // 是否"跟着最新一条走"：玩家往上翻历史时不打扰，回到底部附近后自动恢复跟随
   const stickRef = useRef(true);
+  /**
+   * 数字键快选读的「最新 busy」：keydown 监听是 effect 里的闭包，
+   * onPick→send→setBusy(true) 要等本次事件结束才提交；同一帧内的第二次按键
+   * 若读到闭包里的旧 busy 就会连发。这里每次渲染同步 ref，并在真正发出候选后
+   * 立刻置 true 兜住提交前的空窗（PR #127 P2）。
+   */
+  const busyRef = useRef(busy);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
 
   const scrollToBottom = () => {
     const el = logRef.current;
@@ -221,28 +239,33 @@ export default function ChatPanel({
   // 候选行动：只依赖 suggestions，分类/去重/编号都在纯函数里做（见 candidates.ts）
   const candidates = useMemo(() => buildCandidates(suggestions), [suggestions]);
 
-  // 数字键 1–6 快选：只在聊天面板挂载时生效（切到地图等页面就没有这套语义）；
-  // 输入框/文本域/可编辑元素里不抢键，玩家正在打字时数字就是数字。
+  // 数字键 1–6 快选：只在对话页标签激活时挂载（切走 tab 即卸载，故「切页面」不靠这里判断）。
+  // 地图是全屏遮罩、不会卸载本组件，必须由 App 传 overlayOpen 显式关掉这套语义；
+  // 否则遮罩打开时按 1 仍会 onPick→send，真的发出一个回合（PR #127 P1）。
+  // 其余判定（repeat/修饰键/表单/可编辑元素/busy/范围）都在 candidate-keys.ts 的纯函数里，可独立测试。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
-      // 输入框之外，v2 的 <select> 也属于「正在操作表单」：数字键应留给它的选项跳转
-      if (
-        el &&
-        (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)
-      ) {
-        return;
-      }
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (busy || !state) return;
-      const n = Number(e.key);
-      if (!Number.isInteger(n) || n < 1 || n > candidates.length) return;
+      const index = candidateKeyIndex(
+        { key: e.key, repeat: e.repeat, metaKey: e.metaKey, ctrlKey: e.ctrlKey, altKey: e.altKey },
+        {
+          overlayOpen,
+          busy: busyRef.current,
+          ready: Boolean(state),
+          count: candidates.length,
+          targetTag: el?.tagName ?? null,
+          targetIsContentEditable: el?.isContentEditable ?? false,
+        },
+      );
+      if (index === null) return;
       e.preventDefault();
-      onPick(candidates[n - 1].text, talking ? { id: talking.id, name: talkingName } : null);
+      // 发给父组件后本帧内不再接第二发：setBusy(true) 的提交慢于本次事件
+      busyRef.current = true;
+      onPick(candidates[index - 1].text, talking ? { id: talking.id, name: talkingName } : null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [candidates, busy, state, talking, talkingName, onPick]);
+  }, [candidates, state, overlayOpen, talking, talkingName, onPick]);
 
   return (
     <div className="world-page">
