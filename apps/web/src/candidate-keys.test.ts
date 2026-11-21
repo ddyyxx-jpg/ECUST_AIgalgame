@@ -77,10 +77,14 @@ describe("candidateKeyIndex（数字键 1..count → 候选下标）", () => {
   });
 });
 
-describe("fullScreenOverlayOpen（App → ChatPanel 的遮罩门控接线）", () => {
+// 只覆盖门控判定纯函数本身：组件层无 jsdom，「App 是否把 debugPanelOpen 表达式传对」
+// 由 typecheck + build 保证，不在本测试的声称范围内（PR #127 复审 P3）。
+describe("fullScreenOverlayOpen（门控判定纯函数）", () => {
   it.each([
     { name: "地图打开", mapOpen: true, debugPanelOpen: false, expected: true },
     { name: "调试面板打开", mapOpen: false, debugPanelOpen: true, expected: true },
+    // 可达双开态：先解锁调试面板再打开地图；OR 必须为 true（写成 XOR 会在这里暴露）
+    { name: "两者同时打开（双开可达态）", mapOpen: true, debugPanelOpen: true, expected: true },
     { name: "都关闭", mapOpen: false, debugPanelOpen: false, expected: false },
   ])("$name → $expected", ({ mapOpen, debugPanelOpen, expected }) => {
     expect(fullScreenOverlayOpen({ mapOpen, debugPanelOpen })).toBe(expected);
