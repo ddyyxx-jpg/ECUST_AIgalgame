@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { candidateKeyIndex, shouldHandleCandidateKey } from "./candidate-keys.ts";
+import { candidateKeyIndex, fullScreenOverlayOpen, shouldHandleCandidateKey } from "./candidate-keys.ts";
 import type { CandidateKeyEventLike, CandidateKeyGate } from "./candidate-keys.ts";
 
 /** 正常可响应的上下文；各用例只改自己关心的那一项 */
@@ -74,5 +74,15 @@ describe("candidateKeyIndex（数字键 1..count → 候选下标）", () => {
     expect(candidateKeyIndex(keyEvent({ key: "1" }), gate({ count: 6 }))).toBe(1);
     expect(candidateKeyIndex(keyEvent({ key: "6" }), gate({ count: 6 }))).toBe(6);
     expect(candidateKeyIndex(keyEvent({ key: "7" }), gate({ count: 6 }))).toBeNull();
+  });
+});
+
+describe("fullScreenOverlayOpen（App → ChatPanel 的遮罩门控接线）", () => {
+  it.each([
+    { name: "地图打开", mapOpen: true, debugPanelOpen: false, expected: true },
+    { name: "调试面板打开", mapOpen: false, debugPanelOpen: true, expected: true },
+    { name: "都关闭", mapOpen: false, debugPanelOpen: false, expected: false },
+  ])("$name → $expected", ({ mapOpen, debugPanelOpen, expected }) => {
+    expect(fullScreenOverlayOpen({ mapOpen, debugPanelOpen })).toBe(expected);
   });
 });

@@ -34,7 +34,7 @@ export interface ChatPanelProps {
   typing: { kind: LineKind; text: string } | null;
   busy: boolean;
   /**
-   * 全屏遮罩（目前是地图 MapOverlay）是否打开。
+   * 任意全屏 dialog 遮罩是否打开（地图 MapOverlay、调试面板 DebugPanel 等）。
    * 遮罩只是叠在上面、不会卸载 ChatPanel，所以数字键快选必须显式关掉：
    * 否则遮罩里按 1 会穿透成 onPick→send，真的发出一个回合（PR #127 P1）。
    */
@@ -240,7 +240,7 @@ export default function ChatPanel({
   const candidates = useMemo(() => buildCandidates(suggestions), [suggestions]);
 
   // 数字键 1–6 快选：只在对话页标签激活时挂载（切走 tab 即卸载，故「切页面」不靠这里判断）。
-  // 地图是全屏遮罩、不会卸载本组件，必须由 App 传 overlayOpen 显式关掉这套语义；
+  // 地图、调试面板都是全屏 dialog 遮罩、不会卸载本组件，必须由 App 传 overlayOpen 显式关掉这套语义；
   // 否则遮罩打开时按 1 仍会 onPick→send，真的发出一个回合（PR #127 P1）。
   // 其余判定（repeat/修饰键/表单/可编辑元素/busy/范围）都在 candidate-keys.ts 的纯函数里，可独立测试。
   useEffect(() => {
