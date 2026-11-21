@@ -2,8 +2,8 @@
  * 数字键快选（1–6）的「该不该响应」纯判定（PR #127 评审 P1）。
  *
  * 为什么抽成纯函数：这个判定要在不给项目引 jsdom 的前提下测（vitest 环境是 node），
- * 而它恰恰是 P1 的根因所在——全屏遮罩（地图 / 调试面板）打开时 ChatPanel 仍挂载、
- * 候选仍非空，旧实现只排除表单元素与 busy/无状态，于是数字键穿透遮罩真的发出了回合。
+ * 而它恰恰是 P1 的根因所在——已知的全屏遮罩打开时 ChatPanel 仍挂载、候选仍非空，
+ * 旧实现只排除表单元素与 busy/无状态，于是数字键穿透遮罩真的发出了回合。
  * 现在「遮罩打开」是这里的第一道门，ChatPanel 的 keydown 只负责取字段与转发。
  *
  * 这些都是**展示层的输入路由**，不碰服务端契约，也不改变任何 View/提案语义。
@@ -21,7 +21,7 @@ export interface CandidateKeyEventLike {
 }
 
 export interface CandidateKeyGate {
-  /** 任意全屏 dialog 遮罩是否打开（地图 MapOverlay / 调试面板 DebugPanel 等）：遮罩里数字键属于遮罩，不能穿透去发候选行动 */
+  /** 已知两个全屏遮罩（地图 MapOverlay / 局内调试面板 DebugPanel）是否有一个打开：遮罩里数字键属于遮罩，不能穿透去发候选行动 */
   overlayOpen: boolean;
   /** 回合进行中（由 ChatPanel 用 ref 传最新值，避免同帧闭包读到旧 busy 而连发） */
   busy: boolean;
@@ -71,24 +71,25 @@ export function shouldHandleCandidateKey(event: CandidateKeyEventLike, gate: Can
 }
 
 /**
- * 全屏遮罩的打开状态。
+ * 已知两个全屏遮罩的打开状态。
  *
- * 要挡的不只是地图：调试面板 DebugPanel 也是 role=dialog 的全屏弹层
- * （App.tsx 在 debugToken && roomId 时挂载），两者只要有一个开着，
- * ChatPanel 的数字键快选就不该响应。
+ * 这不是「任意 dialog」的通用注册表：当前项目里只有地图 MapOverlay 与局内调试面板
+ * DebugPanel 两个全屏遮罩（后者由 App 在 debugToken && roomId 时挂载，没有独立 open 状态）。
+ * 新增局内全屏 dialog 时必须在这里登记并补测试，否则数字键仍会穿透遮罩真发回合。
  */
 export interface FullScreenOverlayState {
   mapOpen: boolean;
-  /** 调试面板是否显示（App 用 debugToken && roomId 判定） */
+  /** 局内调试面板是否显示（App 用 debugToken && roomId 判定） */
   debugPanelOpen: boolean;
 }
 
 /**
- * App 用它计算传给 ChatPanel 的 overlayOpen。
+ * App 用它计算传给 ChatPanel 的 overlayOpen：已知两个全屏遮罩的显式 OR。
  *
- * 为什么单独抽成纯函数：组件树本身没有 jsdom 可测（项目约定不引 jsdom），
- * 但「哪些状态算全屏遮罩」是接线的关键判断，抽出来就能被单测覆盖；
- * App 只负责把状态传进来，不再自己重复写 ||。
+ * 为什么是硬编码 OR 而不是通用 dialog 查询：项目不引 jsdom、也不做 DOM 反射，
+ * 「哪些状态算全屏遮罩」应由 App 明确知道；新增局内 dialog 时在这里登记是刻意的收口点。
+ * 这个纯函数只保证「门控判定」本身可测；App 传入的 debugPanelOpen 表达式是否正确
+ * 由 typecheck + build 保证，不在本函数的单测声称覆盖范围内。
  */
 export function fullScreenOverlayOpen(state: FullScreenOverlayState): boolean {
   return state.mapOpen || state.debugPanelOpen;
