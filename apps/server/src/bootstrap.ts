@@ -53,7 +53,7 @@ import { SessionStore } from "./sessions.ts";
 import { AuthService } from "./auth.ts";
 import { TurnLedger } from "./quota.ts";
 import { JobLedger } from "./job-ledger.ts";
-import { BackgroundCycle } from "./background-cycle.ts";
+import { BackgroundCycle, type BackgroundTelemetry } from "./background-cycle.ts";
 import { AdminLog } from "./admin-log.ts";
 import { loadSceneDescs, offlineNarrative } from "./offline-narrator.ts";
 import { LlmSwitch } from "./llm-switch.ts";
@@ -116,6 +116,8 @@ export type App = AppDeps & {
   background: BackgroundCycle;
   /** 本次启动的对账结果（PR-2）：inflight→failed 计数 + prepared backlog 计数，供运维/测试断言 */
   jobReconcile: JobReconcileSummary;
+  /** 后台调度运行期遥测（PR #125 复审可观测性）：终态投影写失败/看门狗触发次数，进程内累计 */
+  backgroundTelemetry: BackgroundTelemetry;
   /** 管理操作日志 */
   adminLog: AdminLog;
 };
@@ -515,6 +517,15 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     jobLedger,
     background,
     jobReconcile,
+    // getter 而不是 createApp 时的快照：遥测随任务运行增长，运维/测试要能读到实时值
+    backgroundTelemetry: {
+      get terminalPersistFailures() {
+        return background.telemetry.terminalPersistFailures;
+      },
+      get watchdogFires() {
+        return background.telemetry.watchdogFires;
+      },
+    },
     adminLog,
     gossip: {
       send: (roomId, from, to, content, opts) => gossip.send(roomId, from, to, content, opts),

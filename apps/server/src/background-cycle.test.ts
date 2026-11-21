@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { tempDir } from "@galgame/testkit";
 import { BackgroundCycle, shutdownBackground } from "./background-cycle.ts";
 import { JobLedger, type JobRecord } from "./job-ledger.ts";
@@ -11,6 +11,16 @@ function deferred<T = void>() {
     resolve = res;
   });
   return { promise, resolve };
+}
+
+/** 轮询直到条件成立（CI 高负载下比固定 sleep 稳，也不靠 sleep 本身当断言） */
+async function waitUntil(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate()) return;
+    if (Date.now() >= deadline) throw new Error("waitUntil 超时");
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 function idSequence() {
@@ -61,6 +71,18 @@ class SlowTerminalLedger extends JobLedger {
       this.markDelayed();
       await this.delayGate;
     }
+    return super.transition(roomId, id, patch);
+  }
+}
+
+/** 终态 transition 抛错的 JobLedger：断言终态写失败的可观测性（计数 + 固定日志关键字） */
+class FailingTerminalLedger extends JobLedger {
+  override async transition(
+    roomId: string,
+    id: string,
+    patch: Partial<Pick<JobRecord, "status" | "attempts" | "lastError" | "receipt">>,
+  ): Promise<JobRecord | null> {
+    if (patch.status === "done") throw new Error("disk full");
     return super.transition(roomId, id, patch);
   }
 }
@@ -176,7 +198,8 @@ describe("BackgroundCycle", () => {
 
     taskGate.resolve();
     await ledger.waitUntilDelayed(); // done 写入已开始，但卡在慢 I/O
-    await new Promise((r) => setTimeout(r, 80)); // 让看门狗窗口整个落在写入期间
+    // 轮询等看门狗触发（它必须在写入窗口内触发过；旧实现会在这里被 aborted 抢走 race）
+    await waitUntil(() => cycle.telemetry.watchdogFires >= 1, 2000);
     expect(cycle.isBusy("room_a")).toBe(true);
     ledger.release();
 
@@ -204,7 +227,8 @@ describe("BackgroundCycle", () => {
 
     await ledger.waitUntilDelayed(); // 看门狗已触发，abort 分支正在写 failed（慢 I/O）
     taskGate.resolve(); // 任务体在这个写入窗口内完成
-    await new Promise((r) => setTimeout(r, 10));
+    // 轮询等 finished 跳过写入并放锁（它看到 gate.writing 后直接收尾）
+    await waitUntil(() => !cycle.isBusy("room_a"), 2000);
     ledger.release();
 
     const out = await running;
@@ -319,5 +343,30 @@ describe("BackgroundCycle", () => {
     // 任务体没 settle，锁不释放
     expect(cycle.isBusy("room_a")).toBe(true);
     expect(await running).toMatchObject({ ok: false, reason: "error" });
+  });
+
+  it("终态投影写失败：固定日志关键字 + 进程内计数，不重试也不改 run 结果", async () => {
+    const dir = tempDir("bg-cycle-");
+    const ledger = new FailingTerminalLedger(dir);
+    const cycle = new BackgroundCycle({ ledger, idFactory: idSequence() });
+    const warns: unknown[][] = [];
+    const spy = vi.spyOn(console, "warn").mockImplementation((...args) => {
+      warns.push(args);
+    });
+    try {
+      const out = await cycle.run("room_a", { kind: "canonize", basedOnSeq: 1 }, async () => ({ retired: true }));
+      // 投影写失败不阻断任务：run 仍报 done，锁释放
+      expect(out).toMatchObject({ ok: true, jobId: "job_1" });
+      expect(cycle.isBusy("room_a")).toBe(false);
+
+      // 可观测性：进程内计数 +1，且留下固定日志关键字（不重试，所以只 +1 次）
+      expect(cycle.telemetry.terminalPersistFailures).toBe(1);
+      expect(warns.some((args) => String(args[0]).includes("[bg] terminal persist failed"))).toBe(true);
+
+      // 写失败不重试：磁盘上停在 prepared/inflight 两行，没有第三条终态
+      expect((await records(dir, "room_a")).map((r) => r.status)).toEqual(["prepared", "inflight"]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
