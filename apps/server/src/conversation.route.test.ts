@@ -15,6 +15,7 @@ import {
   AuditGate,
   DEFAULT_AUDIT_POLICY,
   NoopAudit,
+  type AuditPort,
 } from "../../../packages/engine/src/index.ts";
 import type { EventLog } from "../../../packages/engine/src/store.ts";
 import {
@@ -58,17 +59,28 @@ afterAll(() => {
 
 type LlmHandler = (req: { messages?: { role: string; content: string }[] }) => string;
 
-async function appWith(handler?: LlmHandler): Promise<{ app: FastifyInstance; deps: App; roomId: string; actorId: string; llm: MockLlm }> {
+/** #146：结算分支回归需要能注入「审核必拦」与更小的 auto 上限 */
+interface AppWithOpts {
+  audit?: AuditPort;
+  maxAutoRounds?: number;
+}
+
+async function appWith(
+  handler?: LlmHandler,
+  opts: AppWithOpts = {},
+): Promise<{ app: FastifyInstance; deps: App; roomId: string; actorId: string; llm: MockLlm }> {
   process.env.GALGAME_GOSSIP_SCAN_MS = "0";
   const deps = await createApp(testConfig());
   const { roomId, actorId } = await deps.createRoom("solo", "u_owner");
 
   // 用真实 host + 假 LLM：不为氛围调场景 agent，NPC 本轮一律沉默（断言只看玩家交付与结算）
   const modes = await loadModes(MODES);
-  const policy = await loadConversationPolicy(POLICY);
+  const loaded = await loadConversationPolicy(POLICY);
+  // #146：auto 上限可注入（默认读 content/v2 的策略），审核端口可换成必拦实现
+  const policy = opts.maxAutoRounds === undefined ? loaded : { ...loaded, maxAutoRounds: opts.maxAutoRounds };
   const scene: SceneAgentPort = { describe: async () => "test scene", summarize: async () => "test summary" };
   const llm = new MockLlm({ handler: handler ?? (() => JSON.stringify({ kind: "silent", reason: "test" })) });
-  const audit = new NoopAudit();
+  const audit = opts.audit ?? new NoopAudit();
   const store = deps.store as EventLog;
   const arbiter = deps.arbiter;
   deps.conversation = {
@@ -302,6 +314,42 @@ describe("dev/v2 群聊 HTTP 端点（issue #89）", () => {
     });
     expect(v1.statusCode).toBe(429);
     expect(v1.json()).toMatchObject({ ok: false, code: "E_RATE_LIMITED" });
+    await app.close();
+  });
+
+  it("#146 审核拦截（只推 notice、无 committed）→ 账本 unconfirmed（占用额度，不释放）", async () => {
+    // 审核器一律判违规：引擎只推 conversation.notice，不产出 committed/error
+    const blockedAudit: AuditPort = {
+      review: async () => ({ allow: false, categories: ["test"], severity: 3, reason: "test block" }),
+    };
+    const { app, deps, roomId, actorId } = await appWith(undefined, { audit: blockedAudit });
+    const res = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: payload(actorId, "blocked-1"),
+    });
+    expect(res.statusCode).toBe(200);
+    const events = sse(res.body);
+    expect(events.some((e) => e.type === "conversation.notice")).toBe(true);
+    expect(events.some((e) => e.type === "conversation.committed")).toBe(false);
+    // 审核是真实发生过的一次调用 → 不能按失败把额度放回去（#146 第 1 条）
+    expect(deps.ledger.get({ userId: "u_owner", roomId, clientTurnId: "blocked-1" })?.state).toBe("unconfirmed");
+    await app.close();
+  });
+
+  it("#146 auto 超 maxAutoRounds（只推 notice、未调模型）→ 账本 failed（释放额度）", async () => {
+    const { app, deps, roomId, actorId } = await appWith(undefined, { maxAutoRounds: 0 });
+    const res = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: { actorId, clientTurnId: "auto-limit-1", auto: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const events = sse(res.body);
+    expect(events.some((e) => e.type === "conversation.notice")).toBe(true);
+    expect(events.some((e) => e.type === "conversation.committed")).toBe(false);
+    // 没调模型也没写世界 → 按 failed 回收额度
+    expect(deps.ledger.get({ userId: "u_owner", roomId, clientTurnId: "auto-limit-1" })?.state).toBe("failed");
     await app.close();
   });
 
