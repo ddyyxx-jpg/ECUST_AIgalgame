@@ -11,6 +11,7 @@ import { makeTurnHandlers } from "./turn-handlers.ts";
 import AuthScreen from "./AuthScreen.tsx";
 import type { SaveEntry } from "./api.ts";
 import ChatPanel from "./ChatPanel.tsx";
+import { fullScreenOverlayOpen } from "./candidate-keys.ts";
 import DraftsPanel from "./DraftsPanel.tsx";
 import InboxPanel from "./InboxPanel.tsx";
 import GalleryPanel from "./GalleryPanel.tsx";
@@ -1035,8 +1036,9 @@ await runTurn(
             lines={convMode === "v2" ? [...lines, ...convLines] : lines}
             typing={typing}
             busy={busy}
-            // 地图是全屏遮罩，不会卸载 ChatPanel：打开时数字键快选必须停用，否则会穿透真发回合（PR #127 P1）
-            overlayOpen={mapOpen}
+            // 地图 / 调试面板都是全屏遮罩，不会卸载 ChatPanel：打开时数字键快选必须停用，
+            // 否则会穿透真发回合（PR #127 P1）。门控判定由纯函数统一（含单测），App 只传状态。
+            overlayOpen={fullScreenOverlayOpen({ mapOpen, debugPanelOpen: Boolean(debugToken && roomId) })}
             err={err}
             input={input}
             onInput={setInput}

@@ -40,6 +40,10 @@ const TALK_PREFIX = /^(和|跟|找|与)/;
  * 将来 suggestions 若在契约里带上 kind（需要改 docs/03 并 bump 版本），
  * 可以改成直通并删掉这张表；本轮不改契约，避免为一个 UI 分组牵动服务端。
  * 配置化也只需替换这张表，classifySuggestion 与测试不用动。
+ *
+ * 已知局限（中文前缀 ≠ 语义，已登记 issue #139）：openings 的「问室友监控的事」
+ * 会被归为 action、「去找校刊编辑部打听」会被归为 move，只影响分组颜色，不影响发送。
+ * suggestions 侧直接产出 kind 后，即可删除本表与 MOVE_PREFIX / TALK_PREFIX。
  */
 const CLASSIFY_RULES: readonly { kind: CandidateKind; prefix: RegExp }[] = [
   { kind: "move", prefix: MOVE_PREFIX },
