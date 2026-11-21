@@ -52,6 +52,8 @@ import { AuthStore } from "./auth-store.ts";
 import { SessionStore } from "./sessions.ts";
 import { AuthService } from "./auth.ts";
 import { TurnLedger } from "./quota.ts";
+import { JobLedger } from "./job-ledger.ts";
+import { BackgroundCycle, type BackgroundTelemetry } from "./background-cycle.ts";
 import { AdminLog } from "./admin-log.ts";
 import { loadSceneDescs, offlineNarrative } from "./offline-narrator.ts";
 import { LlmSwitch } from "./llm-switch.ts";
@@ -108,9 +110,57 @@ export type App = AppDeps & {
   auth: AuthService;
   /** 行动额度账本（收敛稿 B1） */
   ledger: TurnLedger;
+  /** 后台任务投影（PR-2）：data/jobs/<roomId>.jsonl */
+  jobLedger: JobLedger;
+  /** 每房间单飞 + 看门狗的后台调度器（PR-2） */
+  background: BackgroundCycle;
+  /** 本次启动的对账结果（PR-2）：inflight→failed 计数 + prepared backlog 计数，供运维/测试断言 */
+  jobReconcile: JobReconcileSummary;
+  /** 后台调度运行期遥测（PR #125 复审可观测性）：终态投影写失败/看门狗触发次数，进程内累计 */
+  backgroundTelemetry: BackgroundTelemetry;
   /** 管理操作日志 */
   adminLog: AdminLog;
 };
+
+/** 启动对账结果：只反映 job 投影，不写世界状态 */
+export interface JobReconcileSummary {
+  /** 扫描到的真实房间数（来自 FileStore.listRooms()） */
+  rooms: number;
+  /** 发现的重启前 inflight（无人认领）条数 */
+  orphaned: number;
+  /** 实际转为 failed 的条数 */
+  failed: number;
+  /** prepared 条数：留 backlog，启动时**不自动重放**（重放需要人工/后续 backlog 决策） */
+  runnable: number;
+}
+
+/**
+ * 启动对账（PR-2）：进程重启后仍 inflight 的任务没人认领，按失败处理；
+ * prepared 只计数留在 backlog，本轮不自动重放。单房读坏只影响该房（list 内部跳过坏行）。
+ */
+export async function reconcileBackgroundJobs(
+  jobLedger: JobLedger,
+  store: { listRooms(): Promise<string[]> },
+): Promise<JobReconcileSummary> {
+  const summary: JobReconcileSummary = { rooms: 0, orphaned: 0, failed: 0, runnable: 0 };
+  for (const roomId of await store.listRooms()) {
+    summary.rooms += 1;
+    const { runnable, orphaned } = await jobLedger.reconcile(roomId);
+    summary.orphaned += orphaned.length;
+    summary.runnable += runnable.length;
+    for (const job of orphaned) {
+      const next = await jobLedger.transition(roomId, job.id, {
+        status: "failed",
+        lastError: "进程重启时仍在 inflight，按失败处理",
+      });
+      if (next?.status === "failed") summary.failed += 1;
+    }
+    if (runnable.length > 0) {
+      console.info(`[background] ${roomId} 有 ${runnable.length} 个可重放任务（本轮不自动重放，留 backlog）`);
+    }
+  }
+  return summary;
+}
 
 export async function createApp(cfg: ServerConfig): Promise<App> {
   const contentDir = path.resolve(cfg.contentDir);
@@ -319,6 +369,22 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     now,
   });
 
+  // ---------------------------------------------------------------- 后台任务投影与单飞调度（PR-2）
+  // job 生命周期是投影，不写世界状态；写失败只 warn，不阻断后台工作。
+  const jobLedger = new JobLedger(path.join(path.resolve(cfg.dataDir), "jobs"), now);
+  const background = new BackgroundCycle({
+    ledger: jobLedger,
+    now,
+    defaultStallMs: cfg.backgroundStallMs,
+  });
+  // 启动对账：进程重启后仍 inflight 的没人认领，按失败处理；prepared 只计数留 backlog，不自动重放。
+  let jobReconcile: JobReconcileSummary = { rooms: 0, orphaned: 0, failed: 0, runnable: 0 };
+  try {
+    jobReconcile = await reconcileBackgroundJobs(jobLedger, store);
+  } catch (e) {
+    console.warn("[background] 启动 reconcile 失败：", e instanceof Error ? e.message : e);
+  }
+
   // 定时补扫（可选）：把已加载房间的公共长期记忆陆续提成世界层候选。
   // 不阻塞请求、不 unref 就会吊住进程，所以显式 unref；失败只打日志（下一轮再试）。
   const scanMinutes = canonizeCfg?.scanMinutes ?? 0;
@@ -328,7 +394,14 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
         try {
           for (const roomId of await store.listRooms()) {
             if (roomId === worldRoom) continue;
-            await canonize.retireRoom(roomId);
+            await store.load(roomId);
+            // store.seq() 是 FileStore 的进程内快捷方式（上面刚 load 过）；换远程/异步存储时
+            // 应改用 await store.load(roomId) 的返回值，别依赖 seq() 的本地缓存。
+            await background.run(roomId, { kind: "canonize", basedOnSeq: store.seq(roomId) }, async ({ signal }) => {
+              if (signal.aborted) return;
+              await canonize.retireRoom(roomId);
+              return { retired: true };
+            });
           }
         } catch (e) {
           console.warn("[canonize] 定时补扫失败：", e instanceof Error ? e.message : e);
@@ -397,7 +470,12 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
         try {
           for (const roomId of await store.listRooms()) {
             if (roomId === worldRoom) continue;
-            await gossip.step(roomId);
+            await store.load(roomId); // 同理，seq() 依赖这里先 load
+            await background.run(roomId, { kind: "gossip", basedOnSeq: store.seq(roomId) }, async ({ signal }) => {
+              if (signal.aborted) return;
+              await gossip.step(roomId);
+              return { stepped: true };
+            });
           }
         } catch (e) {
           console.warn("[gossip] 定时波次失败：", e instanceof Error ? e.message : e);
@@ -436,6 +514,18 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     saves,
     auth,
     ledger,
+    jobLedger,
+    background,
+    jobReconcile,
+    // getter 而不是 createApp 时的快照：遥测随任务运行增长，运维/测试要能读到实时值
+    backgroundTelemetry: {
+      get terminalPersistFailures() {
+        return background.telemetry.terminalPersistFailures;
+      },
+      get watchdogFires() {
+        return background.telemetry.watchdogFires;
+      },
+    },
     adminLog,
     gossip: {
       send: (roomId, from, to, content, opts) => gossip.send(roomId, from, to, content, opts),
