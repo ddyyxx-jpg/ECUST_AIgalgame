@@ -2,6 +2,11 @@
  * main.ts 关停钩子的真实进程 smoke（PR #125 复审 P3）：
  * 不 mock 进程与信号——真的 spawn `node --import tsx apps/server/src/main.ts`，
  * 等 /api/v1/health 200 后发 SIGTERM，断言进程以 0 退出且走了 [shutdown] 分支。
+ *
+ * 注意：这里**不**断言 `data/jobs/*.jsonl` 的终态——真进程的后台任务只由定时器触发，
+ * 无法确定性制造"在途 job"再发信号（会变 flaky）。终态落盘的端到端证据在装配层
+ * `bootstrap.shutdown.test.ts`（真实 createApp + 慢任务 + shutdownBackground + 读 jsonl）。
+ * 本文件的等待全部是轮询（health 200 / 进程 exit），没有固定 sleep 断言。
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";

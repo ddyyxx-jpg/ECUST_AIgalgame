@@ -30,6 +30,17 @@ export interface CycleTaskContext {
 }
 
 /**
+ * 后台调度运行期遥测（PR #125 复审 P3 可观测性）：进程内累计、随任务运行增长。
+ * 终态投影写失败只 warn 不重试，因此必须留下计数与固定日志关键字，否则排障时看不到。
+ */
+export interface BackgroundTelemetry {
+  /** 终态投影（done/failed）写失败次数；固定日志关键字 `[bg] terminal persist failed` */
+  readonly terminalPersistFailures: number;
+  /** 看门狗触发次数（含任务恰好已完成、因而未 abort 的触发） */
+  readonly watchdogFires: number;
+}
+
+/**
  * 关停中止的统一文案：run 的 abort 分支写这一条，abortAll 自己不再写投影，
  * 因此"inflight → failed"只发生一次，lastError 也只有一个来源。
  */
@@ -72,6 +83,8 @@ export class BackgroundCycle {
   private readonly defaultStallMs: number;
   private readonly idFactory?: () => string;
   private readonly active = new Map<string, Entry>();
+  private terminalPersistFailures = 0;
+  private watchdogFires = 0;
 
   constructor(opts: {
     ledger?: JobLedger;
@@ -87,6 +100,11 @@ export class BackgroundCycle {
 
   isBusy(roomId: string): boolean {
     return this.active.has(roomId);
+  }
+
+  /** 运行期遥测快照（bootstrap 通过 App.backgroundTelemetry 暴露给运维/测试） */
+  get telemetry(): BackgroundTelemetry {
+    return { terminalPersistFailures: this.terminalPersistFailures, watchdogFires: this.watchdogFires };
   }
 
   inflight(roomId: string): { kind: string; jobId: string; startedAt: number } | null {
@@ -117,7 +135,12 @@ export class BackgroundCycle {
     gate.writing = true;
     try {
       if (!this.ledger) return;
-      await this.safeWrite(() => this.ledger!.transition(roomId, jobId, patch));
+      await this.ledger.transition(roomId, jobId, patch);
+    } catch (e) {
+      // 终态写失败只 warn、不重试（重试可能让迟到的 done 覆盖已写的 failed）；但必须可观测：
+      // 固定关键字 + 进程内计数，bootstrap 经 App.backgroundTelemetry 暴露。
+      this.terminalPersistFailures += 1;
+      console.warn(`[bg] terminal persist failed room=${roomId} job=${jobId} status=${patch.status}:`, errorText(e));
     } finally {
       gate.writing = false;
       gate.written = true;
@@ -192,6 +215,7 @@ export class BackgroundCycle {
       };
       controller.signal.addEventListener("abort", onAbort, { once: true });
       const timer = setTimeout(() => {
+        this.watchdogFires += 1;
         if (taskSettled) return;
         stalled = true;
         controller.abort(`stalled: 超过 ${stallMs}ms 未完成`);
