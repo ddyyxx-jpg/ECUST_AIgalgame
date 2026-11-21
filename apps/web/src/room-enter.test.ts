@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { loadRoomThenReset } from "./room-enter.ts";
+import { keepRoomLocalState, restoreRoomLocalState } from "./room-local-state.ts";
 
 /** 记录「谁先被调用」的顺序数组：reset 出现在 fetch 之前即失败 */
 interface Calls {
@@ -122,5 +123,31 @@ describe("loadRoomThenReset（进房顺序：先拉数据、成功后才 reset�
     expect(calls.capture).not.toHaveBeenCalled();
     expect(calls.reset).not.toHaveBeenCalled();
     expect(calls.restore).not.toHaveBeenCalled();
+  });
+
+  it("capture 产物带草稿/convMode 时，reset 后 restore 能拿回（保留逻辑的真实集成点）", async () => {
+    let ui: { draft: string; convMode: "v1" | "v2" } = { draft: "不要重拉时丢我", convMode: "v2" };
+    const captured = await loadRoomThenReset({
+      fetchState: async () => ({ room: "room_1" }),
+      fetchHistory: async () => ({ lines: [] as string[] }),
+      isCurrent: () => true,
+      capture: () =>
+        keepRoomLocalState({
+          resumed: true,
+          targetRoomId: "room_1",
+          currentRoomId: "room_1",
+          currentDraft: ui.draft,
+          currentConvMode: ui.convMode,
+        }),
+      reset: () => {
+        ui = { draft: "", convMode: "v1" };
+      },
+      restore: (local) => {
+        const actions = restoreRoomLocalState(local);
+        ui = { draft: actions.input ?? ui.draft, convMode: actions.convMode ?? ui.convMode };
+      },
+    });
+    expect(captured).toMatchObject({ draft: "不要重拉时丢我", convMode: "v2", preserved: true });
+    expect(ui).toEqual({ draft: "不要重拉时丢我", convMode: "v2" });
   });
 });
