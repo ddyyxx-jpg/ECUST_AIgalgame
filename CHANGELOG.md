@@ -5,7 +5,34 @@
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）。
 
 
-## 未发布 — dev/v2 运行质量批（issue #130 子项 #131–#137，CONTRACT 3.7.0）
+## 未发布 — 开放 issue 收口批（整体 PR，分支 `fix/all-open-issues`；CONTRACT 3.7.0 → 3.8.0）
+
+> 把四个开放 PR（#124 引擎 / #125 后端 / #126 前端 / #127 UI）按分类合入本分支，并把各 issue 的遗留缺口补齐到「真实链路可用」。覆盖 #76 #90 #94 #95 #96 #97 #98 #99 #100 #104 #105 #106 #122 #128 #130 #138 #139 #140 #146；#84（真实部署冒烟）需目标机实测，保持开放。`apiVersion` / `SCHEMA_VERSION` 不变；`PROMPT_VERSION` 不变。
+
+### 引擎（packages/、content/、契约文档）
+- **结算前置条件 `expectAttrs`（#138，PR #124）**：`ApplyOptions.expectAttrs`（`AttrExpectation[]`，可选）在 `apply` 前逐条比对当前快照 `{entityId, key, expected: AttrValue|null}`（`null` = 该属性必须不存在）；任一失配整批拒绝 `E_PRECONDITION`，不试算、不落库、不消耗回合预算；顺序为先 `expectedSeq` 后本项；只承诺标量精确相等，不做深比较。空数组/未传时行为与 3.7.0 完全一致。**本批已接生产调用方**：`packages/engine/src/attr-expect.ts` 的 `expectAttrsFor(state, ops)` 只对 `attr.delta`/`attr.set` 产条件并按 `entityId+key` 去重，`Turn.applyBatch` 主批与记忆被拒重提批、v2 `commitStep` 都显式传入；`packages/engine/src/turn.expect-wiring.test.ts` 与 `conversation.test.ts` 断言真实 apply 入口带条件，`arbiter.expect.test.ts` 覆盖失配不耗预算 / 首失配整批拒 / 同房间并发串行 / 重启后按持久化值校验四问。`CONTRACT_VERSION` → 3.8.0（docs/03 §2.3、§10.28）。
+- **后台任务协作式中止（#140）**：`canonize.retireRoom(roomId, {signal})`、`GossipHost.step(roomId, {signal})` 在候选循环、judge 前、落库前设检查点；`CanonizeReport.aborted` 标记中止，gossip 用既有 `gossip.dropped{reason:"aborted"}`，不新增事件类型/op。已落库批次不回滚。
+- **密谋导演（#96/#128）**：`discoveryProposals(ctx, plot, kind, {attitudeAttr?})` 改为显式传键（引擎无 `moduleState` 写入口，旧写法永远读不到值），未传键不产 `attr.delta`；新增 `content/modules/investigate/`（`investigate.probe`，态度键来自 `data/config.json`），是 `activePlots`/`discoveryProposals` 的首个生产调用方。
+- **存档导出/导入 fixture 修正（#99）**：`save-archive.test.ts` 的样例事件从 `turn.commit`（SSE 事件，从不落盘）改为真实的 `turn.committed` marker，并新增「导入 → 新 `FileStore` 实例读回 → `parseCommitEvidence`」探针；docs/02 §7.0 记录该约束。
+- **#146 小项**：`llm.traceId` 优先 `x-ds-trace-id`；`fitMemoryContent` 导出后 `ownSpeechLines` 与落库同一截断口径去重；docs/03 的 `routes.ts` 行号锚点改为函数名锚点。
+
+### 后端（apps/server）
+- **夜间密谋编排（#128）**：`map.tick()` 仅在真正进入夜间那一拍跑 `runNightPlot`：用进入夜间前的在场存活 NPC（≥2），`DialogueHost.open("npc.plot") → step → close`，提案单独第二批 `arbiter.apply(..., cause.type="dialogue")`，fail-soft；不碰 #38 的 `time.advance` 原子批；同夜重复 tick 不重复落账。`plot-night.route.test.ts` 用 `app.inject` 验证真实 `plot.upserted`/`memory.written`(private)/`attr.changed` 与 LLM 抛错时 tick 仍 ok。
+- **后台任务账本与接管（#140，PR #125）**：`JobLedger` + `BackgroundCycle`（同房间单飞、generation 令牌、stall 看门狗强制接管、`takeovers`/`watchdogFires`/`terminalPersistFailures` 遥测、启动 `reconcileBackgroundJobs` 对账）；`bootstrap.ts` 两个扫描定时器仍走 `scanRoomJobs` 逐房隔离，并把 `{signal}` 传进任务体。`save-durability.test.ts` 的后台扫描用例改为串行触发（单飞锁下两种扫描不再并发），验收目标不变。
+- **#146-1 结算断言**：`conversation.route.test.ts` 新增审核 blocked → `unconfirmed`、`maxAutoRounds:0` 的 auto 回合 → `failed` 两例。
+- 复核已落地项：#90 会话快照被 `openOrReuse` 真正复用、#104 `/conversation` 共用 `TurnLedger` 且淘汰先 `host.close`、#105 地图草案共用 admin gate、#122 索引重建 merge 单调 + `.bak`、#100 历史上限可配（`GALGAME_HISTORY_LIMIT_MAX`）、#98 多槽存档、#95/#94/#97 验收。
+
+### 前端（apps/web，PR #126）
+- 客户端前台恢复与三态探测：`conversation-api.ts` 的 `detectConversation`/`convModeAfterProbe`/`runConversationAuto`/`runConversationUtterance`，`App.tsx` 恢复时 `loadRoomThenReset` + `holdResumedBusy`；docs/09 §10。#106 MINOR 项复核已落地（URL `encodeURIComponent`、快照 tmp 名带 pid、SSE 15s 心跳）。
+
+### UI（apps/web 候选面板，PR #127 + #139）
+- 候选行动面板 + 数字键 1–6 快选（输入框内不抢键）。**#139**：建议改为 `{text, kind}` 由来源侧给出（出口→`move`、在场 NPC→`talk`、`openings.json` 作者标注），删除中文前缀启发式；旧字符串仍可读，回退 `action`；`kind` 只影响分组/配色。docs/03 §5.2.6 登记形状与兼容策略。
+
+### 验证（本分支实跑）
+- `npm run typecheck` → 0 错；`npx vitest run` → **120 文件 / 943 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过。
+- 未做：#84 的 compose/Nginx TLS/证书/备份恢复目标机冒烟（`deploy:smoke` 只覆盖应用层局部链路）。
+
+## 3.7.0（2026-11-21，PR #144）— dev/v2 运行质量批（issue #130 子项 #131–#137，CONTRACT 3.6.2 → 3.7.0）
 
 ### 新增
 - **提示词上下文重构（#131）**：NPC 提示词固定为「你 / 在场者 / 当前场景 / 记忆 / 更早的对话 / 这一轮」；投递行区分「→ 你」与「你是旁听」，模式用中文 label；`Delivery.target` 让投递语义可还原；自己的话也进历史；窗口从全局 64 条改为每会话最近 6 轮 + 1800 字硬上限。`CONVERSATION_PROMPT_VERSION` → `2026-11-21.1`。
