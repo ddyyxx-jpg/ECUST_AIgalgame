@@ -4,7 +4,7 @@
  *
  * 1. 失配不消耗回合预算：显式 TurnBudget 一个计数都不动，事后的提交额度完好。
  * 2. 多条 expectAttrs 逐条校验：首个失配即整批拒绝，快照/seq/事件数零变化（无部分写入）。
- * 3. 同房间并发两次 apply 仍串行：恰好一个成功，另一个在模拟前就被 E_SEQ_GAP 拦下。
+ * 3. 同房间并发两次 apply 仍串行：守卫在 exclusive 链内——两条都带 expectAttrs，后一个必须按前一个提交后的快照失配。
  * 4. 真实 FileStore：写入后换新实例（重启）load/snapshot 再 apply，仍按持久化值校验。
  */
 import { mkdtemp, rm } from "node:fs/promises";
@@ -129,22 +129,34 @@ describe("expectAttrs · §12.2 四问闭环", () => {
     expect((await store.events(ROOM, 0)).length).toBe(eventsBefore);
   });
 
-  it("四问③ 同房间并发两次 apply 仍串行（exclusive 链）", async () => {
+  it("四问③ 同房间并发两次 apply 仍串行：两条都带 expectAttrs，后一个在链内看到新值而失配", async () => {
     const { store, arbiter } = await setup();
     const seqBefore = await store.load(ROOM);
+    const eventsBefore = (await store.events(ROOM, 0)).length;
 
+    // 两条都基于"当前 stamina=60"的旧快照。A 先提交把 stamina 改成 55，
+    // B 只有在 exclusive 链内、A 落库之后才读快照，才会看到 55 并失配。
+    // 若 firstAttrMismatch 被挪到 exclusive 之外（两个请求都在 A 落库前校验快照），
+    // B 会误判通过并写库——本用例就会红，这是"守卫在链内"的回归证据。
     const [a, b] = await Promise.all([
-      arbiter.apply(ROOM, [delta(PLR, "stamina", -5)], cause("evt_concurrent_1"), { expectedSeq: seqBefore }),
-      arbiter.apply(ROOM, [delta(NPC, "guard", 1)], cause("evt_concurrent_2"), { expectedSeq: seqBefore }),
+      arbiter.apply(ROOM, [delta(PLR, "stamina", -5)], cause("evt_concurrent_1"), {
+        expectAttrs: [{ entityId: PLR, key: "stamina", expected: 60 }],
+      }),
+      arbiter.apply(ROOM, [delta(PLR, "stamina", -10)], cause("evt_concurrent_2"), {
+        expectAttrs: [{ entityId: PLR, key: "stamina", expected: 60 }],
+      }),
     ]);
 
-    // 串行链让第二个请求看到第一个提交后的 seq → 在模拟前就 E_SEQ_GAP；
-    // 若两个都读到 seqBefore 并一起落库，失败方会是 E_STORE_FAULT（第二个写入口）而不是这里的结果
-    expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
-    const loser = a.ok ? b : a;
-    expect(loser.error?.code).toBe("E_SEQ_GAP");
-    expect(store.seq(ROOM)).toBe(seqBefore + 1); // 只前进一次
-    expect((await store.events(ROOM, 0)).length).toBe(seqBefore + 1); // 只多一批事件
+    expect(a.ok).toBe(true); // 链内第一个：快照仍是 60
+    expect(a.seq).toBe(seqBefore + 1);
+    expect(b.ok).toBe(false); // 链内第二个：看到 A 提交后的 55 → 整批拒绝
+    expect(b.error?.code).toBe("E_PRECONDITION");
+    expect(b.applied).toHaveLength(0);
+    expect(b.rejected).toHaveLength(0);
+    expect(b.events).toHaveLength(0);
+    expect(store.seq(ROOM)).toBe(seqBefore + 1); // 只有 A 落库，seq 只 +1
+    expect((await store.events(ROOM, 0)).length).toBe(eventsBefore + 1);
+    expect((await store.snapshot(ROOM)).entities[PLR]?.attrs.stamina).toBe(55); // B 的 -10 未生效
   });
 
   it("四问④ 真实 FileStore：重启后 load/snapshot 再 apply，expectAttrs 仍按持久化值校验", async () => {

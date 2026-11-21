@@ -6,13 +6,13 @@
 
 ## 3.7.0（未合并，PR #124 / `pr/engine`；CONTRACT 3.6.0 → 3.7.0）
 
-> 3.7.0 是 **minor**：只新增可选参数，不改已有语义；**不新增 op 原语**（仍 13 个）、**不新增错误码**（仍 36 个），不改 `apiVersion` / `PROMPT_VERSION`。本 PR **无生产调用方**（Turn/结算路径未接入），`expectAttrs` 保持纯可选能力。
+> 3.7.0 是 **minor**：只新增可选参数，不改已有语义；**不新增 op 原语**（仍 13 个）、**不新增错误码**（仍 36 个），不改 `apiVersion` / `PROMPT_VERSION`。本 PR **无生产调用方**（仅提供守卫能力，生产接入未做，跟踪 [#138](https://github.com/ddyyxx-jpg/ECUST_AIgalgame/issues/138)），`expectAttrs` 保持纯可选能力。
 
 - 新增 `ApplyOptions.expectAttrs`（`AttrExpectation[]`，可选）：`apply` 前逐条比对当前快照 `{ entityId, key, expected: AttrValue | null }`（`null` = 该属性必须不存在）；任一条失配 → 整批拒绝 `E_PRECONDITION`，不进入试算（simulate）、不落库、不消耗回合预算；校验顺序为先 `expectedSeq`、后本项；空数组/未传时行为与 3.6.0 完全一致。校验只承诺**标量精确相等**（`AttrValue` 只有 number/string/boolean），**不承诺深比较/数组语义**（docs/03 §2.3）。
 - 失配返回在预算记账与事件追加之前，预算账本与 `seq` 均不变；`E_PRECONDITION` 为既有错误码，仅补触发场景说明（docs/03 §7、§10.24）。
-- 测试：新增 `packages/engine/src/arbiter.expect.test.ts` 补 §12.2 四问闭环——①失配不消耗预算（同一预算随后提交成功，证明额度未被白吃）②多条 `expectAttrs` 逐条校验、首个失配即整批拒绝且无部分写入 ③同房间并发两次 `apply` 仍串行（`exclusive` 链）④真实 `FileStore` 写入后重开、`load`/`snapshot` 再 `apply`，`expectAttrs` 在重启后仍按持久化值正确校验。
+- 测试：新增 `packages/engine/src/arbiter.expect.test.ts` 补 §12.2 四问闭环——①失配不消耗预算（同一预算随后提交成功，证明额度未被白吃）②多条 `expectAttrs` 逐条校验、首个失配即整批拒绝且无部分写入 ③同房间并发两次 `apply` 仍串行（`exclusive` 链；两条都带 `expectAttrs`，后一个按前一个提交后的值失配）④真实 `FileStore` 写入后重开、`load`/`snapshot` 再 `apply`，`expectAttrs` 在重启后仍按持久化值正确校验。
 - 验证（本 worktree 实跑）：`npx vitest run packages/engine/src/arbiter.test.ts packages/engine/src/arbiter.expect.test.ts` → 2 文件 / 22 用例全过；`npm run typecheck` → 0 错；`npm run check:contract` → 8/8（CONTRACT_VERSION=3.7.0，13/13 op，36/36 错误码）。
-- 遗留：Turn/结算路径尚未接入 `expectAttrs`（本 PR 仅提供能力）；实际接入与全量测试留待后续 PR。
+- 遗留：Turn/结算路径尚未接入 `expectAttrs`（本 PR 仅提供守卫能力，生产接入未做，跟踪 [#138](https://github.com/ddyyxx-jpg/ECUST_AIgalgame/issues/138)）；实际接入与全量测试留待后续 PR。
 
 ## 3.6.0（dev/v2，2026-11-19）
 
