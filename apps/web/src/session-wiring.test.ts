@@ -251,6 +251,22 @@ describe("createSessionResync（前台恢复接线：真实监听 → 判定 →
     expect(h.enterRoom).toHaveBeenCalledTimes(1);
   });
 
+  it("markSynced（正常进房成功回写）：6s 后回前台不触发，30s 后可触发", async () => {
+    const h = harness();
+    // 模拟 App 在 enterRoom 成功后调用 markSynced：此刻起算 30s 节流
+    h.resync.markSynced();
+    h.hide();
+    h.advance(6_000);
+    h.show(); // 离开 6s 够格，但距上次同步只有 6s
+    await flush();
+    expect(h.enterRoom).not.toHaveBeenCalled();
+
+    h.advance(24_000); // 距 markSynced 恰好 30s；隐藏起点仍在，awayMs 也够
+    h.show();
+    await flush();
+    expect(h.enterRoom).toHaveBeenCalledTimes(1);
+  });
+
   it("dispose 后不再响应任何事件，且可重复调用", async () => {
     const h = harness();
     h.resync.dispose();

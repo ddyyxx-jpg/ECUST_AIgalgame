@@ -41,6 +41,12 @@ export interface SessionResync {
    * 挂到 DOM 的监听由 createSessionResync 内部注册，App 只负责注入真实 DOM。
    */
   handle: (trigger: SessionSyncTrigger) => SessionSyncDecision | null;
+  /**
+   * 回写「刚刚同步过」的时刻，刷新 30s 节流起点。
+   * 用于正常进房成功（首次进房/换房/续玩）：这些路径不走 resync，若不回写，lastSyncAt
+   * 会停在 0，玩家刚进房就切后台 6s 回来会被判成「很久没同步」而立刻全量重拉。
+   */
+  markSynced: () => void;
   /** 注销全部监听；幂等，在途 enterRoom 的后续回调也不再触发 onNotice */
   dispose: () => void;
 }
@@ -49,7 +55,7 @@ export function createSessionResync(deps: SessionResyncDeps): SessionResync {
   // 页面可能在后台挂载（还没有 hidden 事件）：直接把当前时刻当作隐藏起点，
   // 否则第一次回前台会因没有起点被算成「刚离开」（awayMs=0）而错过恢复。
   let hiddenSince: number | null = deps.isVisible() ? null : deps.now();
-  /** 上次真正发起重进房的时刻；0 = 还没同步过 */
+  /** 上次同步的时刻（发起重进房或外部 markSynced 回写）；0 = 还没同步过 */
   let lastSyncAt = 0;
   let resyncing = false;
   let disposed = false;
@@ -116,6 +122,10 @@ export function createSessionResync(deps: SessionResyncDeps): SessionResync {
 
   return {
     handle: (trigger) => attempt(trigger),
+    markSynced: () => {
+      if (disposed) return;
+      lastSyncAt = deps.now();
+    },
     dispose: () => {
       if (disposed) return;
       disposed = true;
