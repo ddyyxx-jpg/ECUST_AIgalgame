@@ -6,6 +6,7 @@
  * 2. 多条 expectAttrs 逐条校验：首个失配即整批拒绝，快照/seq/事件数零变化（无部分写入）。
  * 3. 同房间并发两次 apply 仍串行：守卫在 exclusive 链内——两条都带 expectAttrs，后一个必须按前一个提交后的快照失配。
  * 4. 真实 FileStore：写入后换新实例（重启）load/snapshot 再 apply，仍按持久化值校验。
+ * 补充：并发 + expectedSeq 旧值 → 恰好一个成功、另一个 E_SEQ_GAP（与 expectAttrs 的 E_PRECONDITION 分开验证）。
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -197,5 +198,31 @@ describe("expectAttrs · §12.2 四问闭环", () => {
     const restored = new FileStore(dir);
     expect(await restored.load(ROOM)).toBe(4);
     expect((await restored.snapshot(ROOM)).entities[PLR]?.attrs.stamina).toBe(54);
+  });
+
+  it("补充：并发 + expectedSeq 旧值 → 恰好一个成功、另一个 E_SEQ_GAP", async () => {
+    const { store, arbiter } = await setup();
+    const seqBefore = await store.load(ROOM);
+    const eventsBefore = (await store.events(ROOM, 0)).length;
+
+    // 两个请求都基于同一旧 seq 提交：exclusive 链让后者在 load 后看到新 seq，
+    // 在模拟前被 E_SEQ_GAP 拦下。E_SEQ_GAP 只属于 expectedSeq 失配，
+    // 这条用例刻意不传 expectAttrs，避免与 E_PRECONDITION 语义混淆。
+    const [a, b] = await Promise.all([
+      arbiter.apply(ROOM, [delta(PLR, "stamina", -5)], cause("evt_seqgap_1"), { expectedSeq: seqBefore }),
+      arbiter.apply(ROOM, [delta(NPC, "guard", 1)], cause("evt_seqgap_2"), { expectedSeq: seqBefore }),
+    ]);
+
+    expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
+    const winner = a.ok ? a : b;
+    const loser = a.ok ? b : a;
+    expect(winner.seq).toBe(seqBefore + 1);
+    expect(loser.error?.code).toBe("E_SEQ_GAP");
+    expect(loser.error?.code).not.toBe("E_PRECONDITION");
+    expect(loser.applied).toHaveLength(0);
+    expect(loser.rejected).toHaveLength(0);
+    expect(loser.events).toHaveLength(0);
+    expect(store.seq(ROOM)).toBe(seqBefore + 1); // 只落库一次
+    expect((await store.events(ROOM, 0)).length).toBe(eventsBefore + 1);
   });
 });
