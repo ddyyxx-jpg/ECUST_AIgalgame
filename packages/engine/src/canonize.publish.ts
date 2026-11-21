@@ -149,7 +149,9 @@ export async function publishCandidates(args: PublishArgs): Promise<CanonizeRepo
       type: "canonize",
       payload: { worldId: deps.worldId, sourceRefs: candidate.sourceRefs },
     };
-    const applied = await deps.arbiter.apply(deps.worldRoom, [op], cause);
+    // P2-2：带 expectedSeq——stall 接管后旧任务体若仍走到这里，seq 已变则整批拒绝，
+    // 不会与新任务体的写入交错（generation 只保锁/账本，world 写隔离靠检查点 + 本防线）。
+    const applied = await deps.arbiter.apply(deps.worldRoom, [op], cause, { expectedSeq: seq });
     if (!applied.ok) {
       const code = applied.rejected[0]?.code ?? applied.error?.code ?? "E_MODULE_FAULT";
       errors.push(code);

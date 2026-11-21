@@ -7,7 +7,7 @@ import { expectAttrsFor } from "../attr-expect.ts";
 import { isRoomSyncFault } from "../store-write.ts";
 import type { ArbiterApplyResult } from "../arbiter.ts";
 import type {
-  ActorId, ConversationEvent, ConversationSessionV2, ConversationTurnInput,
+  ActorId, AttrExpectation, ConversationEvent, ConversationSessionV2, ConversationTurnInput,
   Delivery, Envelope, Id, MemoryHit, NpcOutcome, Proposal, Utterance, WorldState,
 } from "../../../shared/src/index.ts";
 import { deliver, validateUtterance } from "./delivery.ts";
@@ -17,11 +17,12 @@ import type { ConversationDeps } from "./conversation.ts";
 import { formatDeliveryFor, type HistoryLine, type NpcDecisionResult, type PresentActor } from "./npc-agent.ts";
 import type { TalkChannel } from "./talk-budget.ts";
 
-/** 重放一次落盘失败所需的全部输入；宿主重试时用同一 cause + expectedSeq 重新裁决 */
+/** 重放一次落盘失败所需的全部输入；宿主重试时用同一 cause + expectedSeq + expectAttrs 重新裁决 */
 export interface StoreRetry {
   ops: Proposal[];
   cause: Envelope;
   expectedSeq: number;
+  expectAttrs: AttrExpectation[];
 }
 
 export class StoreFlushError extends Error {
@@ -431,7 +432,7 @@ async function commitStep(ctx: StepCtx, utterance?: Utterance): Promise<boolean>
     // ③ 写盘失败是暂时故障：必须走 retryable 分支，绝不能进 seen 缓存
     if (applied.error?.code === "E_STORE_FAULT") {
       throw new StoreFlushError(s.roomId, applied, deps.policy.messages.storeFlushFailed, {
-        ops: ctx.proposals, cause, expectedSeq: seq,
+        ops: ctx.proposals, cause, expectedSeq: seq, expectAttrs: expectAttrsFor(ctx.state, ctx.proposals),
       }, ctx.fresh, ctx.outcomes);
     }
     out.push({

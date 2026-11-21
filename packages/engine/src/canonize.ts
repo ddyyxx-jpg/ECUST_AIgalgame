@@ -221,6 +221,8 @@ export class CanonizeJob {
         },
       ],
       cause,
+      // P2-2：与 publish 同口径——load 到的 seq 作为前置条件，接管后的旧任务体写入会被整批拒绝。
+      { expectedSeq: seq },
     );
     if (!applied.ok) return false;
     for (const ev of applied.events) this.deps.memory.ingest?.(ev);

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { makeCtx, makeRoom } from "@galgame/testkit";
 import type { Plot } from "../../../packages/shared/src/contract/types.ts";
 import investigate from "./module.ts";
+import configJson from "./data/config.json" with { type: "json" };
 
 const SECRET = "不可直说的真相";
 const ATTITUDE_KEY = "guard"; // 测试里显式传入的键，代码本身不硬编码（I2）
@@ -34,11 +35,24 @@ describe("investigate 模块（Proposal 结构断言）", () => {
     const deltas = out?.proposals.filter((p) => p.op === "attr.delta") ?? [];
     expect(deltas).toHaveLength(2);
     expect(deltas.every((p) => p.args.key === ATTITUDE_KEY)).toBe(true);
+    // P2-1：delta 必须来自 config.json，而不是导演里的硬编码默认值。
+    expect(deltas.every((p) => p.args.delta === configJson.delta)).toBe(true);
     for (const w of out?.proposals.filter((p) => p.op === "memory.write") ?? []) {
       expect(String(w.args.content)).not.toContain(SECRET);
       expect(w.args.ownerId).toBe("plr_self");
     }
     expect(out?.ui?.lists?.[0]?.items).toHaveLength(2);
+  });
+
+  it("kind 词表来自 config.json：命中 search/ask 词分别产出对应 tag；未命中回退 observe", async () => {
+    const searchWord = configJson.kindPatterns.search[0];
+    const askWord = configJson.kindPatterns.ask[0];
+    const s = await investigate.intent?.(makeCtx({ state: plotState(), input: `我${searchWord}一下` }));
+    expect(s?.proposals.filter((p) => p.op === "memory.write").every((p) => (p.args.tags as string[]).includes("search"))).toBe(true);
+    const a = await investigate.intent?.(makeCtx({ state: plotState(), input: `我${askWord}他` }));
+    expect(a?.proposals.filter((p) => p.op === "memory.write").every((p) => (p.args.tags as string[]).includes("ask"))).toBe(true);
+    const o = await investigate.intent?.(makeCtx({ state: plotState(), input: "随便看看" }));
+    expect(o?.proposals.filter((p) => p.op === "memory.write").every((p) => (p.args.tags as string[]).includes("observe"))).toBe(true);
   });
 
   it("无 active plot：ok:true + 空 Proposal", async () => {
