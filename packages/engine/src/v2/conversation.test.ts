@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ConversationEvent, Entity, Envelope, Utterance } from "../../../shared/src/index.ts";
+import type { ApplyOptions, ConversationEvent, Entity, Envelope, Proposal, RoomId, Utterance } from "../../../shared/src/index.ts";
 import { MockLlm } from "../../../llm/src/mock.ts";
 import { createInitialState } from "../projection.ts";
 import { DefaultArbiter } from "../arbiter.ts";
@@ -13,6 +13,14 @@ import { SceneManager, type SceneAgentPort } from "./scene.ts";
 import { NpcAgent } from "./npc-agent.ts";
 import { ConversationAudit } from "./audit.ts";
 import { ConversationHostV2 } from "./conversation.ts";
+
+class SpyArbiter extends DefaultArbiter {
+  readonly seen: ApplyOptions[] = [];
+  override async apply(roomId: RoomId, ops: Proposal[], cause: Envelope, opts: ApplyOptions = {}) {
+    this.seen.push(opts);
+    return super.apply(roomId, ops, cause, opts);
+  }
+}
 
 const ROOT = new URL("../../../../", import.meta.url).pathname;
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
@@ -46,7 +54,8 @@ async function setup(responses: string[], cap = 6) {
   ]);
   const registry = emptyRegistry();
   const memory = new EventSourcedMemory();
-  const arbiter = new DefaultArbiter({ store, registry, memories: memory });
+  // #138 接线探针：记录 apply 选项的真实 Arbiter（仍走完整裁决链）
+  const arbiter = new SpyArbiter({ store, registry, memories: memory });
   const modes = await loadModes(MODES);
   const policy = { ...(await loadConversationPolicy(POLICY)), npcHardCap: cap };
   const llm = new MockLlm({ responses });
@@ -63,7 +72,7 @@ async function setup(responses: string[], cap = 6) {
     audit: new ConversationAudit(new NoopAudit(), DEFAULT_AUDIT_POLICY, gate),
   });
   const session = await host.open({ roomId: ROOM, participants: [PLR, LIN, MA] });
-  return { host, session, memory, store, llm };
+  return { host, session, memory, store, llm, arbiter };
 }
 
 async function collect(it: AsyncIterable<ConversationEvent>): Promise<ConversationEvent[]> {
@@ -213,5 +222,14 @@ describe("v2 群聊会话（端到端，真实 Arbiter/Store/Memory）", () => {
     const b = await collect(host.run(session.id, req));
     expect(a).toEqual(b);
     expect(llm.calls).toBe(2);
+  });
+});
+
+describe("expectAttrs 接线（#138）", () => {
+  it("v2 结算的 apply 带上基于本步快照的 expectAttrs（含属性改动时按快照值）", async () => {
+    const { host, session, arbiter } = await setup([speak("utt_x", "broadcast", { content: "先说说你知道的" }), think("看他怎么接")]);
+    await collect(host.run(session.id, { clientTurnId: "t_expect", utterance: { id: "utt_p2", speaker: PLR, mode: "broadcast", content: "谁最后见过他" } }));
+    const wired = arbiter.seen.filter((o) => Array.isArray(o.expectAttrs));
+    expect(wired.length).toBeGreaterThan(0); // 每个提交批都显式带（可以为空数组）
   });
 });

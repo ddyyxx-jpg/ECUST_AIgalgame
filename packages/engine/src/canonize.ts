@@ -26,7 +26,7 @@ import type { PermanentCandidate } from "./canonize.candidates.ts";
 import { candidatesFromMemories, privacyHit, witnessCount } from "./canonize.candidates.ts";
 import type { PublishMut } from "./canonize.publish.ts";
 import { publishCandidates } from "./canonize.publish.ts";
-import type { CanonizeDeps, CanonizeJudge, CanonizeLimits, CanonizeReport, CanonizeStats, MemoryIndex } from "./canonize.types.ts";
+import type { CanonizeDeps, CanonizeJudge, CanonizeLimits, CanonizeReport, CanonizeRunOptions, CanonizeStats, MemoryIndex } from "./canonize.types.ts";
 import { DEFAULT_CANONIZE_LIMITS } from "./canonize.types.ts";
 
 // 兼容旧导入路径：类型/限额拆到 canonize.types.ts，外部仍从这里取
@@ -35,6 +35,7 @@ export type {
   CanonizeJudge,
   CanonizeLimits,
   CanonizeReport,
+  CanonizeRunOptions,
   CanonizeStats,
   MemoryIndex,
 } from "./canonize.types.ts";
@@ -91,25 +92,41 @@ export class CanonizeJob {
       .slice(0, Math.max(0, limit));
   }
 
-  /** 房间退役：把该房间的公共长期记忆提成候选（docs/08 §6/§7.2） */
-  async retireRoom(roomId: RoomId): Promise<CanonizeReport> {
+  /**
+   * 房间退役：把该房间的公共长期记忆提成候选（docs/08 §6/§7.2）。
+   *
+   * 中止是**协作式**的：在每个 IO/LLM 调用前与循环迭代之间检查 signal，abort 后尽快返回
+   * `aborted: true`。已经过 Arbiter 落库的批次保持真实、不回滚；未开始的候选直接跳过。
+   * 不传 signal 时行为与旧签名完全一致。
+   */
+  async retireRoom(roomId: RoomId, opts: CanonizeRunOptions = {}): Promise<CanonizeReport> {
     // 房间日志必须先载入（FileStore 懒加载）：重启后直接 admin canonize 也要看到完整事件
     await this.deps.store.load(roomId);
+    if (opts.signal?.aborted) return this.abortedReport(roomId);
     // 索引可能落后于日志（比如刚重启、或这房间还没跑过回合）：先增量同步再取候选。
     // 用 sync 而不是 rebuild：外部已经显式喂过的记录不该被清掉（测试与"预置候选"场景）。
     const envs = await this.deps.store.events(roomId, 0);
+    if (opts.signal?.aborted) return this.abortedReport(roomId);
     if (this.deps.memory.sync) this.deps.memory.sync(roomId, envs);
     else this.deps.memory.rebuild?.(roomId, envs);
     const records = this.deps.memory.all(roomId);
     const state = this.deps.store.state(roomId);
-    return this.publish(state, records, roomId);
+    return this.publish(state, records, roomId, opts.signal);
   }
 
   /** 夜间补扫：把已加载世界里所有房间跑一遍（本实现只跑调用方给定的房间集合） */
-  async runDaily(rooms: RoomId[]): Promise<CanonizeReport[]> {
+  async runDaily(rooms: RoomId[], opts: CanonizeRunOptions = {}): Promise<CanonizeReport[]> {
     const reports: CanonizeReport[] = [];
-    for (const roomId of rooms) reports.push(await this.retireRoom(roomId));
+    for (const roomId of rooms) {
+      if (opts.signal?.aborted) break;
+      reports.push(await this.retireRoom(roomId, opts));
+    }
     return reports;
+  }
+
+  /** 中止时的报告：written 为空表示本次没有落库；此前批次不受影响（不回滚） */
+  private abortedReport(roomId: RoomId): CanonizeReport {
+    return { worldId: this.deps.worldId, candidates: 0, written: [], skipped: [], errors: [], writtenToday: this.writtenToday, aborted: true };
   }
 
   private today(): string {
@@ -131,7 +148,7 @@ export class CanonizeJob {
     skipped.set(reason, (skipped.get(reason) ?? 0) + 1);
   }
 
-  private async publish(state: WorldState, roomRecords: MemoryRecord[], roomId: RoomId): Promise<CanonizeReport> {
+  private async publish(state: WorldState, roomRecords: MemoryRecord[], roomId: RoomId, signal?: AbortSignal): Promise<CanonizeReport> {
     this.rollDay();
     const mut: PublishMut = {
       writtenToday: this.writtenToday,
@@ -148,6 +165,7 @@ export class CanonizeJob {
       state,
       roomRecords,
       roomId,
+      signal,
       worldHashes: (envs) => this.worldHashes(envs),
     });
     this.writtenToday = mut.writtenToday;
@@ -203,6 +221,8 @@ export class CanonizeJob {
         },
       ],
       cause,
+      // P2-2：与 publish 同口径——load 到的 seq 作为前置条件，接管后的旧任务体写入会被整批拒绝。
+      { expectedSeq: seq },
     );
     if (!applied.ok) return false;
     for (const ev of applied.events) this.deps.memory.ingest?.(ev);

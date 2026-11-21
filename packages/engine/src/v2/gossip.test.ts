@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONVERSATION_POLICY, type Envelope, type Entity, type LlmPort, type LlmResult } from "../../../shared/src/index.ts";
 import { DefaultArbiter } from "../arbiter.ts";
 import { EventSourcedStore } from "../store.ts";
@@ -93,6 +93,38 @@ describe("v2 微信私信引擎", () => {
     // 收件人私忆带来源，可回放
     const mems = all.filter((e) => e.type === "memory.written");
     expect(mems.length).toBe(2);
+  });
+
+  it("协作式中止：进入 step 前已 abort → 不调用 LLM、返回 aborted 事件", async () => {
+    const ctx = setup([relay("回复")]);
+    await ctx.host.send(ROOM, PLR, WU, "在吗");
+    const chat = vi.spyOn(ctx.llm, "chat");
+    const controller = new AbortController();
+    controller.abort();
+    const out = await ctx.host.step(ROOM, { signal: controller.signal });
+    expect(out.some((e) => e.type === "gossip.dropped" && e.reason === "aborted")).toBe(true);
+    expect(chat).not.toHaveBeenCalled();
+    const sent = (await ctx.store.events(ROOM, 1, 50)).filter((e) => e.type === "msg.sent");
+    expect(sent).toHaveLength(1); // 只有玩家发的那条，NPC 没再转发
+  });
+
+  it("协作式中止：LLM 调用后 abort → 已落库消息保留、不再调用 LLM", async () => {
+    const ctx = setup([relay("张三，我听说值日表的事"), relay("林小雨，王五在说你")]);
+    await ctx.host.send(ROOM, PLR, WU, "值日表有猫腻");
+    const controller = new AbortController();
+    const chat = vi.spyOn(ctx.llm, "chat");
+    let calls = 0;
+    chat.mockImplementation(async (req) => {
+      const result = await MockLlm.prototype.chat.call(ctx.llm, req);
+      calls += 1;
+      if (calls === 1) controller.abort(); // 第一条已落库，第二次 LLM 调用前中止（不发起付费调用）
+      return result;
+    });
+    const out = await ctx.host.step(ROOM, { signal: controller.signal });
+    expect(out.some((e) => e.type === "gossip.dropped" && e.reason === "aborted")).toBe(true);
+    expect(chat).toHaveBeenCalledTimes(1); // abort 后第二次 LLM 调用未发起
+    const sent = (await ctx.store.events(ROOM, 1, 50)).filter((e) => e.type === "msg.sent");
+    expect(sent.length).toBeGreaterThanOrEqual(1); // 玩家原始，不回滚
   });
 
   it("最短回信间隔：未到点不调用 LLM", async () => {

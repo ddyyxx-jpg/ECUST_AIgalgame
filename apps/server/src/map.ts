@@ -12,6 +12,7 @@ import type {
   Arbiter,
   Dialogue,
   DialogueSpec,
+  DialogueStep,
   Envelope,
   Entity,
   LinkKind,
@@ -340,6 +341,19 @@ export class MapService {
     }
 
     const after = stateAfter ?? await this.deps.store.snapshot(roomId);
+
+    // 夜间密谋第二批（issue #96/#128）："进入夜间"严格按 nextPhase 的真实枚举判定。
+    // 第一批（time.advance + 模块提案）保持原子不变；密谋失败只 warn，不回滚已经推进的时间。
+    const enteredNight = opts.advance === true && state.clock.phase !== "night" && phase === "night";
+    if (enteredNight) {
+      try {
+        const plotEvents = await this.runNightPlot(roomId, after, state, actorId);
+        events.push(...plotEvents);
+      } catch (e) {
+        console.warn(`[map.tick] 夜间密谋编排失败（不影响时段推进）：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     const map = await this.buildMapView(after, actorId);
     // 出站脱敏（issue #53 成功 / #58 失败）：apply 的 envelopes 与 moved 摘要都要过
     // 同一层掩码，否则 tick 响应会从 payload/state 里漏出未认识 NPC 真名。
@@ -619,6 +633,51 @@ export class MapService {
   }
 
   // -------------------------------------------------------------- 内部：tick / cause
+  /**
+   * 夜间密谋编排：取在场且存活的 NPC ≥2 人，开 npc.plot 会话跑完，汇总提案后
+   * 以 cause.type=dialogue 单独交给 Arbiter（不是第一批 time.advance 批）。
+   *
+   * fail-soft 由 tick() 的调用点兜底：这里抛出的任何错误（open/step/close/apply）
+   * 都只写 warn 日志，tick 仍返回 ok:true 且世界状态保持第一批提交后的结果。
+   */
+  private async runNightPlot(roomId: string, after: WorldState, before: WorldState, actorId: string): Promise<Envelope[]> {
+    // 以入夜时的在场者为准：第一批 map 模块提案会把 NPC 按日程挪去宿舍，
+    // 若用应用后的快照取人，房间很快不足 2 人，密谋永远不会被触发。
+    const liveNpcIds = (s: WorldState) => s.room.scene.presentIds.filter(
+      (id) => id !== actorId && isLive(s, id) && s.entities[id]?.kind === "npc",
+    );
+    const beforeIds = liveNpcIds(before);
+    const participants = beforeIds.length >= 2 ? beforeIds : liveNpcIds(after);
+    if (participants.length < 2) return [];
+
+    const session = await this.deps.dialogue.open({
+      roomId,
+      participants,
+      directorId: "npc.plot",
+      seed: { locId: before.room.scene.locId },
+      maxTurns: 3,
+      visibility: "private",
+    });
+    const proposals: Proposal[] = [];
+    let step: DialogueStep;
+    do {
+      step = await this.deps.dialogue.step(session.id);
+      proposals.push(...step.proposals);
+    } while (!step.done);
+    const summary = await this.deps.dialogue.close(session.id, "night.tick");
+    // close() 返回的是同一会话累积的提案；用它就够了（step 循环里只负责推进到 done）。
+    const plotProposals = summary.proposals.length > 0 ? summary.proposals : proposals;
+    if (plotProposals.length === 0) return [];
+
+    const applied = await this.deps.arbiter.apply(roomId, plotProposals, this.cause(roomId, "dialogue"), { captureState: true });
+    if (!applied.ok || applied.rejected.length > 0) {
+      const first = applied.rejected[0];
+      console.warn(`[map.tick] 夜间密谋提案被拒：${first?.detail ?? applied.error?.message ?? "unknown"}`);
+      return [];
+    }
+    return applied.events;
+  }
+
   private moduleContext(roomId: string, actorId: string, input: string, state: WorldState): ModuleContext {
     return {
       roomId,

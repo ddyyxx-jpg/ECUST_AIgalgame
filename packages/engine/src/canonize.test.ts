@@ -2,7 +2,7 @@
  * 世界层永久记忆（P3）：八道闸门的可验证行为。
  * 断言"写没写进世界层 / 被哪道闸门拦下"，不断言文案。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Envelope, Entity, MemoryRecord, RoomId } from "../../shared/src/index.ts";
 import { DefaultArbiter } from "./arbiter.ts";
 import { EventSourcedStore } from "./store.ts";
@@ -216,6 +216,75 @@ describe("canonize 八道闸门（P3）", () => {
     expect(notices.length).toBeGreaterThanOrEqual(1);
     expect(notices[0]?.userId).toBe("user_alpha");
     expect(await j.tombstone(notices[0]!.memoryId, "撤销")).toBe(true);
+  });
+
+  it("协作式中止：调用前已 abort → 不写任何候选、报告 aborted、不抛错", async () => {
+    const f = await fixture({
+      records: [record("mem_a", A, "食堂新开了一家面馆"), record("mem_b", B, "食堂新开了一家面馆")],
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const review = vi.fn(async () => ({ allow: true }));
+    const report = await (await job(f, { review })).retireRoom(ROOM, { signal: controller.signal });
+    expect(report.aborted).toBe(true);
+    expect(report.written).toHaveLength(0);
+    expect(review).not.toHaveBeenCalled(); // 中止时不发起付费 judge
+    expect((await f.store.events(WORLD_ROOM, 0)).filter((e) => e.type === "memory.written")).toHaveLength(0);
+  });
+
+  it("协作式中止：judge 内 abort → 保留已落库批次、不再写新批次（不回滚）", async () => {
+    const lost = "食堂门口贴了一张失物招领";
+    const bench = "操场旁边多了一排水龙头";
+    const f = await fixture({
+      records: [
+        record("mem_l1", A, lost), record("mem_l2", B, lost),
+        record("mem_b1", A, bench), record("mem_b2", B, bench),
+      ],
+    });
+    const controller = new AbortController();
+    let reviews = 0;
+    const judge: CanonizeJudge = {
+      review: async () => {
+        reviews += 1;
+        if (reviews === 2) controller.abort(); // 第一条已落库，第二条 judge 时中止
+        return { allow: true };
+      },
+    };
+    const report = await (await job(f, judge)).retireRoom(ROOM, { signal: controller.signal });
+    expect(report.aborted).toBe(true);
+    expect(report.written).toHaveLength(1);
+    const written = (await f.store.events(WORLD_ROOM, 0)).filter((e) => e.type === "memory.written");
+    expect(written).toHaveLength(1);
+    expect((written[0]!.payload as { content: string }).content).toBe(lost);
+  });
+
+  it("P2-2：load 与 apply 之间世界房被别的写入推进 seq → 整批 E_PRECONDITION，不交错写入", async () => {
+    const f = await fixture({
+      records: [record("mem_a", A, "食堂新开了一家面馆"), record("mem_b", B, "食堂新开了一家面馆")],
+    });
+    await f.store.load(WORLD_ROOM);
+    const seqBefore = f.store.seq(WORLD_ROOM);
+    // 模拟 stall 接管后的新任务体：在旧任务体 load 之后、apply 之前抢先写一条。
+    const store = f.store;
+    const load = store.load.bind(store);
+    let raced = false;
+    vi.spyOn(store, "load").mockImplementation(async (roomId) => {
+      const seq = await load(roomId);
+      if (roomId === WORLD_ROOM && !raced) {
+        raced = true;
+        const next = store.seq(WORLD_ROOM) + 1;
+        store.append(WORLD_ROOM, [env(next, "time.advanced", { day: 1, tick: 9 }, WORLD_ROOM)]);
+      }
+      return seq;
+    });
+    const report = await (await job(f)).retireRoom(ROOM);
+    expect(raced).toBe(true);
+    expect(report.written).toHaveLength(0);
+    expect(report.errors).toContain("E_SEQ_GAP");
+    // 世界房里只有抢先那条，没有旧任务体的 memory.written。
+    const written = (await f.store.events(WORLD_ROOM, 0)).filter((e) => e.type === "memory.written");
+    expect(written).toHaveLength(0);
+    expect(f.store.seq(WORLD_ROOM)).toBe(seqBefore + 1);
   });
 
   it("撤回未知 memoryId 返回 false（不静默放行）", async () => {
