@@ -3,10 +3,31 @@
  *
  * 为什么放 content：开局文案/身份/NPC 档案都是"内容"，改它们不该动前端代码（AGENTS I3 / issue #3）。
  * 文件缺失或校验失败时降级为空表：前端显示「无预设开局」，但不能因为内容文件坏了把服务拖死。
+ *
+ * 建议项形状（issue #139）：`{text, kind}` 为权威，kind 枚举与 candidates.ts 一致；
+ * 旧字符串仍可解析（z.union），下发时回填 kind:'action'，前端不再靠中文前缀猜。
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+
+/** 展示层候选分组；action 承担"其他/查看"桶（与前端 CANDIDATE_KINDS 一致） */
+export const SUGGESTION_KINDS = ["move", "talk", "action"] as const;
+export const SuggestionSchema = z.union([
+  z.object({ text: z.string().min(1), kind: z.enum(SUGGESTION_KINDS) }),
+  z.string().min(1), // 兼容旧内容文件：没有 kind 时下发时归一化为 action
+]);
+export type SuggestionInput = z.infer<typeof SuggestionSchema>;
+/** HTTP 对外形状：字符串已被归一化，kind 必有 */
+export interface Suggestion {
+  text: string;
+  kind: (typeof SUGGESTION_KINDS)[number];
+}
+
+/** 归一化旧字符串：不做中文前缀推断，统一落到 action */
+export function normalizeSuggestion(input: SuggestionInput): Suggestion {
+  return typeof input === "string" ? { text: input, kind: "action" } : input;
+}
 
 export const ScenarioSchema = z.object({
   id: z.string().min(1),
@@ -19,10 +40,29 @@ export const ScenarioSchema = z.object({
   opening: z.array(z.string().min(1)).min(1),
   /** 第一条建议行动 */
   hint: z.string(),
-  /** 开局的快捷行动建议（可选）：点一下等于说出这句话；缺省时前端退回 hint */
-  suggestions: z.array(z.string().min(1)).optional(),
+  /** 开局的快捷行动建议（可选）：缺省时前端退回 hint；旧字符串自动补齐 kind */
+  suggestions: z.array(SuggestionSchema).optional(),
 });
-export type Scenario = z.infer<typeof ScenarioSchema>;
+export type ScenarioRaw = z.infer<typeof ScenarioSchema>;
+/** 对外下发的场景：suggestions 的 kind 已补齐 */
+export interface Scenario {
+  id: string;
+  name: string;
+  role: string;
+  tagline: string;
+  opening: string[];
+  hint: string;
+  suggestions?: Suggestion[];
+}
+
+/** 归一化整个 catalog：保留可选字段语义，旧字符串在出口补齐 kind */
+export function normalizeScenario(raw: ScenarioRaw): Scenario {
+  const { id, name, role, tagline, opening, hint, suggestions } = raw;
+  return {
+    id, name, role, tagline, opening, hint,
+    ...(suggestions !== undefined ? { suggestions: suggestions.map(normalizeSuggestion) } : {}),
+  };
+}
 
 /** 图鉴用的公开人物档案；id 与房间内 npc 实体 id 对齐 */
 export const NpcProfileSchema = z.object({
@@ -51,7 +91,7 @@ export interface PublicNpcEntry {
 
 /** 下发前收窄为公开字段：绝不把角色档案带出这个全局公开端点 */
 export function toPublicNpcEntries(npcs: NpcProfile[]): PublicNpcEntry[] {
-  return npcs.map((npc) => ({
+  return npcs.map((npc: NpcProfile) => ({
     id: npc.id,
     ...(npc.appearance !== undefined ? { appearance: npc.appearance } : {}),
   }));
@@ -97,7 +137,7 @@ export async function loadScenarios(dir: string): Promise<ScenarioCatalog> {
   if (!openings.success) console.warn(`[scenarios] openings.json 校验失败，降级为空：${openings.error.message}`);
   if (!npcs.success) console.warn(`[scenarios] npcs.json 校验失败，降级为空：${npcs.error.message}`);
   return {
-    openings: openings.success ? openings.data : [],
+    openings: openings.success ? openings.data.map(normalizeScenario) : [],
     npcs: npcs.success ? npcs.data : [],
   };
 }

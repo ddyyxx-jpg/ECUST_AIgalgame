@@ -6,12 +6,15 @@ import Fastify from "fastify";
 import { loadConfig, hasLlm } from "./config.ts";
 import { registerRoutes } from "./routes.ts";
 import { createApp } from "./bootstrap.ts";
+import { shutdownBackground } from "./background-cycle.ts";
 
 const cfg = loadConfig();
 const app = Fastify({
   logger: { level: process.env.GALGAME_LOG_LEVEL ?? "info" },
   // P1-4：反代后按真实 IP 计数限流；默认不信任转发头（直连部署保持原样）
   trustProxy: cfg.trustProxy ?? false,
+  // 关停时把 SSE 长连接一起断开：否则 app.close() 会一直等流结束，SIGTERM 无法退出。
+  forceCloseConnections: true,
 });
 
 const deps = await createApp(cfg);
@@ -26,6 +29,27 @@ try {
   app.log.error(e);
   process.exit(1);
 }
+
+// 关停：先中止后台任务（在途 job 落 failed 终态、锁跟随任务体），再关 HTTP。
+// PR #125 P2：abortAll 必须有生产调用，否则 SIGTERM 时后台任务会被直接砍掉、投影永远挂在 inflight。
+// 只挂一次、重复信号忽略；不放进 createApp，避免测试 createApp 时污染进程信号。
+let shuttingDown = false;
+function handleSignal(signal: NodeJS.Signals): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  void (async () => {
+    try {
+      app.log.info(`[shutdown] 收到 ${signal}，正在中止后台任务`);
+      await shutdownBackground(deps.background, () => app.close(), `shutdown(${signal})`);
+      process.exit(0);
+    } catch (e) {
+      app.log.error(e);
+      process.exit(1);
+    }
+  })();
+}
+process.once("SIGTERM", () => handleSignal("SIGTERM"));
+process.once("SIGINT", () => handleSignal("SIGINT"));
 
 function landing(c: ReturnType<typeof loadConfig>, llm: boolean): string {
   return `<!doctype html><meta charset="utf-8"><title>ECUST AI 校园</title>

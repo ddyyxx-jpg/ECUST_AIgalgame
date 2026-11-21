@@ -7,6 +7,7 @@
  * 拉不到时调用方降级为「无预设开局」。
  */
 import { request, unwrap } from "./http.ts";
+import type { SuggestionInput } from "./candidates.ts";
 
 export interface Scenario {
   id: string;
@@ -20,10 +21,10 @@ export interface Scenario {
   /** 第一条建议行动（旧字段，保留兼容） */
   hint: string;
   /**
-   * 开局的快捷行动建议：点一下就等于说出这句话。
-   * 内容数据里给了就用它，没给就退回 hint（整句显示，不可点）。
+   * 开局的快捷行动建议：点一下就等于说出这句话（issue #139）。
+   * 新内容是 `{text, kind}`；旧字符串仍可读，展示层回退到 action。
    */
-  suggestions?: string[];
+  suggestions?: SuggestionInput[];
 }
 
 /**
