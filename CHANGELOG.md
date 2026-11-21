@@ -29,8 +29,13 @@
 - 候选行动面板 + 数字键 1–6 快选（输入框内不抢键）。**#139**：建议改为 `{text, kind}` 由来源侧给出（出口→`move`、在场 NPC→`talk`、`openings.json` 作者标注），删除中文前缀启发式；旧字符串仍可读，回退 `action`；`kind` 只影响分组/配色。docs/03 §5.2.6 登记形状与兼容策略。
 
 ### 验证（本分支实跑）
-- `npm run typecheck` → 0 错；`npx vitest run` → **120 文件 / 943 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过。
+- `npm run typecheck` → 0 错；`npx vitest run` → **120 文件 / 945 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过。
 - 未做：#84 的 compose/Nginx TLS/证书/备份恢复目标机冒烟（`deploy:smoke` 只覆盖应用层局部链路）。
+
+### 审阅修复（PR #147 全量审阅的 P2/P3）
+- **P2-1 delta 假接线**：`discoveryProposals` opts 增加 `delta?: number`，investigate 模块传 `config.delta`；测试断言 `delta === configJson.delta`。`kindFrom` 的中文关键词同步挪进 `config.json` 的 `kindPatterns`（数据驱动，参照 §4.7）。
+- **P2-2 接管后写隔离**：`canonize.publish.ts` 与 `canonize.tombstone` 的 `arbiter.apply` 补 `expectedSeq`（load 到的 seq）；新增竞态用例（load 与 apply 之间世界房被推进 → 整批 `E_SEQ_GAP`，无交错写入）；docs/09 §9 写明「generation 只保锁/账本，world 写隔离靠检查点 + expectedSeq」。
+- **P3**：docs/03 `AttrExpectation` 注释 3.7.0→3.8.0；v2 `StoreRetry` 带上 `expectAttrs`（重试批与首批同口径）；`conversation-api.ts` 三态注释修正；`npc.plot.ts` 拆出 `npc.plot.discovery.ts`（262+92 行）、`background-cycle.ts` 拆出 `background-cycle.types.ts`（279+76 行），均 ≤300 行且重导出保持调用路径。
 
 ## 3.7.0（2026-11-21，PR #144）— dev/v2 运行质量批（issue #130 子项 #131–#137，CONTRACT 3.6.2 → 3.7.0）
 

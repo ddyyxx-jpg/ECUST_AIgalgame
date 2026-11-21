@@ -25,7 +25,7 @@ export function conversationModesPath(roomId: string): string {
   return `/api/v1/rooms/${encodeURIComponent(roomId)}/conversation/modes`;
 }
 
-/** 只有 2xx 算「v2 可用」；404/405/401/403/5xx 都退回 v1（保守，宁可不接也不坏老流程）。 */
+/** 只有 2xx 算「v2 可用」；404/405 明确非 v2，其余状态由 detectConversation 返回 null 保持现模式（见下）。 */
 export function isConversationAvailable(status: number): boolean {
   return status >= 200 && status < 300;
 }
