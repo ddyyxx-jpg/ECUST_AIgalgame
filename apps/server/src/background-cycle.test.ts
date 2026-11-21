@@ -23,6 +23,48 @@ async function records(dir: string, roomId: string): Promise<JobRecord[]> {
   return raw.trim().split("\n").map((l) => JSON.parse(l) as JobRecord);
 }
 
+/**
+ * 终态 transition 可延迟的 JobLedger：把"投影写入中"的窗口拉长，用来复现 PR #125 复审 P3
+ * 的慢 I/O 竞态（finished 已开始写、任务 settle / 看门狗在同一窗口内发生）。
+ */
+class SlowTerminalLedger extends JobLedger {
+  private delayStatus: "done" | "failed" | null = null;
+  private releaseDelay!: () => void;
+  private readonly delayGate = new Promise<void>((resolve) => {
+    this.releaseDelay = resolve;
+  });
+  private markDelayed!: () => void;
+  private readonly delayedStarted = new Promise<void>((resolve) => {
+    this.markDelayed = resolve;
+  });
+
+  /** 让下一次指定终态的 transition 卡住，直到 release() */
+  holdNextTerminal(status: "done" | "failed"): void {
+    this.delayStatus = status;
+  }
+
+  waitUntilDelayed(): Promise<void> {
+    return this.delayedStarted;
+  }
+
+  release(): void {
+    this.releaseDelay();
+  }
+
+  override async transition(
+    roomId: string,
+    id: string,
+    patch: Partial<Pick<JobRecord, "status" | "attempts" | "lastError" | "receipt">>,
+  ): Promise<JobRecord | null> {
+    if (patch.status === this.delayStatus) {
+      this.delayStatus = null;
+      this.markDelayed();
+      await this.delayGate;
+    }
+    return super.transition(roomId, id, patch);
+  }
+}
+
 describe("BackgroundCycle", () => {
   it("成功：done + receipt，锁释放，投影走完 prepared→inflight→done", async () => {
     const dir = tempDir("bg-cycle-");
@@ -117,6 +159,61 @@ describe("BackgroundCycle", () => {
     const recs = await ledger.list("room_a");
     expect(recs.find((r) => r.id === jobId)).toMatchObject({ status: "failed" });
     expect(recs).toHaveLength(2);
+  });
+
+  // PR #125 复审 P3（background-cycle.ts:111）：旧闸门先置 written 再 await，慢 I/O 下
+  // finished 占位后卡住、aborted 赢 race → run 返回 stalled 但最终落盘 done。
+  it("慢终态写入 + 看门狗：任务已完成时以任务为准，不出现 stalled 却落盘 done", async () => {
+    const dir = tempDir("bg-cycle-");
+    const ledger = new SlowTerminalLedger(dir);
+    const cycle = new BackgroundCycle({ ledger, defaultStallMs: 20, idFactory: idSequence() });
+    const taskGate = deferred();
+    ledger.holdNextTerminal("done");
+    const running = cycle.run("room_a", { kind: "canonize", basedOnSeq: 1, stallMs: 20 }, async () => {
+      await taskGate.promise;
+      return { late: true };
+    });
+
+    taskGate.resolve();
+    await ledger.waitUntilDelayed(); // done 写入已开始，但卡在慢 I/O
+    await new Promise((r) => setTimeout(r, 80)); // 让看门狗窗口整个落在写入期间
+    expect(cycle.isBusy("room_a")).toBe(true);
+    ledger.release();
+
+    const out = await running;
+    // 任务体已完成 → run 结果必须与落盘一致；不允许被迟到的看门狗改写成 stalled
+    expect(out).toMatchObject({ ok: true, jobId: "job_1" });
+    const terminals = (await records(dir, "room_a")).filter(
+      (r) => r.status === "done" || r.status === "failed",
+    );
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({ status: "done" });
+    expect(cycle.isBusy("room_a")).toBe(false);
+  });
+
+  it("abort 收尾的 failed 写入延迟 + 任务在该窗口内完成：终态仍只有 failed、结果一致", async () => {
+    const dir = tempDir("bg-cycle-");
+    const ledger = new SlowTerminalLedger(dir);
+    const cycle = new BackgroundCycle({ ledger, defaultStallMs: 20, idFactory: idSequence() });
+    const taskGate = deferred();
+    ledger.holdNextTerminal("failed");
+    const running = cycle.run("room_a", { kind: "gossip", basedOnSeq: 1, stallMs: 20 }, async () => {
+      await taskGate.promise;
+      return { late: true };
+    });
+
+    await ledger.waitUntilDelayed(); // 看门狗已触发，abort 分支正在写 failed（慢 I/O）
+    taskGate.resolve(); // 任务体在这个写入窗口内完成
+    await new Promise((r) => setTimeout(r, 10));
+    ledger.release();
+
+    const out = await running;
+    expect(out).toMatchObject({ ok: false, reason: "stalled" });
+    const terminals = (await records(dir, "room_a")).filter(
+      (r) => r.status === "done" || r.status === "failed",
+    );
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({ status: "failed" });
   });
 
   it("waitForIdle：超时 false，任务体结束（而不是 run 返回）才 true", async () => {

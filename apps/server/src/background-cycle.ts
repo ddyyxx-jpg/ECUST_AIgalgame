@@ -51,8 +51,14 @@ type Settled =
   | { status: "error"; error: string }
   | { status: "stalled" | "aborted" };
 
-/** 终态投影写入的"只写一次"闸门：stall/abort 先收尾，任务体后 settle 时不再覆盖 */
+/**
+ * 终态投影写入的"只写一次"闸门（PR #125 复审 P3）：
+ * - `writing` 表示已有一次写入在进行，并发收尾者必须直接跳过，不能提前把 `written` 置真冒充"已写完"；
+ * - `written` 只在写入真正结束（含失败）后置位；写失败不再重试——投影写失败只 warn，重试反而可能
+ *   让迟到的 done 覆盖已写的 failed，产生结果与落盘错位。
+ */
 interface TerminalGate {
+  writing: boolean;
   written: boolean;
 }
 
@@ -107,10 +113,15 @@ export class BackgroundCycle {
     gate: TerminalGate,
     patch: Partial<Pick<JobRecord, "status" | "receipt" | "lastError" | "attempts">>,
   ): Promise<void> {
-    if (gate.written) return;
-    gate.written = true;
-    if (!this.ledger) return;
-    await this.safeWrite(() => this.ledger!.transition(roomId, jobId, patch));
+    if (gate.writing || gate.written) return;
+    gate.writing = true;
+    try {
+      if (!this.ledger) return;
+      await this.safeWrite(() => this.ledger!.transition(roomId, jobId, patch));
+    } finally {
+      gate.writing = false;
+      gate.written = true;
+    }
   }
 
   /** 任务体真正 settle 后才调用：释放单飞锁并唤醒 waitForIdle */
@@ -145,7 +156,7 @@ export class BackgroundCycle {
     };
     this.active.set(roomId, entry);
     const stallMs = Math.max(1, opts.stallMs ?? this.defaultStallMs);
-    const gate: TerminalGate = { written: false };
+    const gate: TerminalGate = { writing: false, written: false };
 
     try {
       let attempts = 0;
@@ -168,13 +179,20 @@ export class BackgroundCycle {
       }
 
       let stalled = false;
+      let taskSettled = false;
       let resolveAbort!: (status: "stalled" | "aborted") => void;
       const aborted = new Promise<"stalled" | "aborted">((resolve) => {
         resolveAbort = resolve;
       });
-      const onAbort = () => resolveAbort(stalled ? "stalled" : "aborted");
+      // 任务体一旦 settle，本次 run 的结果就以任务为准（done/error）：abort/stall 只能在任务
+      // 未 settle 时赢。否则慢终态写入期间看门狗触发会出现「run 报 stalled、任务其实已完成、
+      // 最终落盘 done」的结果与投影错位（PR #125 复审 P3）。
+      const onAbort = () => {
+        if (!taskSettled) resolveAbort(stalled ? "stalled" : "aborted");
+      };
       controller.signal.addEventListener("abort", onAbort, { once: true });
       const timer = setTimeout(() => {
+        if (taskSettled) return;
         stalled = true;
         controller.abort(`stalled: 超过 ${stallMs}ms 未完成`);
       }, stallMs);
@@ -186,6 +204,8 @@ export class BackgroundCycle {
           return { status: "done", value };
         } catch (e) {
           return { status: "error", error: errorText(e) };
+        } finally {
+          taskSettled = true;
         }
       })();
 
@@ -201,8 +221,8 @@ export class BackgroundCycle {
         return result;
       });
 
-      // abortAll 可能发生在监听器注册之前：信号已 abort 时补一次分发
-      if (controller.signal.aborted) resolveAbort(stalled ? "stalled" : "aborted");
+      // abortAll 可能发生在监听器注册之前：信号已 abort 时补一次分发（任务已 settle 则不算）
+      if (!taskSettled && controller.signal.aborted) resolveAbort(stalled ? "stalled" : "aborted");
 
       const settled = await Promise.race<Settled>([
         finished,
