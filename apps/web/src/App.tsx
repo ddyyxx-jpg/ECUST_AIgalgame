@@ -11,6 +11,7 @@ import { makeTurnHandlers } from "./turn-handlers.ts";
 import AuthScreen from "./AuthScreen.tsx";
 import type { SaveEntry } from "./api.ts";
 import ChatPanel from "./ChatPanel.tsx";
+import { fullScreenOverlayOpen } from "./candidate-keys.ts";
 import DraftsPanel from "./DraftsPanel.tsx";
 import InboxPanel from "./InboxPanel.tsx";
 import GalleryPanel from "./GalleryPanel.tsx";
@@ -738,7 +739,8 @@ await runTurn(
   /** 发新回合（快捷建议把 `raw` 传进来就等于说出这句话，不必先填输入框） */
   const send = useCallback(
     (raw?: string, targetNpc?: { id: string; name: string } | null) => {
-      void dispatchTurn(raw ?? input, targetNpc ?? null, true);
+      // 返回 Promise：ChatPanel 的数字键快选据此在回合结束 / 守卫提前返回后解除自锁
+      return dispatchTurn(raw ?? input, targetNpc ?? null, true);
     },
     [dispatchTurn, input],
   );
@@ -1035,13 +1037,17 @@ await runTurn(
             lines={convMode === "v2" ? [...lines, ...convLines] : lines}
             typing={typing}
             busy={busy}
+            // 已知两个全屏遮罩（地图 MapOverlay / 局内调试面板 DebugPanel）不会卸载 ChatPanel：
+            // 打开时数字键快选必须停用，否则会穿透真发回合（PR #127 P1）。
+            // 门控判定是显式登记的两个来源，纯函数有单测；传参正确性由 typecheck 保证。
+            overlayOpen={fullScreenOverlayOpen({ mapOpen, debugPanelOpen: Boolean(debugToken && roomId) })}
             err={err}
             input={input}
             onInput={setInput}
             onSend={(target) => void send(undefined, target)}
             // 每回合结束（字打完、且不在等回复）都给建议；等回复时先收起，免得发旧选项
             suggestions={!busy && sceneSettled ? nextActions : []}
-            onPick={(text, target) => void send(text, target)}
+            onPick={(text, target) => send(text, target)}
             onRetry={retry}
             retryable={errRetryable}
             waitingForInterjection={convMode === "v2" && waitingInterjection}
