@@ -249,3 +249,72 @@ describe("Arbiter · 原子性与幂等", () => {
     expect(blocked.rejected[0]?.code).toBe("E_X_LIMIT");
   });
 });
+
+describe("Arbiter · 结算前置条件 expectAttrs", () => {
+  it("期望值匹配时照常提交，seq 前进", async () => {
+    const { store, arbiter } = setup();
+    const before = store.seq(ROOM);
+    const r = await arbiter.apply(
+      ROOM,
+      [delta(PLR, "stamina", -5)],
+      cause(),
+      { expectAttrs: [{ entityId: PLR, key: "stamina", expected: 60 }] },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.events).toHaveLength(1);
+    expect(store.seq(ROOM)).toBe(before + 1);
+  });
+
+  it("期望值失配时整批拒绝：不落库、不耗 seq、不产事件", async () => {
+    const { store, arbiter } = setup();
+    const before = store.seq(ROOM);
+    const eventsBefore = await store.events(ROOM, 0);
+    const r = await arbiter.apply(
+      ROOM,
+      [delta(PLR, "stamina", -5)],
+      cause(),
+      { expectAttrs: [{ entityId: PLR, key: "stamina", expected: 99 }] },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe("E_PRECONDITION");
+    expect(r.error?.message).toContain(`${PLR}.stamina`);
+    expect(r.events).toHaveLength(0);
+    expect(r.applied).toHaveLength(0);
+    expect(store.seq(ROOM)).toBe(before);
+    expect(await store.events(ROOM, 0)).toHaveLength(eventsBefore.length);
+  });
+
+  it("expected:null 在属性缺失时通过、在属性存在时拒绝", async () => {
+    const { arbiter } = setup();
+    const pass = await arbiter.apply(
+      ROOM,
+      [delta(PLR, "stamina", -5)],
+      cause(),
+      { expectAttrs: [{ entityId: NPC, key: "x.notset", expected: null }] },
+    );
+    expect(pass.ok).toBe(true);
+    const fail = await arbiter.apply(
+      ROOM,
+      [delta(PLR, "stamina", -5)],
+      cause(),
+      { expectAttrs: [{ entityId: NPC, key: "stamina", expected: null }] },
+    );
+    expect(fail.ok).toBe(false);
+    expect(fail.error?.code).toBe("E_PRECONDITION");
+  });
+
+  it("expectedSeq 与 expectAttrs 同时给且 seq 过期 → 仍是 E_SEQ_GAP", async () => {
+    const { arbiter } = setup();
+    const r = await arbiter.apply(
+      ROOM,
+      [delta(PLR, "stamina", -5)],
+      cause(),
+      {
+        expectedSeq: 999,
+        expectAttrs: [{ entityId: PLR, key: "stamina", expected: 99 }],
+      },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe("E_SEQ_GAP");
+  });
+});

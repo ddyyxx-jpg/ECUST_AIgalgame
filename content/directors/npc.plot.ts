@@ -196,8 +196,19 @@ export function conspiracyProposals(plot: NormalizedPlot): Proposal[] {
   return proposals;
 }
 
-/** 玩家次日调查：按 leakPoints 产出 evidence 记忆 + 可问问题 + NPC 态度变化。 */
-export function discoveryProposals(ctx: ModuleContext, plot: NormalizedPlot, kind: "observe" | "search" | "ask"): ModuleOutcome {
+/**
+ * 玩家次日调查：按 leakPoints 产出 evidence 记忆 + 可问问题 + NPC 态度变化。
+ *
+ * attitudeAttr 由调用方（内容层模块/数据）显式传入；不给就不产 attr.delta。
+ * 引擎没有 moduleState 写入口（issue #128），因此不再从 moduleState 读键——
+ * 避免"看起来能配置、实际永远不生效"的假接线（I2：键名不写死在代码里）。
+ */
+export function discoveryProposals(
+  ctx: ModuleContext,
+  plot: NormalizedPlot,
+  kind: "observe" | "search" | "ask",
+  opts?: { attitudeAttr?: string },
+): ModuleOutcome {
   const proposals: Proposal[] = [];
   const questions: { key: string; text: string; meta?: unknown }[] = [];
   plot.leakPoints.forEach((leak, i) => {
@@ -218,14 +229,9 @@ export function discoveryProposals(ctx: ModuleContext, plot: NormalizedPlot, kin
       by: "npc.plot",
     });
   });
-  // NPC 态度变化可见：给每名密谋参与者叠加可配置的戒备属性（键来自模块数据，不硬编码属性名）。
-  // TODO(#96 端到端接线，独立 issue)：moduleState["npc.plot.attitudeAttr"] 目前没有任何写入方——
-  // 13 个 op 原语里没有 moduleState.set，turn/map.tick 也不写这个键；本函数又没有调用方。
-  // 在"夜间 tick 触发 npc.plot + 写 attitude 键 + 调用 discoveryProposals"接线落地前，
-  // 下面的 attr.delta 永远被跳过。保持 gated 而不硬编码 "guard"（I2），接线后无需改这里。
-  const attitudeKey = typeof ctx.state.moduleState["npc.plot.attitudeAttr"] === "string"
-    ? (ctx.state.moduleState["npc.plot.attitudeAttr"] as string)
-    : undefined;
+  // NPC 态度变化可见：键由调用方从 content JSON 传入（I2，代码不硬编码属性名）。
+  // 未配置时只产证据记忆与可问线索，不产 attr.delta。
+  const attitudeKey = opts?.attitudeAttr;
   if (attitudeKey) {
     for (const actor of plot.actors) {
       proposals.push({

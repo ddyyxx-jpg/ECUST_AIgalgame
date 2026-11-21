@@ -3,6 +3,7 @@
  * 这里只做编排：投递 → 并行 NPC 决策 → 审核 → 一次性 Proposal；不直接写状态。
  * 每个私有步骤都控制在 50 行以内（AGENTS.md §6）；runStep 只保留顺序。
  */
+import { expectAttrsFor } from "../attr-expect.ts";
 import { isRoomSyncFault } from "../store-write.ts";
 import type { ArbiterApplyResult } from "../arbiter.ts";
 import type {
@@ -11,7 +12,7 @@ import type {
 } from "../../../shared/src/index.ts";
 import { deliver, validateUtterance } from "./delivery.ts";
 import { shouldWake, type SceneManager } from "./scene.ts";
-import { mentalFields, mentalProposal, memoryProposals, publicSceneText, utteranceFields } from "./conversation.helpers.ts";
+import { fitMemoryContent, mentalFields, mentalProposal, memoryProposals, publicSceneText, utteranceFields } from "./conversation.helpers.ts";
 import type { ConversationDeps } from "./conversation.ts";
 import { formatDeliveryFor, type HistoryLine, type NpcDecisionResult, type PresentActor } from "./npc-agent.ts";
 import type { TalkChannel } from "./talk-budget.ts";
@@ -255,8 +256,9 @@ export function ownSpeechLines(rounds: readonly Round[], npcId: ActorId): string
   for (const r of rounds) {
     for (const d of r.deliveries) {
       if (d.speaker !== npcId) continue;
-      // 与 memoryProposals 同一拼法（content + " (action)"），否则和召回行按正文去重失效
-      const text = `${d.content ?? ""}${d.action ? ` (${d.action})` : ""}`.trim();
+      // 与 memoryProposals 同一拼法（content + " (action)"）+ 同一 500 字截断，
+      // 否则 >500 字符时召回行被截成前缀、自己这行是全文，去重失效、同一句占两行（#146）
+      const text = fitMemoryContent(`${d.content ?? ""}${d.action ? ` (${d.action})` : ""}`.trim());
       if (!text || seen.has(text)) continue;
       seen.add(text);
       out.push(`- [第${Math.floor(r.turn / 100) || 1}天] 你说过：${text}`);
@@ -420,7 +422,11 @@ async function commitStep(ctx: StepCtx, utterance?: Utterance): Promise<boolean>
     await finish({ ok: true, mode: "atomic", seq: seq + 1, stateAfter: ctx.state, applied: [], rejected: [], events: [] });
     return true;
   }
-  const applied = await arbiter.apply(s.roomId, ctx.proposals, cause, { expectedSeq: seq, captureState: true });
+  // #138：提案基于本步开头的 ctx.state 快照算出；交裁决前复核被改动的属性，
+  // 若期间被别的提交改过（后台 tick / 另一请求）→ 整批 E_PRECONDITION，不叠加旧值 delta。
+  const applied = await arbiter.apply(s.roomId, ctx.proposals, cause, {
+    expectedSeq: seq, captureState: true, expectAttrs: expectAttrsFor(ctx.state, ctx.proposals),
+  });
   if (!applied.ok) {
     // ③ 写盘失败是暂时故障：必须走 retryable 分支，绝不能进 seen 缓存
     if (applied.error?.code === "E_STORE_FAULT") {

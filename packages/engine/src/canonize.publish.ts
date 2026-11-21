@@ -25,7 +25,22 @@ export interface PublishArgs {
   state: WorldState;
   roomRecords: MemoryRecord[];
   roomId: RoomId;
+  /** 协作式中止：循环迭代之间/每次 judge 调用前检查；不传则完全保持旧行为 */
+  signal?: AbortSignal;
   worldHashes: (envs: Envelope[]) => string[];
+}
+
+/** 中止报告：只标记 aborted，written 保留此前已落库的批次（不做回滚） */
+function abortedReport(args: PublishArgs, written: Id[], skipped: Map<string, number>, errors: string[]): CanonizeReport {
+  return {
+    worldId: args.deps.worldId,
+    candidates: 0,
+    written,
+    skipped: [...skipped.entries()].map(([reason, count]) => ({ reason, count })),
+    errors,
+    writtenToday: args.mut.writtenToday,
+    aborted: true,
+  };
 }
 
 function skip(skipped: Map<string, number>, reason: string): void {
@@ -33,7 +48,7 @@ function skip(skipped: Map<string, number>, reason: string): void {
 }
 
 export async function publishCandidates(args: PublishArgs): Promise<CanonizeReport> {
-  const { deps, limits, mut, judgeFailureLimit, state, roomRecords, roomId } = args;
+  const { deps, limits, mut, judgeFailureLimit, state, roomRecords, roomId, signal } = args;
   const skipped = new Map<string, number>();
   const errors: string[] = [];
   const written: Id[] = [];
@@ -52,6 +67,8 @@ export async function publishCandidates(args: PublishArgs): Promise<CanonizeRepo
   }
 
   for (const candidate of candidates) {
+    // 协作式中止：迭代之间检查，abort 后立刻返回，已落库批次保持真实、不回滚
+    if (signal?.aborted) return abortedReport(args, written, skipped, errors);
     // ① 来源可追溯
     if (candidate.sourceRefs.length === 0 || !candidate.sourceRefs.every((r) => SOURCE_REF.test(r))) {
       skip(skipped, "source_untraceable");
@@ -85,6 +102,8 @@ export async function publishCandidates(args: PublishArgs): Promise<CanonizeRepo
       continue;
     }
     // ⑥ 独立审核（judge 抛错 = 拒绝：fail-closed）
+    // 每次 LLM 调用前再检查一次：abort 与调用排在同一个 tick 时不再发起付费请求
+    if (signal?.aborted) return abortedReport(args, written, skipped, errors);
     try {
       const verdict = await deps.judge.review(candidate);
       mut.judgeFailures = 0;
@@ -99,6 +118,8 @@ export async function publishCandidates(args: PublishArgs): Promise<CanonizeRepo
     }
 
     // ⑦⑧ 发布（不可变/回滚由 Arbiter 的世界层规则保证）+ 版本号
+    // judge 是异步间隙：abort 可能在此期间发生，落库前再确认一次，避免"取消后仍写入"
+    if (signal?.aborted) return abortedReport(args, written, skipped, errors);
     const op: Proposal = {
       op: "memory.write",
       reason: `canonize:${src}`,
