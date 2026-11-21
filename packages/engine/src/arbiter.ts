@@ -151,6 +151,7 @@ export class DefaultArbiter {
    * 结算前置条件（3.7.0）：逐条比对当前快照，返回首条失配的可读原因，全部满足返回 null。
    * expected===null 表示属性必须不存在；实体或属性不存在时实际值视为 undefined。
    * AttrValue 只有 number/string/boolean，用 === 精确比较（契约只承诺标量相等，不承诺深比较）。
+   * 并发安全由 exclusive 串行链保证：本检查在链内读取快照；测试用双 expectAttrs 覆盖（后一个请求按前一个提交后的值必然失配）。
    */
   private firstAttrMismatch(expect: AttrExpectation[] | undefined, state: WorldState): string | null {
     if (!expect || expect.length === 0) return null;
