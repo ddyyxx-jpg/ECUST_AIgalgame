@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ConversationEvent, Entity, Envelope, Utterance } from "../../../shared/src/index.ts";
 import { MockLlm } from "../../../llm/src/mock.ts";
@@ -14,7 +15,7 @@ import { NpcAgent } from "./npc-agent.ts";
 import { ConversationAudit } from "./audit.ts";
 import { ConversationHostV2 } from "./conversation.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
 const POLICY = `${ROOT}content/v2/conversation-policy.json`;
 const ROOM = "room_chat";

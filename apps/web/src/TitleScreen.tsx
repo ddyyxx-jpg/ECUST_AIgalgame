@@ -204,8 +204,9 @@ export default function TitleScreen({
                         disabled={busy}
                       >
                         <span className="scenario-face">
+                          {/* 256 像素角色卡：和游戏内是同一张源图，分辨率更高、细节更多 */}
                           <img
-                            src={`/portraits/hero-${s.id}.jpg`}
+                            src={`/portraits/hero-${s.id}-card.png`}
                             alt=""
                             onError={(e) => {
                               e.currentTarget.style.display = "none";

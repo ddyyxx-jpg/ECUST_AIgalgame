@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 /**
  * Issue #93 五项行为回归（引擎侧）。
  * 只断言结构/计数与可见性标记，不断言任何 LLM 叙事文案。
@@ -22,7 +23,7 @@ import { ConversationHostV2 } from "./conversation.ts";
 import { projectConversationEvents } from "./conversation.view.ts";
 import { publicSceneText } from "./conversation.helpers.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
 const POLICY = `${ROOT}content/v2/conversation-policy.json`;
 const ROOM = "room_chat";

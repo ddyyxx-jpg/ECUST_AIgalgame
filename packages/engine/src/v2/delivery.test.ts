@@ -1,10 +1,11 @@
 import { writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { tempDir } from "@galgame/testkit";
 import { deliver, loadConversationPolicy, loadModes, validateUtterance } from "./delivery.ts";
 import { DEFAULT_CONVERSATION_POLICY, type Utterance } from "../../../shared/src/index.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
 const POLICY = `${ROOT}content/v2/conversation-policy.json`;
 
