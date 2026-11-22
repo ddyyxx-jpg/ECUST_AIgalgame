@@ -194,6 +194,15 @@ export class CanonizeJob {
   /** 撤回：tombstone 立即生效，世界层版本 +1（docs/08 §7.3 第 8 条） */
 
   async tombstone(memoryId: Id, reason: string): Promise<boolean> {
+    return (await this.tombstoneWithReason(memoryId, reason)).ok;
+  }
+
+  /**
+   * 与 `tombstone` 同一条写入路径，但把失败原因带出来：`E_SEQ_GAP` 是**并发冲突**
+   * （世界层正被别人写），运维应当重试；`E_MEMORY_IMMUTABLE` 才是真的不可变。
+   * HTTP 层原先只拿 boolean，把两者都报成 409「已撤回或不可变」（PR #149 审阅 P2-4）。
+   */
+  async tombstoneWithReason(memoryId: Id, reason: string): Promise<{ ok: boolean; code?: string }> {
     // P2-2：运行开始时 load 的 seq 作为基线；applyWithSeqRetry 内部只在活动任务（无 signal）
     // 遇到 E_SEQ_GAP 时有界重试，被 stall 接管的旧任务体不会重算新 seq 后写入。
     const basedOnSeq = await this.deps.store.load(this.deps.worldRoom);
@@ -227,10 +236,14 @@ export class CanonizeJob {
       }),
       basedOnSeq,
     );
-    if (!applied.applied.ok) return false;
+    if (!applied.applied.ok) {
+      // 与 canonize.publish.ts 保持同一取码口径：批次级 error 优先，再退到首条被拒提案
+      const code = applied.applied.error?.code ?? applied.applied.rejected[0]?.code;
+      return { ok: false, ...(code ? { code } : {}) };
+    }
     for (const ev of applied.applied.events) this.deps.memory.ingest?.(ev);
     this.worldVersion += 1;
     if (this.deps.onVersionBump) await this.deps.onVersionBump(this.deps.worldId, this.worldVersion);
-    return true;
+    return { ok: true };
   }
 }

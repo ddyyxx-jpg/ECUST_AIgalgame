@@ -57,6 +57,27 @@
 ### 验证（第二轮审阅修复后实跑）
 - `npx tsc --noEmit` → 0 错；`npx vitest run` → **123 文件 / 978 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过（`index-A8yziaL-.js` 387.81 kB）。
 
+### 审阅修复第三轮（PR #149 审阅：3×P0 / 1×P1 / 7×P2 / P3）
+
+> 背景：第二轮重提后 huaaaji 打回，指出「秘密出口还漏了三处，tick 的 `expectedSeq` 取值时机仍会让旧快照覆盖并发写」。本轮把**所有**玩家可达出口收进同一投影，并用「把修复还原后测试必须失败」的反向验证确认回归测试不是空转。
+
+- **P0-1 `/map/travel` 的 Turn 事件**：`TravelResult.events` 里的 `turn.patch` 带着整份 `WorldState`（含 `plots`），旧代码只 `maskTurnEvents` 遮人名。现在 `MapService.outbound()` 对 `events` 逐条过 `projectTurnEventForPlayer`（travel 与 tick 共用）。
+- **P0-2 `turn.patch.ops`**：v1 `/turns` 的 SSE 只裁了 `state`，`ops` 原样下发——含 NPC 私有 `memory.write`、`status:"tombstoned"` 的旧工作记忆正文、investigate 查完时的 `plot.upsert`（args 带 `forbidReveal`/`leakPoints`）。现在 `projectTurnEventForPlayer` 同时重建 `state` 与 `ops`（复用 dev/v2 的 `projectProposals`：非 public 的 `memory.write` 整条丢弃、`plot.upsert` 剥 GM args）。
+- **P0-3 `memory.tombstoned.payload.reason`**：撤回事件的 `reason` 就是被撤回记忆的正文（`arbiter.ops.ts` 写入），玩家侧只留 `memoryId`/`supersedes`。
+- **P1 tick 与并发写**：`expectedSeq` 改为在**取快照之前**捕获（原先在 `modules.tick`/`dryRun` 之后取值），tick 期间 `turns` 提交的 `scene.set` 不再被旧快照覆盖；并发场景由 `modules.tick` 内真实 `arbiter.apply` 模拟，断言 tick 返回 `E_SEQ_GAP` 且最终位置是并发那次写入。
+- **P2-1 v2 前台恢复清空会话行**：`room-local-state` 新增 `convLines` 捕获/回填（同房 resumed 保留，换房/新开局清空），`room-enter` 的 capture→reset→restore 顺序有集成用例。
+- **P2-2 v2 候选不完整**：`positionFromState` 不再硬写 `exits:[]`——从 `state.links` 推导双向 `located_in`（两端都是活跃 loc），在场者只认 `kind==="npc" && status==="active"`；新增 `candidatePosition` 在服务端 `pos` 为空时回落到 state 投影（travel 后的旧 pos 不再让候选整块消失）。
+- **P2-3 canonize 重试窗口**：`applyWithSeqRetry` 在循环顶部与 `await store.load(...)` 之后都检查 `signal.aborted`（abort 可能发生在 load 内部），中止时返回内部哨兵 `E_ABORTED`，`publishCandidates` 记为 `skipped:aborted` 并出 `aborted` 报告——不再以新 seq 插到新世代之后。测试用受控 promise 把 abort 精确投在重试窗口内。
+- **P2-4 tombstone 错误语义**：撤回改用 `tombstoneWithReason`；并发冲突 `E_SEQ_GAP` → `503 retryable`（此前一律报 409 `E_MEMORY_IMMUTABLE`，运维看到 409 不会重试），真不可变仍 409。取码顺序统一为批次级 `error` 优先。
+- **P2-5 `manifest.limits.maxArrayItems` 在 intent/tool 路径失效**：`limitOutcome` 曾用「长度没变就返回原 out」判断，数组被裁剪时长度不变 → 裁剪被丢弃；现在一律以 `limitProposals` 结果为返回来源，intent/tool/tick 三条路径都有用例。
+- **P2-6 auto 超限 notice**：客户端只认服务端机器字段 `reason:"autoLimit"`，删除英文文案兜底死代码（服务端文案来自 `content/v2/conversation-policy.json`，可改语言）。
+- **P2-7 blocked auto 回合重试**：`retrySubmission(last)` 保留 `auto` 标记，重试走真正的自主轮，不再被空输入守卫吃掉。
+- **P3**：`/map/tick` 的 viewer 改按登录账号解析（联机房不再用「1 号玩家」替别人过滤私忆）；v2 `playedTurns` 只数已提交的自身 utterance；候选位置按 `kind` 过滤（不再生成「和地点说话」）；`http.ts` 的 `TimeoutError` import 移到文件顶部；新增 `/turns`、`/map/travel`、`/events` 的响应体回归断言与 tombstone 503/409 路由用例。
+
+### 验证（第三轮审阅修复后实跑）
+- `npx tsc --noEmit` → 0 错；`npx vitest run` → **124 文件 / 994 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过（`index-CMLyLKtQ.js` 388.62 kB）。
+- 反向验证：把 `expectedSeq` 取值挪回旧位置 → 并发用例失败；把 outbound 投影还原 → 三处 P0 用例失败（证明断言真的盯着出口，而不是只读 EventLog）。
+
 ## 3.7.0（2026-11-21，PR #144）— dev/v2 运行质量批（issue #130 子项 #131–#137，CONTRACT 3.6.2 → 3.7.0）
 
 ### 新增

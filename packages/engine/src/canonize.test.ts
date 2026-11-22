@@ -321,6 +321,47 @@ describe("canonize 八道闸门（P3）", () => {
     expect(f.store.seq(WORLD_ROOM)).toBe(seqBefore + 1);
   });
 
+  it("P2-3：publish 路径在 E_SEQ_GAP 重试 load 中 abort → 报告 aborted、written=0、apply≤2", async () => {
+    const f = await fixture({
+      records: [record("mem_a", A, "图书馆新增了自助借书机"), record("mem_b", B, "图书馆新增了自助借书机")],
+    });
+    const controller = new AbortController();
+    const realApply = f.arbiter.apply.bind(f.arbiter);
+    const seqGate = { resolve: (() => undefined) as () => void, promise: Promise.resolve() };
+    seqGate.promise = new Promise<void>((resolve) => { seqGate.resolve = resolve; });
+    let applyCalls = 0;
+    const realLoad = f.store.load.bind(f.store);
+    const seqAtRetry = await realLoad(WORLD_ROOM);
+    vi.spyOn(f.store, "load").mockImplementation(async (roomId) => {
+      if (roomId === WORLD_ROOM && applyCalls === 1) {
+        await seqGate.promise; // 确定性挂起在重试窗口内
+        controller.abort();
+        // 新世代写入推进 seq：旧逻辑若继续，下一轮 apply 会成功并以新 seq 落库
+        f.store.append(WORLD_ROOM, [env(seqAtRetry + 1, "time.advanced", { day: 2, tick: 1 }, WORLD_ROOM)]);
+      }
+      return realLoad(roomId);
+    });
+    vi.spyOn(f.arbiter, "apply").mockImplementation(async (roomId, ops, cause, opts) => {
+      applyCalls += 1;
+      if (roomId === WORLD_ROOM && applyCalls === 1 && opts?.expectedSeq === 0) {
+        // 首次 apply 故意 E_SEQ_GAP，触发重试窗口
+        return { ok: false, mode: "atomic", seq: 99, applied: [], rejected: [], events: [],
+          error: { code: "E_SEQ_GAP", message: "injected" } };
+      }
+      return realApply(roomId, ops, cause, opts);
+    });
+
+    const reportPromise = (await job(f)).retireRoom(ROOM, { signal: controller.signal });
+    seqGate.resolve();
+    const report = await reportPromise;
+    expect(applyCalls).toBeLessThanOrEqual(2);
+    expect(report.aborted).toBe(true);
+    expect(report.written).toHaveLength(0);
+    expect(report.errors).not.toContain("E_SEQ_GAP");
+    const written = (await f.store.events(WORLD_ROOM, 0)).filter((e) => e.type === "memory.written");
+    expect(written).toHaveLength(0);
+  });
+
   it("撤回未知 memoryId 返回 false（不静默放行）", async () => {
     const f = await fixture({ records: [record("mem_a", A, "操场旁边多了一排水龙头"), record("mem_b", B, "操场旁边多了一排水龙头")] });
     const j = await job(f);

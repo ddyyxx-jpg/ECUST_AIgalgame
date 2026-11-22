@@ -204,7 +204,9 @@ function capArrayArgs(p: Proposal, max: number): Proposal {
 
 function limitOutcome(info: ModuleInfo, out: ModuleOutcome): ModuleOutcome {
   const proposals = limitProposals(info, out.proposals ?? []);
-  return proposals.length === (out.proposals ?? []).length ? out : { ...out, proposals };
+  // proposalsPerTurn 与 maxArrayItems 都可能改变内容：比较引用/长度不足以发现数组被裁剪。
+  // 以裁剪结果为唯一来源，避免"裁了数组却返回原 out"把裁剪丢弃。
+  return { ...out, proposals };
 }
 
 /** 极简意图匹配：模块在 manifest 里声明 intents，文本包含任一关键词即认为它想处理 */

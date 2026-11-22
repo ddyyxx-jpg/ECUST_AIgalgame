@@ -62,6 +62,8 @@ export async function applyWithSeqRetry(
   let expectedSeq = basedOnSeq;
   let attempts = 0;
   for (;;) {
+    // 循环顶部（含首次）先确认任务仍活动，abort 后不再发起 apply
+    if (signal?.aborted) return { applied: abortedApply(expectedSeq), seq: expectedSeq };
     const cause = buildCause(expectedSeq + 1);
     const applied = await deps.arbiter.apply(deps.worldRoom, [op], cause, { expectedSeq });
     if (applied.ok) return { applied, seq: applied.seq };
@@ -73,7 +75,23 @@ export async function applyWithSeqRetry(
     attempts += 1;
     // 活动任务的自旋重试：load 最新 seq 后重算 cause.seq 与 expectedSeq，候选内容不变
     expectedSeq = await deps.store.load(deps.worldRoom);
+    // abort 可能发生在 await store.load(...) 内部：load 完成后必须再检查，
+    // 否则下一轮循环顶部检查不到（abort 已经结束），僵尸任务仍会以新 seq 落库。
+    if (signal?.aborted) return { applied: abortedApply(expectedSeq), seq: expectedSeq };
   }
+}
+
+/** 中止时返回一个"未落库"的失败结果；调用方据此把该写入记为跳过，不写世界层 */
+function abortedApply(seq: number): Awaited<ReturnType<CanonizeDeps["arbiter"]["apply"]>> {
+  return {
+    ok: false,
+    mode: "atomic",
+    seq,
+    applied: [],
+    rejected: [],
+    events: [],
+    error: { code: "E_ABORTED", message: "任务已中止，跳过本次写入" },
+  };
 }
 
 /** 中止报告：只标记 aborted，written 保留此前已落库的批次（不做回滚） */
@@ -208,7 +226,12 @@ export async function publishCandidates(args: PublishArgs): Promise<CanonizeRepo
     );
     basedOnSeq = appliedSeq;
     if (!applied.ok) {
-      const code = applied.rejected[0]?.code ?? applied.error?.code ?? "E_MODULE_FAULT";
+      const code = applied.error?.code ?? applied.rejected[0]?.code ?? "E_MODULE_FAULT";
+      if (code === "E_ABORTED") {
+        // applyWithSeqRetry 在重试窗口内检测到 abort：本次写入记为跳过，不进 errors、不落库
+        skip(skipped, "aborted");
+        return abortedReport(args, written, skipped, errors, candidates.length);
+      }
       errors.push(code);
       skip(skipped, `arbiter:${code}`);
       continue;

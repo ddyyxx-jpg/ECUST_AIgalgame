@@ -110,7 +110,10 @@ interface RoomMember {
 > - `projectEventsForPlayer(events, viewer)`：`plot.upserted` → `stripPlotSecrets(plot)`（引擎 `packages/engine/src/v2/conversation.view.ts` 同一实现，前后端一套规则）；`memory.written` 只有 `visibility==="public"` 或 `ownerId===viewer` 才留，其余整条消失（不是脱敏，是"这条不存在"）。
 > - `projectStateForPlayer(state)`：`state.plots` 逐条剥。
 > - `playerOf(state)`：服务端自己解析玩家实体（`role==="player"` → `kind==="plr"`），不信 query/header 里的 viewer。
-> - 回归证据：`apps/server/src/plot-night.route.test.ts` 直接断言 `POST /map/tick`、`GET /state`、`GET /events` 的**响应体字符串**里不出现 `forbidReveal`/`leakPoints`/秘密原文，也不出现别人的私忆。
+> - `projectTurnEventForPlayer(ev)`：v1 `TurnEvent` 不是 Envelope，单独入口；`turn.patch` 的 `state` 剥 plot 秘密、`ops` 复用 dev/v2 的 `projectProposals`（非 public 的 `memory.write` 整条丢弃，`plot.upsert` 剥 GM args）。`/map/travel` 返回的 Turn 事件也走同一入口（travel 的 `events` 里有 `turn.patch`，只遮人名不够）。
+> - `memory.tombstoned`：payload 里的 `reason` 是**被撤回记忆的正文**（`arbiter.ops.ts` 把 `memory.write(status:"tombstoned").content` 塞进 reason），玩家侧只留 `memoryId`/`supersedes`，正文一律不下发。
+> - viewer 按**登录账号绑定**解析（`playerOf(state, userId)`）：`/events` 与 `/map/tick` 都用调用者本人，联机房不会把 1 号玩家的私忆发给别人。
+> - 回归证据：`apps/server/src/plot-night.route.test.ts` 直接断言 `POST /map/tick`、`GET /state`、`GET /events`、`POST /map/travel`、`POST /turns` 的**响应体**里不出现 `forbidReveal`/`leakPoints`/秘密原文与私忆；`turn.patch.ops` 逐条断言（`memory.write` 只能 public、`plot.upsert` 无 GM args）；撤回事件断言 `reason === undefined`。
 
 ### 3.3 断线续传（`Last-Event-ID`）
 
