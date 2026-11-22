@@ -41,6 +41,8 @@ export class SimClock {
   private beating = false;
   /** 跨拍仍在跑的 tick：超时只停止等待，不取消底层 Promise；下次拍必须跳过同一房间。 */
   private readonly running = new Map<string, Promise<SimClockTickResult>>();
+  /** 已超时但底层仍未结束的房间：用于告警“锁了多久”，只读不参与调度。 */
+  private readonly stuckSince = new Map<string, number>();
   private readonly policy: SimClockPolicy;
   private readonly warn: (message: string) => void;
 
@@ -58,6 +60,12 @@ export class SimClock {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+  }
+
+  /** 当前仍被卡死 tick 占用的房间与已锁时长，供运维告警/健康检查读取。 */
+  stuckRooms(): Array<{ roomId: string; lockedMs: number }> {
+    const now = Date.now();
+    return [...this.stuckSince].map(([roomId, since]) => ({ roomId, lockedMs: now - since }));
   }
 
   /** 单飞：上一拍没跑完就跳过本拍，避免房间队列被叠满 */
@@ -127,6 +135,11 @@ export class SimClock {
       released = true;
       if (this.running.get(roomId) === underlying) this.running.delete(roomId);
       releaseLock?.();
+      const stuckAt = this.stuckSince.get(roomId);
+      if (stuckAt !== undefined) {
+        this.stuckSince.delete(roomId);
+        this.warn(`[sim-clock] 房间 ${roomId} 底层 tick 已结束，释放房间锁定（锁定 ${Date.now() - stuckAt}ms）`);
+      }
     };
     void underlying.then(settle, settle);
 
@@ -144,7 +157,11 @@ export class SimClock {
     if (result === undefined) {
       // 不强制放锁：宁可让该房间后续回合/推进拿到 409，也不能让两份写入交错。
       // 底层若永久不 settle，这里只告警，房间保持锁定，等运维处理。
-      this.warn(`[sim-clock] 房间 ${roomId} 底层 tick 超过 ${timeoutMs}ms 未结束，保持房间锁定`);
+      const since = this.stuckSince.get(roomId) ?? Date.now();
+      this.stuckSince.set(roomId, since);
+      this.warn(
+        `[sim-clock] 房间 ${roomId} 底层 tick 超过 ${timeoutMs}ms 未结束，保持房间锁定（已锁定 ${Date.now() - since}ms；simClock.stuckRooms() 可查）`,
+      );
     }
     return result;
   }

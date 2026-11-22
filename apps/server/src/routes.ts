@@ -1391,23 +1391,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf, { actorId: parsed.data.actorId });
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    return safe(reply, async () => {
-      let leave: (() => void) | undefined;
-      try {
-        leave = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000) : undefined;
-      } catch (e) {
-        if (e instanceof RoomBusyError) {
-          reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
-          return;
-        }
-        throw e;
-      }
-      try {
-        return await deps.map.openDialogue(roomId, parsed.data.actorId, parsed.data.sceneId, parsed.data.dialogueId);
-      } finally {
-        leave?.();
-      }
-    });
+    // 场景对话只读快照 + 调导演，不产生落库提案（summary.proposals 未交 Arbiter），
+    // 因此不抢房间锁：否则一次 10–20s 的 LLM 会让玩家回合在 acquire 处排队/409。
+    // 若未来这里开始写世界状态，只把写操作包进 roomActivity.acquire，不要包整段 LLM。
+    return safe(reply, () => deps.map.openDialogue(roomId, parsed.data.actorId, parsed.data.sceneId, parsed.data.dialogueId));
   });
 
   app.post("/api/v1/map/drafts", (req, reply) => {

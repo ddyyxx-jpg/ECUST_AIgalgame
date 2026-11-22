@@ -13,7 +13,7 @@ import type {
   ViewPatch,
 } from "../../../packages/shared/src/contract/types.ts";
 import worldMapJson from "./data/world_map.json" with { type: "json" };
-import { LEASE, clockIndex, parseLease, type Lease } from "./lease.ts";
+import { LEASE, PHASES, clockIndex, parseLease, type Lease } from "./lease.ts";
 import schedulesJson from "./data/npc-schedules.json" with { type: "json" };
 import { bfs, buildAdjacency, liveLocIds, resolveTarget } from "./path.ts";
 
@@ -59,8 +59,6 @@ const BY = "mod.map";
 // 属性键来自 docs/06 §1：坐标复用 registry 的 coord_x / coord_y，不在代码里发明新字段。
 const COORD_X = "coord_x";
 const COORD_Y = "coord_y";
-/** NPC 动作租约：JSON 字符串，visibility=self；键来自 registry（content/registry/attrs.json） */
-const PHASES: readonly Phase[] = ["morning", "noon", "afternoon", "evening", "night"];
 
 /** 带中文动词前缀的输入：去/到/往/回/进/前往…，用于从自然语言里剥出地点词 */
 const TRAVEL_RE = /^(?:map\.travel\b|travel\b|去|到|往|回|进|前往|移动到|走向|走到)/i;

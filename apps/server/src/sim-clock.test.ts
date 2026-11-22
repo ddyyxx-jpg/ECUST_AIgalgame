@@ -128,6 +128,7 @@ describe("SimClock（D22 自动推进）", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(holds).toBe(1);
     expect(warnings.join("\n")).toContain("保持房间锁定");
+    expect(clock.stuckRooms()).toEqual([{ roomId: "r1", lockedMs: expect.any(Number) }]);
   });
 
   it("超时只停止等待：底层未结束时后续拍跳过同一房间，且锁不提前释放", async () => {

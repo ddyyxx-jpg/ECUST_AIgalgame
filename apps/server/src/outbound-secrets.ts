@@ -24,9 +24,17 @@ const INTERNAL_ATTR_SET = new Set<string>(ENGINE_INTERNAL_ATTRS);
  */
 export function projectProposalsForPlayer(proposals: readonly Proposal[]): Proposal[] {
   return projectProposals(proposals).filter((p) => {
-    if (p.op !== "attr.set") return true;
-    const key = (p.args as { key?: unknown }).key;
-    return !(typeof key === "string" && INTERNAL_ATTR_SET.has(key));
+    if (p.op === "attr.set") {
+      const key = (p.args as { key?: unknown }).key;
+      return !(typeof key === "string" && INTERNAL_ATTR_SET.has(key));
+    }
+    // 当前契约的 EntityUpdateArgs 只有 name/tags/status，不含 attrs；
+    // 这里防御未来给 entity.update 加 attrs patch 时把内部属性带出去。
+    if (p.op === "entity.update") {
+      const attrs = (p.args as { attrs?: Record<string, unknown> }).attrs;
+      if (attrs && Object.keys(attrs).some((k) => INTERNAL_ATTR_SET.has(k))) return false;
+    }
+    return true;
   });
 }
 
