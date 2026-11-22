@@ -104,6 +104,18 @@ export function decideTravel(input: TravelDecisionInput): TravelDecision {
   return "skip";
 }
 
+/**
+ * 待补点位的落账（PR #152 复审：`skip` 清 pending 原先只在组件里，无法用单测覆盖）。
+ *
+ * 规则：`defer` 记住本拍点位；`go` 交给上层传完再清；`skip` 只在「待补的就是本拍点位」时清
+ * ——否则「busy 时 defer 了 A → 手动 travel 到 A → 又走到 B 但仍站在 A 点位旁」会补发回 A。
+ */
+export function nextPending(prev: string, sceneId: string, decision: TravelDecision): string {
+  if (decision === "defer") return sceneId;
+  if (decision === "go") return "";
+  return prev === sceneId ? "" : prev;
+}
+
 export interface ExitDwellInput {
   busy: boolean;
   /** 是否站在出口半径内 */

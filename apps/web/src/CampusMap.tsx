@@ -17,7 +17,7 @@ import type { MapScene, MapView } from "./api.ts";
 import { fetchGallery, muttersByNpcId } from "./api-gallery.ts";
 import type { GalleryNpc } from "./api-gallery.ts";
 import { interiorFor } from "./interior.ts";
-import { decideTravel, stepEntryDwell } from "./map-autoenter.ts";
+import { decideTravel, nextPending, stepEntryDwell } from "./map-autoenter.ts";
 
 const W = 6000;
 const H = 4500;
@@ -533,11 +533,11 @@ export default function CampusMap({
           playerLocId: live.player.locId,
           enteredId: enteredRef.current,
         });
-        // 回合 streaming：不发请求，但记住这个点位；回合结束后仍站在旁边就补一次（与入口 dwell 对齐）
-        if (decision === "defer") pendingTravelRef.current = bestScene.id;
-        else if (decision === "go") goTravel(bestScene);
-        // 已经不需要再去了（手动 travel 到了 / 已发过）：清掉待补，避免之后站回老点位时"补发"回旧场景
-        else if (pendingTravelRef.current === bestScene.id) pendingTravelRef.current = "";
+        // 回合 streaming：不发请求，但记住这个点位；回合结束后仍站在旁边就补一次（与入口 dwell 对齐）。
+        // 待补的落账交给 nextPending（纯函数，单测覆盖）：defer 记下、go 清空、skip 只在同点位时清，
+        // 避免「手动 travel 到待补点位后又走到别处」被"补发"回旧场景。
+        pendingTravelRef.current = nextPending(pendingTravelRef.current, bestScene.id, decision);
+        if (decision === "go") goTravel(bestScene);
       }
 
       let bestNpc: { id: string; name: string } | null = null;

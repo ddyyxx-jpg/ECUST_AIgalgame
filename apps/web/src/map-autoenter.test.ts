@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideTravel, stepEntryDwell, stepExitDwell, travelIntent, type DwellState } from "./map-autoenter.ts";
+import { decideTravel, nextPending, stepEntryDwell, stepExitDwell, travelIntent, type DwellState } from "./map-autoenter.ts";
 
 const NONE: DwellState = { id: "", since: 0, fired: false };
 const DWELL_MS = 1500;
@@ -119,5 +119,23 @@ describe("decideTravel · 被 busy 挡下的点位在回合结束后补发（PR 
     expect(travelIntent(base)).toBe(true);
     expect(decideTravel({ ...base, busy: true, enteredRange: true, pendingId: "" })).toBe("defer");
     expect(decideTravel({ ...base, busy: false, enteredRange: true, pendingId: "" })).toBe("go");
+  });
+});
+
+describe("nextPending · 待补点位的落账（PR #152 复审：skip 清 pending 也要可测）", () => {
+  it("defer 记住本拍点位", () => {
+    expect(nextPending("", "loc_lib", "defer")).toBe("loc_lib");
+  });
+
+  it("go 清空（传完不需要再补）", () => {
+    expect(nextPending("loc_lib", "loc_lib", "go")).toBe("");
+  });
+
+  it("skip 且待补的就是本拍点位 → 清（手动 travel 到过 A 后不再回弹）", () => {
+    expect(nextPending("loc_lib", "loc_lib", "skip")).toBe("");
+  });
+
+  it("skip 但待补的是别的点位 → 保留（只看当前点位）", () => {
+    expect(nextPending("loc_lab", "loc_lib", "skip")).toBe("loc_lab");
   });
 });

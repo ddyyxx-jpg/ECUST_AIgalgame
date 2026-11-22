@@ -20,15 +20,16 @@
 ### 复审补充之二（PR #152 定向复审）
 - `decideTravel` 返回 `skip` 时清掉同点位的 `pendingTravelRef`：否则「busy 时 defer 了 A → 手动 travel 到 A → 又走到 B 但仍站在 A 点位旁」会补发一次回 A。
 - 删除被 `decideTravel` 取代的 `shouldAutoTravel`（生产已无调用），`travelIntent` 保留为纯谓词。
+- `skip` 清待补点位也抽成纯函数 `nextPending(prev, sceneId, decision)`（`defer` 记下 / `go` 清空 / `skip` 只在同点位时清）：组件不再自己写分支，「手动到达待补点位后走到别处不回弹」有单测覆盖。
 - 复审暴露的共性问题（闭包读 props、副作用逻辑不可测、多出口只修一个、非阻断项不落单、PR 描述落后）已写进 `AGENTS.md` §13。
 
 ### 测试
-- 新增 `apps/web/src/map-autoenter.test.ts`（14 例）：busy 时站满不触发、busy 结束后重新计时并只触发一次、离开范围重新武装、同场景/已 travel 不重复发；`decideTravel` 的 `defer → go` 补发、pending 命中别的点位不发、补发后清零。
+- 新增 `apps/web/src/map-autoenter.test.ts`（18 例）：busy 时站满不触发、busy 结束后重新计时并只触发一次、离开范围重新武装、同场景/已 travel 不重复发；`decideTravel` 的 `defer → go` 补发、pending 命中别的点位不发；`nextPending` 的四条落账分支（含 skip 清 pending）。
 - 这两段逻辑原先埋在 rAF/interval 闭包里只能靠真人走查，抽成纯函数后可在 node 断言。
 - #151 的其余非阻断项（`ENTER_DIST` 手感、`CandidatePanel` waiting 态、`pathfind`/`interior` 零单测、字体授权、资产体积、CSS 作用域）与本节新增的人工走查清单已落进 #150。
 
 ### 验证
-- `npm run typecheck` 0；`npx vitest run` **125 文件 / 1014 例**全过；`npm run check:contract` 8/8（3.8.0）。
+- `npm run typecheck` 0；`npx vitest run` **125 文件 / 1018 例**全过；`npm run check:contract` 8/8（3.8.0）；`npm run build:web` 通过（`index-emAcvymE.js` 408.19 kB，gzip 127.75 kB）。
 
 
 ## v0.6.0 — 2026-11-22 像素风 UI + 开放 issue 收口 + dev/v2 群聊（PR #144 / #148 / #149；合入 main `657d6c5`；CONTRACT 3.6.2 → 3.8.0）
