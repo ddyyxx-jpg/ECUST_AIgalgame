@@ -75,9 +75,10 @@ describe("npc-decision 纯函数", () => {
 describe("NpcDecisionService", () => {
   it("开启后调用一次模型并把选择写成 move 租约", async () => {
     const applied: unknown[] = [];
+    let expected: number | undefined;
     const service = new NpcDecisionService({
-      store: { snapshot: async () => state() },
-      arbiter: { apply: async (_room, ops) => { applied.push(ops); return { ok: true }; } },
+      store: { snapshot: async () => state(), load: async () => 7 },
+      arbiter: { apply: async (_room, ops, _cause, opts) => { applied.push(ops); expected = opts?.expectedSeq; return { ok: true }; } },
       llm: {
         chat: async () => ({ raw: '{"choice":2}', json: { choice: 2 }, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "fake", latencyMs: 1 }),
       },
@@ -89,6 +90,7 @@ describe("NpcDecisionService", () => {
     expect(ops[0].args.entityId).toBe("npc_1");
     expect(ops[0].args.key).toBe("sim_lease");
     expect(JSON.parse(ops[0].args.value)).toMatchObject({ action: "move", target: "loc_b", phase: "morning" });
+    expect(expected).toBe(7);
   });
 
   it("慢决策期间玩家写了 talk 租约：放弃写入，不覆盖冻结", async () => {

@@ -954,7 +954,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     // 秘密裁剪（PR #147 审阅 P0）：plot 事件剥 GM 字段，私忆只留 public 与玩家本人；
     // viewer 取服务端解析的玩家身份，不信任 query 里的 actorId。
     const visible = projectEventsForPlayer(events, playerOf(snapshot, access.userId));
-    return { events: maskNamesDeep(visible, placeholders), lastSeq: visible.length ? visible[visible.length - 1]!.seq : from };
+    // 分页游标用原始事件末 seq：被过滤的私忆/租约事件也占 seq，不能让客户端卡在同一段。
+    return { events: maskNamesDeep(visible, placeholders), lastSeq: allEvents.length ? allEvents[allEvents.length - 1]!.seq : from };
   });
 
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */

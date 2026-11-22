@@ -44,6 +44,21 @@ describe("SimClock（D22 自动推进）", () => {
     expect(calls).toEqual(["r1"]);
   });
 
+  it("beforeTick 期间玩家回合开始（变忙）：本拍跳过 tick", async () => {
+    let busy = false;
+    let ticks = 0;
+    const clock = new SimClock({
+      store: storeOf({ r1: 0 }),
+      map: { tick: async () => { ticks += 1; return { ok: true }; } },
+      policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 },
+      isBusy: () => busy,
+      beforeTick: async () => { busy = true; },
+      warn: () => {},
+    });
+    await clock.beat();
+    expect(ticks).toBe(0);
+  });
+
   it("beforeTick 在 tick 前执行；决策失败只 warn，不阻断本拍推进", async () => {
     const order: string[] = [];
     const clock = new SimClock({

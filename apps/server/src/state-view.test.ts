@@ -106,6 +106,7 @@ describe("/events 的 sim_lease 裁剪（结构断言）", () => {
     const events = [
       { v: 1, id: "evt_lease", roomId: ROOM, seq: 1, ts: 1, actorId: "system", type: "attr.changed", payload: { entityId: NPC, key: "sim_lease", from: "", to: '{"action":"talk","resume":"{}"}', clamped: false } },
       { v: 1, id: "evt_stamina", roomId: ROOM, seq: 2, ts: 1, actorId: "system", type: "attr.changed", payload: { entityId: NPC, key: "stamina", from: 80, to: 79, clamped: false } },
+      { v: 1, id: "evt_lease2", roomId: ROOM, seq: 3, ts: 1, actorId: "system", type: "attr.changed", payload: { entityId: NPC, key: "sim_lease", from: "{}", to: "", clamped: false } },
     ];
     const app = Fastify();
     registerRoutes(app, {
@@ -120,8 +121,9 @@ describe("/events 的 sim_lease 裁剪（结构断言）", () => {
     await app.ready();
     const res = await app.inject({ method: "GET", url: `/api/v1/rooms/${ROOM}/events?fromSeq=0` });
     expect(res.statusCode).toBe(200);
-    const body = res.json() as { events: { type: string; payload: { key?: string } }[] };
+    const body = res.json() as { events: { type: string; payload: { key?: string } }[]; lastSeq: number };
     expect(body.events.map((e) => e.payload.key)).toEqual(["stamina"]);
+    expect(body.lastSeq).toBe(3);
     expect(JSON.stringify(body)).not.toContain("sim_lease");
     await app.close();
   });
