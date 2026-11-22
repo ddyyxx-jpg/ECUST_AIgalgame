@@ -295,6 +295,19 @@ export class MapService {
       if (installFail) return this.outbound(installFail, roomId, state);
     }
 
+    // 回合前先做相邻校验：不可达就根本不跑 Turn，避免"回合已提交、行动点已扣，
+    // 最后才返回 E_NOT_ADJACENT"的白扣。懒安装可能刚补了锚点边，所以这里重新取快照。
+    const checked = await this.deps.store.snapshot(roomId);
+    const fromLoc = checked.links.find((l) => l.kind === "located_in" && l.from === actor)?.to
+      ?? checked.room.scene.locId;
+    const adjacent = fromLoc === locId || checked.links.some(
+      (l) => l.kind === "located_in"
+        && ((l.from === fromLoc && l.to === locId) || (l.from === locId && l.to === fromLoc)),
+    );
+    if (!adjacent) {
+      return this.outbound(fail("E_NOT_ADJACENT", `从当前位置无法到达 ${locId}`), roomId, checked);
+    }
+
     const events: TurnEvent[] = [];
     let failure: MapFail | undefined;
     try {

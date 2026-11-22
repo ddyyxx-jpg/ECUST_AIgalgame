@@ -269,7 +269,12 @@ async function setup(
   expect(seeded2.rejected).toEqual([]);
 
   const dialogue = new DialogueHost(() => makeCtx({ state: store.state(ROOM_ID), registry }), [npcScene]);
-  const turn = new DefaultTurn({ store, arbiter, registry, modules, memory: new InMemoryMemory(), llm });
+  const turn = new DefaultTurn({
+    store, arbiter, registry, modules, memory: new InMemoryMemory(), llm,
+    ...(opts.simPolicy ? {
+      actionPolicy: { attrKey: opts.simPolicy.actionAttr, costPerTurn: opts.simPolicy.actionCostPerTurn },
+    } : {}),
+  });
   const service = new MapService({
     store,
     turn,
@@ -349,6 +354,15 @@ describe("MapService · travel", () => {
     const f = await setup();
     const res = await f.service.travel(ROOM_ID, "plr_self", "loc_nowhere");
     expect(res).toMatchObject({ ok: false, code: "E_SCENE_NOT_FOUND" });
+  });
+
+  it("不可达场景在回合前拒绝，不扣行动点", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 6 });
+    // loc_annex 锚在食堂；玩家在图书馆，直接去 annex 不可达。
+    const res = await f.service.travel(ROOM_ID, "plr_self", "loc_annex");
+    expect(res).toMatchObject({ ok: false, code: "E_NOT_ADJACENT" });
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
   });
 
   it("规划/在建点不能进入，也不会懒安装", async () => {
