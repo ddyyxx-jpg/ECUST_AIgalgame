@@ -8,6 +8,7 @@
  */
 import { DEFAULT_LIMITS } from "../../../packages/engine/src/index.ts";
 import { bfs, buildAdjacencyOf } from "../../../content/modules/map/path.ts";
+import { LEASE as SIM_LEASE, PHASES, clockIndex, parseLease } from "../../../content/modules/map/lease.ts";
 import type { DefaultArbiter, MemoryIndex } from "../../../packages/engine/src/index.ts";
 import { isErrorCode } from "../../../packages/shared/src/contract/errors.ts";
 import type {
@@ -143,24 +144,7 @@ function refillActionPoints(state: WorldState, policy: SimPolicy, actorId?: stri
   return ops;
 }
 
-const PHASES: readonly Phase[] = ["morning", "noon", "afternoon", "evening", "night"];
 const INSTALL_MAX_DEPTH = 8;
-/** NPC 动作租约键：registry 声明，必须与 content/modules/map/module.ts 的 LEASE 一致。 */
-const SIM_LEASE = "sim_lease";
-/** 与 content/modules/map/module.ts 的 clockIndex 同口径，只用于 talk 租约超时。 */
-function clockIndex(clock: { day: number; phase: Phase; tick: number }): number {
-  return clock.day * PHASES.length * 24 + PHASES.indexOf(clock.phase) * 24 + clock.tick;
-}
-/** 租约 JSON 的最小读取：只判断 action 与取回原始串，不在这里复制模块的全部状态机。 */
-function leaseObject(raw: unknown): Record<string, unknown> | null {
-  if (typeof raw !== "string" || raw.trim() === "") return null;
-  try {
-    const v: unknown = JSON.parse(raw);
-    return v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
-  } catch {
-    return null;
-  }
-}
 
 function nextPhase(phase: Phase): Phase {
   const index = PHASES.indexOf(phase);
@@ -335,9 +319,10 @@ export class MapService {
     // 只看 turn 事件会把"没走动"当成到达。以移动后的权威位置做最终校验。
     const actorLoc = after.links.find((l) => l.kind === "located_in" && l.from === actor)?.to;
     if (after.room.scene.locId !== locId && actorLoc !== locId) {
-      // 相邻但模块没走动：Turn 已经提交并扣过点，这里把这次白扣退回去再报不可达。
+      // 路径可达但模块没走动：Turn 已经提交并扣过点，这里把这次白扣退回去。
+      // 不能用 E_NOT_ADJACENT —— 预检已经证明可达，报“不可达”会误导调用方重试方向。
       const refunded = await this.refundTravelActionPoint(roomId, actor, state, after);
-      return this.outbound(fail("E_NOT_ADJACENT", `从当前位置无法到达 ${locId}`), roomId, refunded);
+      return this.outbound(fail("E_PRECONDITION", `前往 ${locId} 的移动未发生，行动点已退还`), roomId, refunded);
     }
     const map = await this.buildMapView(after, actor);
     const scene = this.buildSceneDetail(target, after, refs, npcLocations(after));
@@ -349,7 +334,7 @@ export class MapService {
   /**
    * travel 异常路径退款：相邻但模块没产 move 时 Turn 已提交、行动点已扣。
    * 只在"前后快照都证明扣过点"时退，避免旧存档/未启用行动点时凭空加属性。
-   * 用 expectedSeq 重试，失败只 warn，不改变 E_NOT_ADJACENT 的结论。
+   * 用 expectedSeq 重试，失败只 warn；调用方仍返回 E_PRECONDITION（路径可达但移动没发生）。
    */
   private async refundTravelActionPoint(
     roomId: string,
@@ -400,7 +385,7 @@ export class MapService {
       const npc = state.entities[npcId];
       if (npc?.kind !== "npc" || npc.status !== "active") return false;
       const raw = npc.attrs[SIM_LEASE];
-      const original = leaseObject(raw);
+      const original = parseLease(raw);
       if (original?.action === "talk") return true;
       // 即使当前空闲也要写 talk：否则对话期间自动 tick 会给这个 NPC 起一个新动作。
       const talk = {
@@ -433,11 +418,11 @@ export class MapService {
       const state = await this.deps.store.snapshot(roomId);
       const npc = state.entities[npcId];
       if (npc?.kind !== "npc" || npc.status !== "active") return false;
-      const current = leaseObject(npc.attrs[SIM_LEASE]);
+      const current = parseLease(npc.attrs[SIM_LEASE]);
       if (!current || current.action !== "talk") return false;
       let value = "";
       if (typeof current.resume === "string" && current.resume.trim() !== "") {
-        const original = leaseObject(current.resume);
+        const original = parseLease(current.resume);
         if (original && (original.action === "move" || original.action === "stay")
           && typeof original.target === "string" && typeof original.remaining === "number") {
           value = JSON.stringify({ ...original, phase: state.clock.phase });

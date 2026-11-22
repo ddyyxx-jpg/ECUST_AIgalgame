@@ -463,20 +463,20 @@ describe("MapService · travel", () => {
     expect(after.map.scenes.find((s) => s.id === locId)).toMatchObject({ origin: "user", installed: true });
   });
 
-  it("模块报 ok 但玩家没动 → E_NOT_ADJACENT（不再假到达）", async () => {
+  it("模块报 ok 但玩家没动 → E_PRECONDITION（不再假到达）", async () => {
     const f = await setup();
     f.modules.noTravel = true;
     const res = await f.service.travel(ROOM_ID, "plr_self", "loc_canteen");
-    expect(res).toMatchObject({ ok: false, code: "E_NOT_ADJACENT" });
+    expect(res).toMatchObject({ ok: false, code: "E_PRECONDITION" });
     expect(f.store.state(ROOM_ID).room.scene.locId).toBe("loc_library");
   });
 
-  it("相邻但模块没走动：E_NOT_ADJACENT 且退还行动点", async () => {
+  it("可达但模块没走动：E_PRECONDITION 且退还行动点", async () => {
     const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
     const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 6 });
     f.modules.noTravel = true;
     const res = await f.service.travel(ROOM_ID, "plr_self", "loc_canteen");
-    expect(res).toMatchObject({ ok: false, code: "E_NOT_ADJACENT" });
+    expect(res).toMatchObject({ ok: false, code: "E_PRECONDITION" });
     expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
   });
 
