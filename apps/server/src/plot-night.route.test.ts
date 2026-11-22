@@ -246,4 +246,89 @@ describe("夜间密谋真实链路探针（#96/#128）", () => {
     const state = await deps.store.snapshot(roomId);
     expect(state.clock.phase).toBe("morning");
   });
+  it("P0-1/P0-2：/map/travel 与 /turns 的 Turn 事件同样不给秘密与私忆", async () => {
+    const { app, deps, roomId, actorId, tick } = await setup("ok");
+    expect((await tick()).statusCode).toBe(200);
+    const headers = { ...ORIGIN, "x-user-id": actorId };
+    const state = await deps.store.snapshot(roomId);
+    const here = state.room.scene.locId;
+    const next = state.links.find((l) => l.kind === "located_in" && l.from === here && l.to !== here)?.to;
+    expect(next, "测试房间必须有相邻场景").toBeTruthy();
+    const travel = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/map/travel`,
+      headers,
+      payload: { locId: next, actorId },
+    });
+    expect(travel.statusCode).toBe(200);
+    for (const secret of [DRAFT.forbidReveal, ...DRAFT.leakPoints, "forbidReveal", "leakPoints"]) {
+      expect(travel.body, `travel 响应不得含 ${secret}`).not.toContain(secret);
+    }
+    expect(travel.body).not.toContain('"visibility":"private"');
+
+    // 调查线索：investigate 会产 plot.upsert(leaked) 与私忆 evidence，ops 也必须过投影
+    const turn = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/turns`,
+      headers,
+      payload: { actorId, input: "调查线索", clientTurnId: "ct_investigate_1", options: { skipLLM: true } },
+    });
+    expect(turn.statusCode).toBe(200);
+    // forbidReveal 是"永远不能给玩家"的秘密；leakPoints 在玩家真的查完之后会以"已查到的线索"
+    // 出现在 turn.ui 里（那是玩家自己的调查结果），所以这里只钉死 key 名与禁泄字符串。
+    expect(turn.body).not.toContain(DRAFT.forbidReveal);
+    expect(turn.body).not.toContain("forbidReveal");
+    expect(turn.body).not.toContain("leakPoints");
+    const patchLine = (turn.body as string).split("\n\n").find((chunk) => chunk.startsWith("event: turn.patch"));
+    expect(patchLine, "/turns 必须发出 turn.patch").toBeTruthy();
+    const patch = JSON.parse(patchLine!.slice(patchLine!.indexOf("data: ") + 6)) as {
+      state: { plots: Record<string, unknown>[] };
+      ops: { op: string; args: Record<string, unknown> }[];
+    };
+    // 这条回合真的产出了 plot.upsert（查完 leak → leaked），否则下面的 ops 断言会空转
+    expect(patch.ops.some((op) => op.op === "plot.upsert")).toBe(true);
+    // state 与 /state 同口径：plot 只留 id/actors/status/tone/createdDay
+    for (const plot of patch.state.plots) expect(plot.forbidReveal).toBeUndefined();
+    for (const op of patch.ops) {
+      if (op.op === "memory.write") expect(op.args.visibility).toBe("public");
+      if (op.op === "plot.upsert") {
+        expect(op.args.forbidReveal).toBeUndefined();
+        expect(op.args.leakPoints).toBeUndefined();
+        expect(op.args.goal).toBeUndefined();
+      }
+      expect(op.args.status).not.toBe("tombstoned");
+    }
+  });
+
+  it("P0-3：memory.tombstoned 不下发被撤回私忆的正文", async () => {
+    const { app, deps, roomId, actorId } = await setup("ok");
+    const headers = { ...ORIGIN, "x-user-id": actorId };
+    const PRIVATE = "OLD_PRIVATE_MEMORY_BODY";
+    const cause = (id: string) => ({ v: 1 as const, id, roomId, seq: 0, ts: Date.now(), actorId: "npc_lin", type: "turn", payload: {} });
+    const written = await deps.arbiter.apply(roomId, [{
+      op: "memory.write",
+      args: { ownerId: "npc_lin", content: PRIVATE, tags: ["mental"], salience: 5, visibility: "private" },
+    }], cause("evt_p03_write"));
+    expect(written.rejected).toEqual([]);
+    // 撤回要求被撤回的记忆已在索引里（生产由 turn/step 的 ingest 维护；这里补同一步）
+    deps.memory.rebuild(roomId, await deps.store.events(roomId, 0));
+    const memoryId = written.events.find((e) => e.type === "memory.written")?.payload as { memoryId?: string };
+    expect(memoryId.memoryId).toBeTruthy();
+    const tomb = await deps.arbiter.apply(roomId, [{
+      op: "memory.write",
+      args: {
+        ownerId: "npc_lin", content: PRIVATE, tags: ["mental"], salience: 5, visibility: "private",
+        status: "tombstoned", supersedes: memoryId.memoryId,
+      },
+    }], cause("evt_p03_tomb"));
+    expect(tomb.rejected).toEqual([]);
+    const evs = await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/events?fromSeq=0`, headers });
+    expect(evs.statusCode).toBe(200);
+    expect(evs.body, "撤回事件不能带旧私忆正文").not.toContain(PRIVATE);
+    const listed = evs.json() as { events: { type: string; payload?: Record<string, unknown> }[] };
+    const tombstoned = listed.events.find((e) => e.type === "memory.tombstoned");
+    expect(tombstoned?.payload?.supersedes).toBe(memoryId.memoryId);
+    expect(tombstoned?.payload?.reason).toBeUndefined();
+  });
+
 });

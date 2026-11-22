@@ -682,3 +682,27 @@ describe("MapService · 草案状态机", () => {
     expect(res.map.scenes.find((s) => s.id === locId)).toMatchObject({ origin: "user", installed: false });
   });
 });
+
+describe("MapService · tick 与并发写入（PR #149 审阅 P1）", () => {
+  it("modules.tick 期间的并发写入不会被旧快照覆盖", async () => {
+    const f = await setup();
+    // 模拟 tick 正在算提案时，另一个入口（/turns）提交了一次 scene.set
+    f.modules.tick = async () => {
+      const seq = f.store.seq(ROOM_ID) + 1;
+      const applied = await f.arbiter.apply(
+        ROOM_ID,
+        [{ op: "scene.set", args: { locId: "loc_canteen", presentIds: ["plr_self"] }, reason: "并发玩家移动", by: "turn" }],
+        { v: 1, id: "evt_concurrent_scene", roomId: ROOM_ID, seq, ts: 2, actorId: "plr_self", type: "turn", payload: {} },
+      );
+      expect(applied.rejected).toEqual([]);
+      // 模块基于**旧快照**算出的提案：不能落库覆盖上面那次场景切换
+      return [{ op: "scene.set", args: { locId: "loc_library", presentIds: ["plr_self"] }, reason: "旧快照", by: "map" }];
+    };
+    const res = await f.service.tick(ROOM_ID, { advance: false });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.code).toBe("E_SEQ_GAP");
+    const after = await f.store.snapshot(ROOM_ID);
+    expect(after.room.scene.locId).toBe("loc_canteen");
+  });
+});

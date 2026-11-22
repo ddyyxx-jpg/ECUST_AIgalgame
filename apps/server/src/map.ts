@@ -39,7 +39,7 @@ import type { MapFail, SceneDialogue, SceneLink, SceneRef, SceneStatus, SceneTem
 import { DraftEngine } from "./map.drafts.ts";
 import type { DraftListResult, DraftResult, PublishResult } from "./map.drafts.ts";
 import { displayNameOf, knowsNameOf, maskNamesDeep, maskTurnEvents, unknownPlaceholders } from "./view-names.ts";
-import { projectEventsForPlayer } from "./outbound-secrets.ts";
+import { projectEventsForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
 
 // ---------------------------------------------------------------- 对外视图（docs/06 §4）
 export interface MapViewLink {
@@ -199,7 +199,16 @@ export class MapService {
     roomId: string,
     state?: WorldState,
   ): Promise<T> {
-    return maskTurnEvents<T>(roomId, result, this.deps.store, this.deps.appearance, state);
+    const masked = await maskTurnEvents<T>(roomId, result, this.deps.store, this.deps.appearance, state);
+    // travel 也走 Turn：它的 events 里有 turn.patch（整份 state + ops），只遮人名不够
+    // （PR #149 审阅 P0-1/P0-2）。tick 的 Envelope 已在上游裁过，这里幂等。
+    const withEvents = masked as unknown as { events?: unknown };
+    if (Array.isArray(withEvents.events)) {
+      (withEvents as { events: unknown[] }).events = withEvents.events.map((ev) =>
+        typeof ev === "object" && ev !== null ? projectTurnEventForPlayer(ev as { type: string }) : ev,
+      );
+    }
+    return masked;
   }
 
   /**
@@ -294,7 +303,7 @@ export class MapService {
    */
   private readonly tickQueues = new Map<string, Promise<unknown>>();
 
-  async tick(roomId: string, opts: { advance?: boolean } = {}): Promise<TickResult> {
+  async tick(roomId: string, opts: { advance?: boolean; viewer?: string } = {}): Promise<TickResult> {
     const prev = this.tickQueues.get(roomId) ?? Promise.resolve();
     const next = prev.then(
       () => this.tickInner(roomId, opts),
@@ -305,12 +314,17 @@ export class MapService {
     return next;
   }
 
-  private async tickInner(roomId: string, opts: { advance?: boolean } = {}): Promise<TickResult> {
+  private async tickInner(roomId: string, opts: { advance?: boolean; viewer?: string } = {}): Promise<TickResult> {
     const events: Envelope[] = [];
     let stateAfter: WorldState | undefined;
+    // 必须在 snapshot **之前**取 seq（PR #149 审阅 P1）：模块 tick / dryRun 期间如果有
+    // /turns 提交（例如 scene.set），snapshot 之后取的 seq 已经是新值，expectedSeq 会通过，
+    // 于是用旧快照算出的提案把并发写入覆盖掉。先取 seq 再读快照，最坏只是保守失败一次。
+    const seqBefore = this.seqOf(roomId);
     const state = await this.deps.store.snapshot(roomId);
     const phase = opts.advance ? nextPhase(state.clock.phase) : state.clock.phase;
-    const actorId = playerActorId(state);
+    // 出站视角按调用者解析（PR #149 P3）：联机房不能用"1 号玩家"替别人过滤私忆
+    const actorId = opts.viewer ?? playerActorId(state);
 
     let proposals: Proposal[];
     try {
@@ -345,7 +359,6 @@ export class MapService {
       }
       // apply 默认 atomic：dryRun 与 apply 之间若有竞争/落盘失败，整批回滚（含 time.advance）。
       try {
-        const seqBefore = this.seqOf(roomId);
         const applied = await this.deps.arbiter.apply(roomId, batch, this.cause(roomId, "tick"), {
           captureState: true,
           // 队列内已串行，这里再加 seq 防线：队列之外的写入（对话/后台任务）插队时整批拒绝，

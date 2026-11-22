@@ -62,6 +62,8 @@ export interface AppDeps {
   canonize?: {
     retireRoom(roomId: string): Promise<{ written: string[]; candidates: number }>;
     tombstone(memoryId: string, reason: string): Promise<boolean>;
+    /** 带失败原因的同路径版本（PR #149 P2-4）：区分并发冲突与真正不可变 */
+    tombstoneWithReason?(memoryId: string, reason: string): Promise<{ ok: boolean; code?: string }>;
     stats(): { worldId: string; version: number; writtenToday: number; writtenTotal: number; circuitOpen: boolean; consecutiveJudgeFailures: number };
     sample(limit: number): MemoryRecord[];
   };
@@ -1150,8 +1152,15 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!verdict.ok) return reply.code(403).send({ ok: false, code: "E_FORBIDDEN", message: "需要管理员令牌" });
     const body = (req.body ?? {}) as { memoryId?: string; reason?: string };
     if (!body.memoryId) return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "memoryId 必填" });
-    const done = await deps.canonize.tombstone(body.memoryId, body.reason ?? "管理员撤回");
-    if (done) return { ok: true };
+    const port = deps.canonize;
+    const outcome = port.tombstoneWithReason
+      ? await port.tombstoneWithReason(body.memoryId, body.reason ?? "管理员撤回")
+      : { ok: await port.tombstone(body.memoryId, body.reason ?? "管理员撤回") };
+    if (outcome.ok) return { ok: true };
+    // 并发冲突 ≠ 不可变：世界层正被别的任务写入时，同一个请求重试就能成功（PR #149 P2-4）
+    if (outcome.code === "E_SEQ_GAP") {
+      return reply.code(503).send({ ok: false, code: "E_SEQ_GAP", message: "世界记忆正在被其他任务写入，请稍后重试", retryable: true });
+    }
     // 撤回失败的真实原因从世界层记忆状态推：不存在 = 404 语义，已撤回 = 不可变
     // 存在性用记忆索引判（sample(200) 在世界层 >200 条时会误判 404，审阅 P2-⑤）
     const hit = deps.memory.get?.(body.memoryId);
@@ -1211,7 +1220,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    return safe(reply, () => deps.map.tick(roomId, parsed.data));
+    // viewer：出站事件按调用者自己的视角裁私忆（PR #149 P3）；未登录时由 MapService 回退到玩家角色
+    const viewer = access.userId ? playerOf(access.state, access.userId) : undefined;
+    return safe(reply, () => deps.map.tick(roomId, { ...parsed.data, ...(viewer ? { viewer } : {}) }));
   });
 
   app.post("/api/v1/rooms/:roomId/map/dialogue", async (req, reply) => {

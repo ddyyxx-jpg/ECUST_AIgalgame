@@ -8,8 +8,8 @@
  * （由 packages/engine/src/v2/conversation.view.ts 的 stripPlotSecrets 提供字段清单），
  * 但本模块不裁剪 attrs/links——那些走既有的 maskNamesDeep / 观察者投影。
  */
-import type { Envelope, Plot, WorldState } from "../../../packages/shared/src/index.ts";
-import { stripPlotSecrets } from "../../../packages/engine/src/v2/index.ts";
+import type { Envelope, Plot, Proposal, WorldState } from "../../../packages/shared/src/index.ts";
+import { projectProposals, stripPlotSecrets } from "../../../packages/engine/src/v2/index.ts";
 
 /** 玩家能看到的 memory.written：public 广播，或自己的记忆；其余（private/secret）一律不下发 */
 function visibleMemory(env: Envelope, viewer: string | undefined): boolean {
@@ -26,12 +26,23 @@ export function projectEventForPlayer(env: Envelope, viewer?: string): Envelope 
     return { ...env, payload: { ...payload, plot: stripPlotSecrets(payload.plot) } };
   }
   if (env.type === "memory.written" && !visibleMemory(env, viewer)) return undefined;
+  // 撤回事件不能白送旧私忆：memory.tombstoned 的 payload.reason 就是被撤回记忆的正文
+  // （arbiter.ops.ts 的 memory.write(status:"tombstoned") 把 content 塞进 reason）。
+  // 玩家只需要知道"某条记忆被撤回"，正文一律不给（PR #149 审阅 P0-3）。
+  if (env.type === "memory.tombstoned") {
+    const { reason: _oldContent, ...payload } = env.payload as Record<string, unknown>;
+    return { ...env, payload };
+  }
   if (env.type === "turn.patch") {
     // v1 回合补丁把整份 WorldState 放进 payload.state（turn.ts 的 turn.patch），
     // 与 /state 同口径剥 plot 秘密，否则"只是走 SSE"就能绕过 /state 的裁剪。
-    const payload = env.payload as { state?: WorldState };
-    if (!payload.state) return env;
-    return { ...env, payload: { ...payload, state: projectStateForPlayer(payload.state) } };
+    // ops 同样要裁：turn.patch.ops 是 applied.applied（含 NPC 私忆与 investigate 的
+    // plot.upsert 原始 args），客户端并不依赖它，留一份玩家可见版本即可（PR #149 P0-2）。
+    const payload = env.payload as { state?: WorldState; ops?: readonly Proposal[] };
+    const next: Record<string, unknown> = { ...payload };
+    if (payload.state) next.state = projectStateForPlayer(payload.state);
+    if (Array.isArray(payload.ops)) next.ops = projectProposals(payload.ops);
+    return { ...env, payload: next };
   }
   return env;
 }
@@ -58,9 +69,12 @@ export function projectStateForPlayer(state: WorldState): WorldState {
  */
 export function projectTurnEventForPlayer<T extends { type: string }>(ev: T): T {
   if (ev.type !== "turn.patch") return ev;
-  const state = (ev as unknown as { state?: WorldState }).state;
-  if (!state) return ev;
-  return { ...ev, state: projectStateForPlayer(state) };
+  const patch = ev as unknown as { state?: WorldState; ops?: readonly Proposal[] };
+  const next: Record<string, unknown> = { ...(ev as unknown as Record<string, unknown>) };
+  if (patch.state) next.state = projectStateForPlayer(patch.state);
+  // ops 里有 NPC 私忆、撤回正文与 plot 的 GM args；客户端不用它，统一按玩家视角重建
+  if (Array.isArray(patch.ops)) next.ops = projectProposals(patch.ops);
+  return next as T;
 }
 
 /**
