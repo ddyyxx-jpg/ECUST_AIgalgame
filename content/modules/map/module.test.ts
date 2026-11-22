@@ -200,7 +200,7 @@ describe("tick（NPC 日程）", () => {
     const last = out.at(-1)!;
     expect(last.op).toBe("scene.set");
     expect(last.args).toMatchObject({ locId: "loc_classroom", presentIds: [SELF_ID] });
-    expect(out.length).toBeLessThanOrEqual(32); // manifest.limits.proposalsPerTurn
+    expect(out.length).toBeLessThanOrEqual(64); // manifest.limits.proposalsPerTurn（每 NPC 一条 move + 一条 scene.set）
   });
 
   it("无路径的 NPC 被跳过，同 phase 的其他 NPC 照常移动", async () => {

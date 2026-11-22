@@ -85,5 +85,23 @@ export interface CanonizeReport {
   errors: string[];
   /** 当日已写（含本次） */
   writtenToday: number;
+  /**
+   * 协作式中止标记：调用方传入的 signal 已 abort 时为 true。
+   * 此时 written 只含中止前已由 Arbiter 落库的批次，不做回滚。
+   * 不传 signal 时该字段不会出现，旧调用方行为完全不变。
+   */
+  aborted?: true;
 }
+
+/** 协作式取消参数：不给 signal 时行为与旧签名完全一致 */
+export interface CanonizeRunOptions {
+  signal?: AbortSignal;
+}
+
+/**
+ * P2-2：E_SEQ_GAP 有界重试上限（不含首次 attempt）。
+ * 重试只在 signal 未 abort 时进行：被 stall 接管的僵尸任务体 signal 已 abort，
+ * 遇到 E_SEQ_GAP 直接记错跳过，绝不重新 load 新 seq 后把自己的写入插到新世代之后。
+ */
+export const SEQ_GAP_MAX_RETRIES = 2;
 

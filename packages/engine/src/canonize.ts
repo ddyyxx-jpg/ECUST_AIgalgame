@@ -25,8 +25,8 @@ import { buildImpression } from "./impressions.ts";
 import type { PermanentCandidate } from "./canonize.candidates.ts";
 import { candidatesFromMemories, privacyHit, witnessCount } from "./canonize.candidates.ts";
 import type { PublishMut } from "./canonize.publish.ts";
-import { publishCandidates } from "./canonize.publish.ts";
-import type { CanonizeDeps, CanonizeJudge, CanonizeLimits, CanonizeReport, CanonizeStats, MemoryIndex } from "./canonize.types.ts";
+import { applyWithSeqRetry, publishCandidates } from "./canonize.publish.ts";
+import type { CanonizeDeps, CanonizeJudge, CanonizeLimits, CanonizeReport, CanonizeRunOptions, CanonizeStats, MemoryIndex } from "./canonize.types.ts";
 import { DEFAULT_CANONIZE_LIMITS } from "./canonize.types.ts";
 
 // 兼容旧导入路径：类型/限额拆到 canonize.types.ts，外部仍从这里取
@@ -35,6 +35,7 @@ export type {
   CanonizeJudge,
   CanonizeLimits,
   CanonizeReport,
+  CanonizeRunOptions,
   CanonizeStats,
   MemoryIndex,
 } from "./canonize.types.ts";
@@ -91,25 +92,45 @@ export class CanonizeJob {
       .slice(0, Math.max(0, limit));
   }
 
-  /** 房间退役：把该房间的公共长期记忆提成候选（docs/08 §6/§7.2） */
-  async retireRoom(roomId: RoomId): Promise<CanonizeReport> {
+  /**
+   * 房间退役：把该房间的公共长期记忆提成候选（docs/08 §6/§7.2）。
+   *
+   * 中止是**协作式**的：在每个 IO/LLM 调用前与循环迭代之间检查 signal，abort 后尽快返回
+   * `aborted: true`。已经过 Arbiter 落库的批次保持真实、不回滚；未开始的候选直接跳过。
+   * 不传 signal 时行为与旧签名完全一致。
+   */
+  async retireRoom(roomId: RoomId, opts: CanonizeRunOptions = {}): Promise<CanonizeReport> {
     // 房间日志必须先载入（FileStore 懒加载）：重启后直接 admin canonize 也要看到完整事件
     await this.deps.store.load(roomId);
+    if (opts.signal?.aborted) return this.abortedReport(roomId);
+    // P2-2：一次运行开始时记下世界房 seq（不是 apply 前临时 load），作为整批写入的基线；
+    // 被 stall 接管的新世代若推进了世界房 seq，旧任务体后续 apply 必被 E_SEQ_GAP 拒绝。
+    const basedOnSeq = await this.deps.store.load(this.deps.worldRoom);
+    if (opts.signal?.aborted) return this.abortedReport(roomId);
     // 索引可能落后于日志（比如刚重启、或这房间还没跑过回合）：先增量同步再取候选。
     // 用 sync 而不是 rebuild：外部已经显式喂过的记录不该被清掉（测试与"预置候选"场景）。
     const envs = await this.deps.store.events(roomId, 0);
+    if (opts.signal?.aborted) return this.abortedReport(roomId);
     if (this.deps.memory.sync) this.deps.memory.sync(roomId, envs);
     else this.deps.memory.rebuild?.(roomId, envs);
     const records = this.deps.memory.all(roomId);
     const state = this.deps.store.state(roomId);
-    return this.publish(state, records, roomId);
+    return this.publish(state, records, roomId, opts.signal, basedOnSeq);
   }
 
   /** 夜间补扫：把已加载世界里所有房间跑一遍（本实现只跑调用方给定的房间集合） */
-  async runDaily(rooms: RoomId[]): Promise<CanonizeReport[]> {
+  async runDaily(rooms: RoomId[], opts: CanonizeRunOptions = {}): Promise<CanonizeReport[]> {
     const reports: CanonizeReport[] = [];
-    for (const roomId of rooms) reports.push(await this.retireRoom(roomId));
+    for (const roomId of rooms) {
+      if (opts.signal?.aborted) break;
+      reports.push(await this.retireRoom(roomId, opts));
+    }
     return reports;
+  }
+
+  /** 中止时的报告：written 为空表示本次没有落库；此前批次不受影响（不回滚） */
+  private abortedReport(roomId: RoomId): CanonizeReport {
+    return { worldId: this.deps.worldId, candidates: 0, written: [], skipped: [], errors: [], writtenToday: this.writtenToday, aborted: true };
   }
 
   private today(): string {
@@ -131,7 +152,7 @@ export class CanonizeJob {
     skipped.set(reason, (skipped.get(reason) ?? 0) + 1);
   }
 
-  private async publish(state: WorldState, roomRecords: MemoryRecord[], roomId: RoomId): Promise<CanonizeReport> {
+  private async publish(state: WorldState, roomRecords: MemoryRecord[], roomId: RoomId, signal: AbortSignal | undefined, basedOnSeq: number): Promise<CanonizeReport> {
     this.rollDay();
     const mut: PublishMut = {
       writtenToday: this.writtenToday,
@@ -148,6 +169,8 @@ export class CanonizeJob {
       state,
       roomRecords,
       roomId,
+      signal,
+      basedOnSeq,
       worldHashes: (envs) => this.worldHashes(envs),
     });
     this.writtenToday = mut.writtenToday;
@@ -171,41 +194,41 @@ export class CanonizeJob {
   /** 撤回：tombstone 立即生效，世界层版本 +1（docs/08 §7.3 第 8 条） */
 
   async tombstone(memoryId: Id, reason: string): Promise<boolean> {
-    const seq = await this.deps.store.load(this.deps.worldRoom);
-    const cause: Envelope = {
-      v: 1,
-      id: `evt_uncanonize_${memoryId}`,
-      roomId: this.deps.worldRoom,
-      seq: seq + 1,
-      ts: this.deps.now ? this.deps.now() : Date.now(),
-      actorId: "mem_world",
-      type: "canonize",
-      payload: { action: "tombstone", memoryId },
-    };
-    const applied = await this.deps.arbiter.apply(
-      this.deps.worldRoom,
-      [
-        {
-          op: "memory.write",
-          reason,
-          args: {
-            ownerId: "mem_world",
-            worldId: this.deps.worldId,
-            content: "（已撤回）",
-            contentHash: contentHashOf(`tombstone:${memoryId}`),
-            sourceRefs: [memoryId],
-            tier: "permanent",
-            visibility: "public",
-            status: "tombstoned",
-            supersedes: memoryId,
-            salience: 5,
-          },
+    // P2-2：运行开始时 load 的 seq 作为基线；applyWithSeqRetry 内部只在活动任务（无 signal）
+    // 遇到 E_SEQ_GAP 时有界重试，被 stall 接管的旧任务体不会重算新 seq 后写入。
+    const basedOnSeq = await this.deps.store.load(this.deps.worldRoom);
+    const applied = await applyWithSeqRetry(
+      this.deps,
+      {
+        op: "memory.write",
+        reason,
+        args: {
+          ownerId: "mem_world",
+          worldId: this.deps.worldId,
+          content: "（已撤回）",
+          contentHash: contentHashOf(`tombstone:${memoryId}`),
+          sourceRefs: [memoryId],
+          tier: "permanent",
+          visibility: "public",
+          status: "tombstoned",
+          supersedes: memoryId,
+          salience: 5,
         },
-      ],
-      cause,
+      },
+      (causeSeq) => ({
+        v: 1,
+        id: `evt_uncanonize_${memoryId}`,
+        roomId: this.deps.worldRoom,
+        seq: causeSeq,
+        ts: this.deps.now ? this.deps.now() : Date.now(),
+        actorId: "mem_world",
+        type: "canonize",
+        payload: { action: "tombstone", memoryId },
+      }),
+      basedOnSeq,
     );
-    if (!applied.ok) return false;
-    for (const ev of applied.events) this.deps.memory.ingest?.(ev);
+    if (!applied.applied.ok) return false;
+    for (const ev of applied.applied.events) this.deps.memory.ingest?.(ev);
     this.worldVersion += 1;
     if (this.deps.onVersionBump) await this.deps.onVersionBump(this.deps.worldId, this.worldVersion);
     return true;

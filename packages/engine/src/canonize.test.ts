@@ -2,7 +2,7 @@
  * 世界层永久记忆（P3）：八道闸门的可验证行为。
  * 断言"写没写进世界层 / 被哪道闸门拦下"，不断言文案。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Envelope, Entity, MemoryRecord, RoomId } from "../../shared/src/index.ts";
 import { DefaultArbiter } from "./arbiter.ts";
 import { EventSourcedStore } from "./store.ts";
@@ -216,6 +216,109 @@ describe("canonize 八道闸门（P3）", () => {
     expect(notices.length).toBeGreaterThanOrEqual(1);
     expect(notices[0]?.userId).toBe("user_alpha");
     expect(await j.tombstone(notices[0]!.memoryId, "撤销")).toBe(true);
+  });
+
+  it("协作式中止：调用前已 abort → 不写任何候选、报告 aborted、不抛错", async () => {
+    const f = await fixture({
+      records: [record("mem_a", A, "食堂新开了一家面馆"), record("mem_b", B, "食堂新开了一家面馆")],
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const review = vi.fn(async () => ({ allow: true }));
+    const report = await (await job(f, { review })).retireRoom(ROOM, { signal: controller.signal });
+    expect(report.aborted).toBe(true);
+    expect(report.written).toHaveLength(0);
+    expect(review).not.toHaveBeenCalled(); // 中止时不发起付费 judge
+    expect((await f.store.events(WORLD_ROOM, 0)).filter((e) => e.type === "memory.written")).toHaveLength(0);
+  });
+
+  it("协作式中止：judge 内 abort → 保留已落库批次、不再写新批次（不回滚）", async () => {
+    const lost = "食堂门口贴了一张失物招领";
+    const bench = "操场旁边多了一排水龙头";
+    const f = await fixture({
+      records: [
+        record("mem_l1", A, lost), record("mem_l2", B, lost),
+        record("mem_b1", A, bench), record("mem_b2", B, bench),
+      ],
+    });
+    const controller = new AbortController();
+    let reviews = 0;
+    const judge: CanonizeJudge = {
+      review: async () => {
+        reviews += 1;
+        if (reviews === 2) controller.abort(); // 第一条已落库，第二条 judge 时中止
+        return { allow: true };
+      },
+    };
+    const report = await (await job(f, judge)).retireRoom(ROOM, { signal: controller.signal });
+    expect(report.aborted).toBe(true);
+    expect(report.written).toHaveLength(1);
+    // 中止报告必须与写入一致：候选数 > 0，"0 候选 + 已写 1 条"会被读成数据错乱
+    expect(report.candidates).toBe(2);
+    const written = (await f.store.events(WORLD_ROOM, 0)).filter((e) => e.type === "memory.written");
+    expect(written).toHaveLength(1);
+    expect((written[0]!.payload as { content: string }).content).toBe(lost);
+  });
+
+  it("P2-2：load 与 apply 之间世界房被新世代推进 seq（signal 已 abort）→ 整批 E_SEQ_GAP 拒绝，不交错写入", async () => {
+    const f = await fixture({
+      records: [record("mem_a", A, "食堂新开了一家面馆"), record("mem_b", B, "食堂新开了一家面馆")],
+    });
+    await f.store.load(WORLD_ROOM);
+    const seqBefore = f.store.seq(WORLD_ROOM);
+    const controller = new AbortController();
+    const realApply = f.arbiter.apply.bind(f.arbiter);
+    let injected = false;
+    // 在真实 apply 入口注入：旧任务体已通过最后的 signal 检查（已到落库边界），
+    // 此时新世代抢先写一条推进世界房 seq，并 abort 旧 signal —— 模拟 stall 接管后的僵尸体。
+    vi.spyOn(f.arbiter, "apply").mockImplementation(async (roomId, ops, cause, opts) => {
+      if (roomId === WORLD_ROOM && !injected) {
+        injected = true;
+        const next = f.store.seq(WORLD_ROOM) + 1;
+        f.store.append(WORLD_ROOM, [env(next, "time.advanced", { day: 1, tick: 9 }, WORLD_ROOM)]);
+        controller.abort();
+      }
+      return realApply(roomId, ops, cause, opts);
+    });
+    const report = await (await job(f)).retireRoom(ROOM, { signal: controller.signal });
+    expect(injected).toBe(true);
+    // basedOnSeq 是运行开始时记下的旧值，apply 看到的世界 seq 已变 → E_SEQ_GAP；
+    // 僵尸 signal.aborted 阻止有界重试，错误记入 errors 而非静默 skip。
+    expect(report.errors).toContain("E_SEQ_GAP");
+    expect(report.written).toHaveLength(0);
+    // 世界房里只有新世代那条，没有旧任务体的 memory.written。
+    const written = (await f.store.events(WORLD_ROOM, 0)).filter((e) => e.type === "memory.written");
+    expect(written).toHaveLength(0);
+    expect(f.store.seq(WORLD_ROOM)).toBe(seqBefore + 1);
+  });
+
+  it("P2-2：僵尸任务体在新世代写入后仍尝试 apply → 不重试，写入不与新世代交错", async () => {
+    const f = await fixture({
+      records: [record("mem_a", A, "图书馆新增了自助借书机"), record("mem_b", B, "图书馆新增了自助借书机")],
+    });
+    await f.store.load(WORLD_ROOM);
+    const seqBefore = f.store.seq(WORLD_ROOM);
+    const controller = new AbortController();
+    const realApply = f.arbiter.apply.bind(f.arbiter);
+    let applyCalls = 0;
+    vi.spyOn(f.arbiter, "apply").mockImplementation(async (roomId, ops, cause, opts) => {
+      applyCalls += 1;
+      if (roomId === WORLD_ROOM) {
+        // 新世代持续写入推进 seq，旧 signal 保持 abort；必须走真实 DefaultArbiter.apply
+        const next = f.store.seq(WORLD_ROOM) + 1;
+        f.store.append(WORLD_ROOM, [env(next, "time.advanced", { day: 1, tick: 9 + applyCalls }, WORLD_ROOM)]);
+        controller.abort();
+      }
+      return realApply(roomId, ops, cause, opts);
+    });
+    const report = await (await job(f)).retireRoom(ROOM, { signal: controller.signal });
+    // 僵尸 signal 已 abort：applyWithSeqRetry 直接放弃，不再 load 新 seq 重试 → 真实 apply 只调用 1 次
+    expect(applyCalls).toBe(1);
+    expect(report.errors).toContain("E_SEQ_GAP");
+    expect(report.written).toHaveLength(0);
+    const written = (await f.store.events(WORLD_ROOM, 0)).filter((e) => e.type === "memory.written");
+    expect(written).toHaveLength(0);
+    expect(f.store.seq(WORLD_ROOM)).toBe(seqBefore + 1);
   });
 
   it("撤回未知 memoryId 返回 false（不静默放行）", async () => {

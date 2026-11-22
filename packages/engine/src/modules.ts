@@ -86,7 +86,7 @@ export class ModuleHost implements Modules {
       if (!matches(info, ctx.input)) continue;
       try {
         const out = await mod.intent(ctx);
-        if (out?.ok) return out;
+        if (out?.ok) return limitOutcome(info, out);
       } catch (e) {
         this.fault(info.id, e);
       }
@@ -103,7 +103,7 @@ export class ModuleHost implements Modules {
       return { ok: false, proposals: [], error: { code: "E_TOOL_NOT_FOUND", message: `manifest 未声明 ${name}` } };
     }
     try {
-      return await mod.tool(name, args, ctx);
+      return limitOutcome(info, await mod.tool(name, args, ctx));
     } catch (e) {
       this.fault(modId, e);
       return { ok: false, proposals: [], error: { code: "E_MODULE_FAULT", message: String(e) } };
@@ -117,7 +117,7 @@ export class ModuleHost implements Modules {
       if (!mod?.tick) continue;
       if (!(info.manifest.capabilities?.triggers ?? []).includes(phase)) continue;
       try {
-        out.push(...(await mod.tick(ctx, phase)));
+        out.push(...limitProposals(info, await mod.tick(ctx, phase)));
       } catch (e) {
         this.fault(info.id, e);
       }
@@ -168,6 +168,43 @@ export class ModuleHost implements Modules {
     const info = this.infos.get(id);
     if (info) info.fault = { code: "E_MODULE_FAULT", message: String(e), at: Date.now() };
   }
+}
+
+/**
+ * manifest.limits 的兜底执行（docs/01 §3：`proposalsPerTurn` 超出截断、`maxArrayItems` 截数组）。
+ *
+ * 放在宿主而不是每个模块里：模块是内容层，写错了不能让整局崩，但也不能让声明形同虚设。
+ * 截断只降不升，且不改 `ok`/`error`——超限是模块的账，不是这一回合的失败。
+ */
+export function limitProposals(info: Pick<ModuleInfo, "id" | "manifest">, proposals: readonly Proposal[]): Proposal[] {
+  const limit = info.manifest.limits?.proposalsPerTurn;
+  const arrMax = info.manifest.limits?.maxArrayItems;
+  const cut: Proposal[] = [];
+  for (const p of proposals) {
+    cut.push(arrMax === undefined ? p : capArrayArgs(p, arrMax));
+  }
+  if (limit === undefined || cut.length <= limit) return cut;
+  console.warn(`[modules] ${info.id} 单回合提案 ${cut.length} 条超过 manifest.limits.proposalsPerTurn=${limit}，按 E_OVER_LIMIT 截断`);
+  return cut.slice(0, limit);
+}
+
+function capArrayArgs(p: Proposal, max: number): Proposal {
+  const args: Record<string, unknown> = {};
+  let touched = false;
+  for (const [k, v] of Object.entries(p.args ?? {})) {
+    if (Array.isArray(v) && v.length > max) {
+      args[k] = v.slice(0, max);
+      touched = true;
+    } else {
+      args[k] = v;
+    }
+  }
+  return touched ? { ...p, args } : p;
+}
+
+function limitOutcome(info: ModuleInfo, out: ModuleOutcome): ModuleOutcome {
+  const proposals = limitProposals(info, out.proposals ?? []);
+  return proposals.length === (out.proposals ?? []).length ? out : { ...out, proposals };
 }
 
 /** 极简意图匹配：模块在 manifest 里声明 intents，文本包含任一关键词即认为它想处理 */

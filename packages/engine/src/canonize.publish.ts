@@ -1,11 +1,17 @@
 /**
  * 世界层发布：八道闸门 + 唯一写路径（从 canonize.ts 拆出：实现文件保持 ≤300 行）。
  * 这里不持有时钟/日期状态，只吃一个可变的 `mut` 计账对象，方便单独测试与回滚。
+ *
+ * P2-2 写隔离口径：一次 retireRoom 开始时记下世界房 seq 作为 `basedOnSeq`，
+ * 每次成功 apply 后把它推进到最新 seq；之后所有 apply 都用它做 expectedSeq。
+ * E_SEQ_GAP 有界重试：重新 load 最新 seq，重算 cause.seq/expectedSeq 后再提交；
+ * 重试耗尽仍失败时记入 errors，绝不静默 skip。
  */
 import type { Envelope, Id, MemoryRecord, Proposal, RoomId, WorldState } from "../../shared/src/index.ts";
 import { contentHashOf } from "./memory.gate.ts";
 import { buildImpression } from "./impressions.ts";
 import type { CanonizeDeps, CanonizeLimits, CanonizeReport } from "./canonize.types.ts";
+import { SEQ_GAP_MAX_RETRIES } from "./canonize.types.ts";
 import type { PermanentCandidate } from "./canonize.candidates.ts";
 import { SOURCE_REF, candidatesFromMemories, privacyHit, witnessCount } from "./canonize.candidates.ts";
 
@@ -25,7 +31,63 @@ export interface PublishArgs {
   state: WorldState;
   roomRecords: MemoryRecord[];
   roomId: RoomId;
+  /** 协作式中止：循环迭代之间/每次 judge 调用前检查；不传则完全保持旧行为 */
+  signal?: AbortSignal;
   worldHashes: (envs: Envelope[]) => string[];
+  /**
+   * 任务开始时 load 到的世界房 seq（基线）。每次成功 apply 后由本函数推进；
+   * 所有 apply 都以它作为 expectedSeq —— 新世代推进 seq 后旧任务体必被 E_SEQ_GAP 拒绝。
+   */
+  basedOnSeq: number;
+}
+
+/**
+ * 带 E_SEQ_GAP 有界重试的原子 apply。
+ *
+ * 关键 P2-2 取舍：`expectedSeq` 用的是任务开始时 load 的 `basedOnSeq`，每次成功后再推进，
+ * 绝不在 apply 前临时 load 新 seq —— 否则僵尸任务体拿到的就是新世代的 seq，检查形同虚设。
+ * E_SEQ_GAP 时，只有 signal 未 abort 的活动任务才允许重新 load 最新 seq、重算 cause.seq 与
+ * expectedSeq 重试（最多 SEQ_GAP_MAX_RETRIES 次）；被 stall 接管的僵尸 signal 已 abort，
+ * 遇到 E_SEQ_GAP 直接走失败分支记入 errors，不再重试、不插到新世代写入之后。
+ *
+ * apply 是原子整批：失败即未落库；重试不会重复写入，也不会把失败批次的事件混入成功结果。
+ */
+export async function applyWithSeqRetry(
+  deps: CanonizeDeps,
+  op: Proposal,
+  buildCause: (seq: number) => Envelope,
+  basedOnSeq: number,
+  signal?: AbortSignal,
+): Promise<{ applied: Awaited<ReturnType<CanonizeDeps["arbiter"]["apply"]>>; seq: number }> {
+  let expectedSeq = basedOnSeq;
+  let attempts = 0;
+  for (;;) {
+    const cause = buildCause(expectedSeq + 1);
+    const applied = await deps.arbiter.apply(deps.worldRoom, [op], cause, { expectedSeq });
+    if (applied.ok) return { applied, seq: applied.seq };
+    const code = applied.rejected[0]?.code ?? applied.error?.code;
+    // 僵尸任务体（signal 已 abort）或重试耗尽：不再重算 seq，把最后一次失败交回调用方记入 errors
+    if (code !== "E_SEQ_GAP" || signal?.aborted || attempts >= SEQ_GAP_MAX_RETRIES) {
+      return { applied, seq: expectedSeq };
+    }
+    attempts += 1;
+    // 活动任务的自旋重试：load 最新 seq 后重算 cause.seq 与 expectedSeq，候选内容不变
+    expectedSeq = await deps.store.load(deps.worldRoom);
+  }
+}
+
+/** 中止报告：只标记 aborted，written 保留此前已落库的批次（不做回滚） */
+function abortedReport(args: PublishArgs, written: Id[], skipped: Map<string, number>, errors: string[], candidates = 0): CanonizeReport {
+  return {
+    worldId: args.deps.worldId,
+    // 中止时仍要报"看过多少候选"，否则 0 候选 + 已写 N 条会被读成数据不一致
+    candidates,
+    written,
+    skipped: [...skipped.entries()].map(([reason, count]) => ({ reason, count })),
+    errors,
+    writtenToday: args.mut.writtenToday,
+    aborted: true,
+  };
 }
 
 function skip(skipped: Map<string, number>, reason: string): void {
@@ -33,7 +95,9 @@ function skip(skipped: Map<string, number>, reason: string): void {
 }
 
 export async function publishCandidates(args: PublishArgs): Promise<CanonizeReport> {
-  const { deps, limits, mut, judgeFailureLimit, state, roomRecords, roomId } = args;
+  const { deps, limits, mut, judgeFailureLimit, state, roomRecords, roomId, signal } = args;
+  // 基线由调用方在任务开始时 load 到；每次成功 apply 后推进，失败批不推进
+  let basedOnSeq = args.basedOnSeq;
   const skipped = new Map<string, number>();
   const errors: string[] = [];
   const written: Id[] = [];
@@ -52,6 +116,8 @@ export async function publishCandidates(args: PublishArgs): Promise<CanonizeRepo
   }
 
   for (const candidate of candidates) {
+    // 协作式中止：迭代之间检查，abort 后立刻返回，已落库批次保持真实、不回滚
+    if (signal?.aborted) return abortedReport(args, written, skipped, errors, candidates.length);
     // ① 来源可追溯
     if (candidate.sourceRefs.length === 0 || !candidate.sourceRefs.every((r) => SOURCE_REF.test(r))) {
       skip(skipped, "source_untraceable");
@@ -85,6 +151,8 @@ export async function publishCandidates(args: PublishArgs): Promise<CanonizeRepo
       continue;
     }
     // ⑥ 独立审核（judge 抛错 = 拒绝：fail-closed）
+    // 每次 LLM 调用前再检查一次：abort 与调用排在同一个 tick 时不再发起付费请求
+    if (signal?.aborted) return abortedReport(args, written, skipped, errors, candidates.length);
     try {
       const verdict = await deps.judge.review(candidate);
       mut.judgeFailures = 0;
@@ -99,6 +167,8 @@ export async function publishCandidates(args: PublishArgs): Promise<CanonizeRepo
     }
 
     // ⑦⑧ 发布（不可变/回滚由 Arbiter 的世界层规则保证）+ 版本号
+    // judge 是异步间隙：abort 可能在此期间发生，落库前再确认一次，避免"取消后仍写入"
+    if (signal?.aborted) return abortedReport(args, written, skipped, errors, candidates.length);
     const op: Proposal = {
       op: "memory.write",
       reason: `canonize:${src}`,
@@ -117,18 +187,26 @@ export async function publishCandidates(args: PublishArgs): Promise<CanonizeRepo
         salience: 5,
       },
     };
-    const seq = await deps.store.load(deps.worldRoom);
-    const cause: Envelope = {
-      v: 1,
-      id: `evt_canonize_${hash.slice(0, 12)}`,
-      roomId: deps.worldRoom,
-      seq: seq + 1,
-      ts: deps.now ? deps.now() : Date.now(),
-      actorId: "mem_world",
-      type: "canonize",
-      payload: { worldId: deps.worldId, sourceRefs: candidate.sourceRefs },
-    };
-    const applied = await deps.arbiter.apply(deps.worldRoom, [op], cause);
+    // P2-2：expectedSeq 用本任务开始时 load 的 basedOnSeq（每次成功 apply 后推进），
+    // 绝不在 apply 前临时 load 新 seq —— 否则僵尸任务体拿到新世代 seq，检查形同虚设。
+    // E_SEQ_GAP 时活动任务可重算 cause/expectedSeq 有界重试，僵尸（signal.aborted）不重试。
+    const { applied, seq: appliedSeq } = await applyWithSeqRetry(
+      deps,
+      op,
+      (causeSeq) => ({
+        v: 1,
+        id: `evt_canonize_${hash.slice(0, 12)}`,
+        roomId: deps.worldRoom,
+        seq: causeSeq,
+        ts: deps.now ? deps.now() : Date.now(),
+        actorId: "mem_world",
+        type: "canonize",
+        payload: { worldId: deps.worldId, sourceRefs: candidate.sourceRefs },
+      }),
+      basedOnSeq,
+      signal,
+    );
+    basedOnSeq = appliedSeq;
     if (!applied.ok) {
       const code = applied.rejected[0]?.code ?? applied.error?.code ?? "E_MODULE_FAULT";
       errors.push(code);
