@@ -4,7 +4,8 @@
  *
  * 为什么不用 MapService 的 tickQueues：那条队列只串行 tick 自己；Turn / Dialogue
  * 走的是另一条链路（routes 的 serializeTurn），两边互不知情。这里用一把轻量计数
- * 把"玩家正在写状态"广播给时钟与 tick，锁的范围只覆盖回合执行期，不覆盖排队等待。
+ * 把"玩家正在写状态"广播给时钟与 tick。玩家回合用 acquire 等待，时钟用 tryAcquire
+ * 拿不到就跳过；锁的范围只覆盖执行期，不覆盖排队等待。
  */
 export class RoomActivity {
   private readonly active = new Map<string, number>();
@@ -20,6 +21,23 @@ export class RoomActivity {
       if (next <= 0) this.active.delete(roomId);
       else this.active.set(roomId, next);
     };
+  }
+
+  /**
+   * 玩家回合用：等到房间空闲再进入。返回的释放函数与 enter 相同。
+   * 自动时钟用 tryAcquire：拿不到就跳过本拍，绝不等待。
+   */
+  async acquire(roomId: string): Promise<() => void> {
+    while (this.isBusy(roomId)) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return this.enter(roomId);
+  }
+
+  /** 非阻塞获取；房间忙时返回 null。 */
+  tryAcquire(roomId: string): (() => void) | null {
+    if (this.isBusy(roomId)) return null;
+    return this.enter(roomId);
   }
 
   isBusy(roomId: string): boolean {

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { SimClock, type SimClockMap, type SimClockStore } from "./sim-clock.ts";
 
+function storeSnapshot(tick: number): never {
+  return { clock: { tick } } as never;
+}
+
 function storeOf(ticks: Record<string, number>, rooms = Object.keys(ticks)): SimClockStore {
   return {
     listRooms: async () => rooms,
@@ -44,19 +48,33 @@ describe("SimClock（D22 自动推进）", () => {
     expect(calls).toEqual(["r1"]);
   });
 
-  it("beforeTick 期间玩家回合开始（变忙）：本拍跳过 tick", async () => {
-    let busy = false;
+  it("acquire 拿不到房间锁：本拍不 snapshot、不 tick", async () => {
+    let snapshots = 0;
     let ticks = 0;
     const clock = new SimClock({
-      store: storeOf({ r1: 0 }),
+      store: { listRooms: async () => ["r1"], snapshot: async () => { snapshots += 1; return storeSnapshot(0); } },
       map: { tick: async () => { ticks += 1; return { ok: true }; } },
       policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 },
-      isBusy: () => busy,
-      beforeTick: async () => { busy = true; },
+      acquire: () => null,
       warn: () => {},
     });
     await clock.beat();
+    expect(snapshots).toBe(0);
     expect(ticks).toBe(0);
+  });
+
+  it("beforeTick 与 map.tick 在 acquire 锁内执行，结束后释放", async () => {
+    let holds = 0;
+    const clock = new SimClock({
+      store: storeOf({ r1: 0 }),
+      map: { tick: async () => { expect(holds).toBe(1); return { ok: true }; } },
+      policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 },
+      acquire: () => { holds += 1; return () => { holds -= 1; }; },
+      beforeTick: async () => { expect(holds).toBe(1); },
+      warn: () => {},
+    });
+    await clock.beat();
+    expect(holds).toBe(0);
   });
 
   it("beforeTick 在 tick 前执行；决策失败只 warn，不阻断本拍推进", async () => {

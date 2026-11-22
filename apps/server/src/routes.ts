@@ -578,7 +578,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       const prev = turnChains.get(roomId) ?? Promise.resolve();
       // 只在回合真正执行时标记忙（排队等待不算），让自动时钟在排队阶段仍可推进。
       const run = async (): Promise<T> => {
-        const leave = deps.roomActivity?.enter(roomId);
+        const leave = deps.roomActivity ? await deps.roomActivity.acquire(roomId) : undefined;
         try {
           return await fn();
         } finally {
@@ -1011,9 +1011,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     });
     let committed = false;
     let errored = false;
-    let leaveTurn: (() => void) | undefined;
+    // 先拿房间锁再写 SSE 头：自动时钟正在推进时排队等它结束，避免时间与本回合重叠。
+    const leaveTurn = deps.roomActivity ? await deps.roomActivity.acquire(roomId) : undefined;
     try {
-      leaveTurn = deps.roomActivity?.enter(roomId);
       // 玩家点的是某个 NPC：前端会把「对<展示名>说：…」写进行动语义。未认识时展示名是
       // 外貌占位名（appearance）或「第N位陌生的同学」，这里换回真名只影响喂给模型的 input，
       // 不影响下发给玩家的显示；否则模型看到一段外貌描述，根本不知道在跟谁说话。

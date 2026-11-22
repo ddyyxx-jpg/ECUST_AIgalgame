@@ -604,6 +604,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     map,
     policy: simPolicy?.clock ?? { enabled: false, intervalMs: 60_000, ticksPerBeat: 1, maxTick: 24 },
     isBusy: (roomId) => background.isBusy(roomId) || roomActivity.isBusy(roomId),
+    acquire: (roomId) => roomActivity.tryAcquire(roomId),
     ...(npcDecision ? { beforeTick: (roomId: string) => npcDecision.run(roomId) } : {}),
   });
   simClock.start();

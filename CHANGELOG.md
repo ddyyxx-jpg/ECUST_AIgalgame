@@ -15,19 +15,19 @@
 - **自动时钟**：`apps/server/src/sim-clock.ts`，默认关闭；只推 `time.advance{ticks}`，到 `maxTick` 停下等玩家 `advance`，不替玩家切 phase。
 - **推进时段回满**：`advance:true` 时在同一批里把玩家行动点回满。
 - **租约不出站**：`sim_lease` 是引擎内部属性，`projectStateForPlayer` 在任何玩家出站通道（`/state`、`/events`、`turn.patch.state`）统一剥掉；`docs/03` 的 issue #74 口径同步注明该唯一例外。
-- **房间活动锁**：新增 `RoomActivity`，v1 `/turns` 与 v2 `/conversation` 执行期间标记房间忙；自动时钟跳过、`/map/tick` 与 `/map/travel` 返回 409 `E_TURN_BUSY`，时间推进不再插进玩家回合。
+- **房间活动锁**：新增 `RoomActivity`，v1 `/turns` 与 v2 `/conversation` 执行期间标记房间忙；自动时钟拿不到锁就跳过，玩家回合在时钟本拍进行时等待其结束；`/map/tick` 与 `/map/travel` 忙时返回 409 `E_TURN_BUSY`，时间推进不再与回合交错。
 - **NPC 自由活动（WorldX 感知/菜单/单选决策）**：`apps/server/src/npc-decision.ts` + `content/sim/policy.json` 的 `decision` 段；自动时钟每拍挑空闲 NPC，投影公开感知（地点/时段/在场者），只给“留下 + 相邻地点”编号菜单，模型回 `{"choice":N}` 后写 `sim_lease`；移动仍由 map tick 执行。默认关闭，受 `maxPerBeat/intervalTicks/hourlyCalls` 限制，坏输出走确定性 fallback。
 - **作者注 / 关键词世界设定（SillyTavern 内容层）**：`content/lorebook.json` + `apps/server/src/lorebook.ts`；`buildTurnPrompt` 新增可选 `authorNote` 与 `worldInfo`，只把命中当前输入/地点/在场者的条目注入提示词，不改 op、不让 LLM 直写状态。`PROMPT_VERSION` bump 到 `2026-11-22.1`。
 - **对话打断 NPC 动作（D22）**：`/conversation` 的 target/interject 或 v1 `/turns` 的 `targetNpcId` 命中正在行动的 NPC 时，服务端把 `sim_lease` 冻结为 `{action:"talk",resume:原租约}`（空闲 NPC 也写 talk，防止对话途中被自动 tick 起新动作）；map tick 跳过 talk，回合结束（含异常）恢复原租约并继续剩余占用；talk 跨 phase 视为过期清空，并带 `expiresAt` 超时兜底（默认 12 tick），避免崩溃后永久冻结。
 
 ### 验证
-- `npm run typecheck` 0 错；`npx vitest run` 132 文件/1069 例全过；`npm run check:contract` 8/8。
+- `npm run typecheck` 0 错；`npx vitest run` 132 文件/1072 例全过；`npm run check:contract` 8/8。
 - 新增 `turn.action-points.test.ts`（含 FileStore 重启探针）、`sim-clock.test.ts`、`sim.policy.test.ts`，map 模块补租约/停留/跨 phase/超时用例，对话路由补数组 target、v1 `/turns` 与恢复失败不冒充已恢复的用例。
 
 ### 已知边界
 - `travel` 不可达：map 模块按既有语义返回 `ok:true + 空 proposals`，回合仍会提交并扣 1 点；请求层随后复核位置才返回 `E_NOT_ADJACENT`（不额外扣点）。下一版在扣点前做邻接预检或退款。
 - 旧存档没有 `action_points` 时不强制扣点；自动时钟默认关闭，需在 `content/sim/policy.json` 显式开启。
-- 房间活动锁只覆盖 `/turns`、`/conversation` 与地图 HTTP 写入口；直接调用 `MapService.tick` 的运维/测试脚本不在锁内（服务层仍是可信调用）。
+- 房间活动锁覆盖 `/turns`、`/conversation`、自动时钟与地图 HTTP 写入口；直接调用 `MapService.tick` 的运维/测试脚本仍不在锁内（服务层是可信调用）。
 - 单房间 tick 超过 30s 时只停止等待、不取消底层执行；在该 Promise settle 前，同房间的后续拍会跳过，避免重复排队。
 
 ## 未发布 — #151 复审两条 P1（`busy` 时自动进出室内）

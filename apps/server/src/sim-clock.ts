@@ -27,6 +27,8 @@ export interface SimClockDeps {
   map: SimClockMap;
   policy: SimClockPolicy;
   isBusy?: (roomId: string) => boolean;
+  /** 非阻塞抢房间锁；返回 null 表示本拍跳过。不传则退回只查 isBusy。 */
+  acquire?: (roomId: string) => (() => void) | null;
   /** 每次 tick 前跑一次（NPC 自由活动决策）；失败只 warn，不阻断本拍时间推进。 */
   beforeTick?: (roomId: string) => Promise<void>;
   warn?: (message: string) => void;
@@ -69,24 +71,30 @@ export class SimClock {
         try {
           if (this.running.has(roomId)) continue;
           if (this.deps.isBusy?.(roomId)) continue;
-          const state = await this.deps.store.snapshot(roomId);
-          const roomLeft = this.policy.maxTick > 0 ? this.policy.maxTick - state.clock.tick : Number.POSITIVE_INFINITY;
-          if (roomLeft <= 0) continue;
-          if (this.deps.beforeTick) {
-            try {
-              await this.deps.beforeTick(roomId);
-            } catch (e) {
-              this.warn(`[sim-clock] 房间 ${roomId} 决策失败，本拍继续推进：${e instanceof Error ? e.message : String(e)}`);
+          // 先抢房间锁：玩家回合正在执行时直接跳过，绝不与回合交错；拿到锁后
+          // beforeTick 与 map.tick 都在锁内，玩家回合会在 acquire 处等本拍结束。
+          const release = this.deps.acquire?.(roomId);
+          if (this.deps.acquire && !release) continue;
+          try {
+            const state = await this.deps.store.snapshot(roomId);
+            const roomLeft = this.policy.maxTick > 0 ? this.policy.maxTick - state.clock.tick : Number.POSITIVE_INFINITY;
+            if (roomLeft <= 0) continue;
+            if (this.deps.beforeTick) {
+              try {
+                await this.deps.beforeTick(roomId);
+              } catch (e) {
+                this.warn(`[sim-clock] 房间 ${roomId} 决策失败，本拍继续推进：${e instanceof Error ? e.message : String(e)}`);
+              }
             }
-          }
-          // 决策可能很慢；玩家回合若在 beforeTick 期间开始，本拍不要再写地图。
-          if (this.deps.isBusy?.(roomId)) continue;
-          const ticks = Math.min(this.policy.ticksPerBeat, roomLeft);
-          const result = await this.tickRoom(roomId, ticks);
-          if (result === undefined) {
-            this.warn(`[sim-clock] 房间 ${roomId} 推进超时（${this.deps.roomTimeoutMs ?? 30_000}ms），本拍跳过`);
-          } else if (!result.ok) {
-            this.warn(`[sim-clock] 房间 ${roomId} 推进被拒：${result.code ?? "E_UNKNOWN"} ${result.message ?? ""}`.trim());
+            const ticks = Math.min(this.policy.ticksPerBeat, roomLeft);
+            const result = await this.tickRoom(roomId, ticks);
+            if (result === undefined) {
+              this.warn(`[sim-clock] 房间 ${roomId} 推进超时（${this.deps.roomTimeoutMs ?? 30_000}ms），本拍跳过`);
+            } else if (!result.ok) {
+              this.warn(`[sim-clock] 房间 ${roomId} 推进被拒：${result.code ?? "E_UNKNOWN"} ${result.message ?? ""}`.trim());
+            }
+          } finally {
+            release?.();
           }
         } catch (e) {
           this.warn(`[sim-clock] 房间 ${roomId} 推进失败：${e instanceof Error ? e.message : String(e)}`);
