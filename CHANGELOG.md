@@ -10,11 +10,11 @@
 > 仅前端表现层：不改契约、不新增 op、不动服务端；`CONTRACT_VERSION` 3.8.0 不变。
 
 ### 修复
-- **P1-1 回合 streaming 中走到点位会发 travel**：`CampusMap` 的 160ms probe 原来只看距离，不看 `busy`（`busy` 只用于按钮 disabled），且 `busy` 是 props、interval 闭包读不到最新值。现在 probe 同步 `busyRef`，自动进入 / 自动 travel 都过新的纯函数 `stepEntryDwell` / `shouldAutoTravel`：`busy` 期间不累计入口 dwell、不发 `travel`；回合结束后仍站在入口会重新数满 1.5 秒再进一次。
+- **P1-1 回合 streaming 中走到点位会发 travel**：`CampusMap` 的 160ms probe 原来只看距离，不看 `busy`（`busy` 只用于按钮 disabled），且 `busy` 是 props、interval 闭包读不到最新值。现在 probe 同步 `busyRef`，自动进入 / 自动 travel 都过新的纯函数 `stepEntryDwell` / `decideTravel`（`travelIntent` 只做纯谓词）：`busy` 期间不累计入口 dwell、不发 `travel`；回合结束后仍站在入口会重新数满 1.5 秒再进一次。
 - **P1-2 室内站出口时回合没结束就切回大地图**：`InteriorMap` 的出口 dwell 同样加 `busy` 门禁（`stepExitDwell`）：`busy` 时清零计时、不触发 `onExit`；回合结束后重新数满 1.5 秒才退出一次。
 
 ### 复审补充（PR #152 复审 P3-2）
-- 场景级自动 travel 原先只在「刚进入点位范围」那一拍评估：回合 streaming 中蹭进范围、回合结束后原地不动，就再也不会自动到达（入口 dwell 却会重新计时，两条路行为不一致）。现在被 busy 挡下的点位记入 `pendingTravelRef`，回合结束后仍站在旁边补发一次；判定抽成 `decideTravel`（`skip` / `defer` / `go`），`shouldAutoTravel` 退化成 `travelIntent && !busy`。
+- 场景级自动 travel 原先只在「刚进入点位范围」那一拍评估：回合 streaming 中蹭进范围、回合结束后原地不动，就再也不会自动到达（入口 dwell 却会重新计时，两条路行为不一致）。现在被 busy 挡下的点位记入 `pendingTravelRef`，回合结束后仍站在旁边补发一次；判定抽成 `decideTravel`（`skip` / `defer` / `go`），`travelIntent` 退化成纯谓词参与判定。
 - 传送失败仍是「离开再靠近才重试」——不会原地每 160ms 重发。
 
 ### 复审补充之二（PR #152 定向复审）
