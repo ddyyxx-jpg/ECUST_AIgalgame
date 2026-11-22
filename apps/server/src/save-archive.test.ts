@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { FileStore } from "@galgame/engine";
+import { FileStore, parseCommitEvidence } from "@galgame/engine";
 import type { Envelope } from "@galgame/shared";
 import { tempDir } from "@galgame/testkit";
 import {
@@ -15,7 +15,11 @@ import {
 
 const ROOM = "room_archive";
 
-/** 用真实投影会处理的事件类型造日志：建实体 → 改属性 → 回合提交（末条是未知类型，投影 no-op）。 */
+/**
+ * 用真实投影会处理的事件类型造日志：建实体 → 改属性 → 回合提交标记。
+ * 末条必须是**引擎真的会写进 EventLog** 的 `turn.committed`（AGENTS §12.1：fixture 的事件类型
+ * 要与引擎发射处逐一核对；`turn.commit` 只是 SSE TurnEvent，从不落盘——PR #123 的教训）。
+ */
 function sampleEvents(roomId = ROOM): Envelope[] {
   const entity = {
     id: "plr_a", kind: "plr", name: "你", attrs: {}, tags: [],
@@ -24,7 +28,7 @@ function sampleEvents(roomId = ROOM): Envelope[] {
   return [
     { v: 1, id: "evt_1", roomId, seq: 1, ts: 1000, actorId: "system", type: "entity.created", payload: { entity } },
     { v: 1, id: "evt_2", roomId, seq: 2, ts: 1001, actorId: "plr_a", type: "attr.changed", payload: { entityId: "plr_a", key: "x.mood", from: 0, to: 5, clamped: false } },
-    { v: 1, id: "evt_3", roomId, seq: 3, ts: 1002, actorId: "plr_a", type: "turn.commit", payload: { turnId: "t1", seq: 3 } },
+    { v: 1, id: "evt_3", roomId, seq: 3, ts: 1002, actorId: "plr_a", type: "turn.committed", payload: { clientTurnId: "c1", turnId: "t1", actorId: "plr_a", committedSeq: 3 } },
   ];
 }
 
@@ -165,5 +169,28 @@ describe("save-archive (#99)", () => {
     expect(result).toMatchObject({ ok: true, saveIndexRestored: true });
     expect(await targetIndex.list("u_a")).toMatchObject([{ roomId: ROOM, lastTurnId: "t1" }]);
     expect(saveFilePath(usersDir, "u_a")).toContain("saves.json");
+  });
+
+  it("导入后真实读回：落盘的 turn.committed 标记可被 #76 幂等/历史读取方解析", async () => {
+    const events = sampleEvents();
+    const source = new FileStore(roomsDir());
+    await source.append(ROOM, events);
+    const archive = buildArchive({ roomId: ROOM, events, projection: await source.snapshot(ROOM), savedAt: 1 });
+    const checked = inspectArchive(JSON.parse(JSON.stringify(archive)));
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+
+    const rooms = roomsDir();
+    const target = new FileStore(rooms);
+    const result = await importArchive({ archive: checked.archive, events: checked.events, store: target });
+    expect(result.ok).toBe(true);
+
+    // 换一个 FileStore 实例 = 进程重启后的冷读，走真实 append → 文件 → load → events 路径
+    const reopened = new FileStore(rooms);
+    await reopened.load(ROOM);
+    const all = await reopened.events(ROOM, 1);
+    expect(all.length).toBe(3);
+    const marker = all.map((e) => parseCommitEvidence(e)).filter((e) => e !== undefined).at(-1);
+    expect(marker).toMatchObject({ turnId: "t1", clientTurnId: "c1", committedSeq: 3 });
   });
 });

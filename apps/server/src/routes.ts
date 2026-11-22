@@ -6,6 +6,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ActorId, Memory, MemoryRecord, Registry, RoomId, Store, Turn, TurnEvent, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import type { ConversationEvent, GossipEvent, MessageDigest, UtteranceModeDef } from "../../../packages/shared/src/contract/v2.ts";
+import { projectEventsForPlayer, playerOf, projectStateForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
 import { projectConversationEvents, saveSnapshot, sessionSnapshotPath, type ConversationHostV2 } from "../../../packages/engine/src/v2/index.ts";
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
@@ -865,7 +866,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!access) return reply;
     // 原始快照里带着实体真名：未认识的人必须在这里也脱敏，否则"服务端不下发真名"
     // 只是口号——新建房间就能从 /state 看光所有 NPC（审阅 P0-1）。
-    return maskNamesDeep(access.state, unknownPlaceholders(access.state, deps.appearance));
+    // plot 的 GM 字段（forbidReveal/leakPoints/goal…）不能随 /state 下发（PR #147 审阅 P0）
+    return maskNamesDeep(projectStateForPlayer(access.state), unknownPlaceholders(access.state, deps.appearance));
   });
 
   app.get("/api/v1/rooms/:roomId/events", async (req, reply) => {
@@ -885,8 +887,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       return e.audience.includes(viewer);
     });
     // 历史回放同样脱敏：旧回合的叙事里可能带着尚未认识的人的真名
-    const placeholders = unknownPlaceholders(await deps.store.snapshot(roomId), deps.appearance);
-    return { events: maskNamesDeep(events, placeholders), lastSeq: events.length ? events[events.length - 1]!.seq : from };
+    const snapshot = await deps.store.snapshot(roomId);
+    const placeholders = unknownPlaceholders(snapshot, deps.appearance);
+    // 秘密裁剪（PR #147 审阅 P0）：plot 事件剥 GM 字段，私忆只留 public 与玩家本人；
+    // viewer 取服务端解析的玩家身份，不信任 query 里的 actorId。
+    const visible = projectEventsForPlayer(events, playerOf(snapshot, access.userId));
+    return { events: maskNamesDeep(visible, placeholders), lastSeq: visible.length ? visible[visible.length - 1]!.seq : from };
   });
 
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */
@@ -1037,7 +1043,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         console.warn(`[names] 回合已提交，但脱敏快照失败，改用回合开始前快照：${roomId}`, e);
         placeholders = unknownPlaceholders(snapshotForInput, deps.appearance);
       }
-      for (const ev of events) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, placeholders));
+      // turn.patch.state 也带 plots，必须和 /state 同口径剥秘密（PR #147 审阅 P0）
+      for (const ev of events) sseWrite(reply.raw, ev.type, maskNamesDeep(projectTurnEventForPlayer(ev), placeholders));
     } catch (e) {
       errored = true;
       // 收到 turn.commit 后才会走到这里的旁路异常：账本保持 committed，也不给客户端可重试信号

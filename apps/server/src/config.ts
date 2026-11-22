@@ -51,6 +51,8 @@ export interface ServerConfig {
    * 只从环境变量读，绝不写进代码/仓库；用于首页快捷键解锁只读调试视图。
    */
   debugPassphrase?: string;
+  /** 后台任务看门狗（毫秒），默认 120s；超时即 abort 在途后台任务 */
+  backgroundStallMs?: number;
 }
 
 function env(k: string, d: string): string {
@@ -129,6 +131,7 @@ export function loadConfig(): ServerConfig {
     resetTtlMin: Math.max(1, Number(env("GALGAME_RESET_TTL_MIN", "15")) || 15),
     historyLimitMax: historyLimitMax(env("GALGAME_HISTORY_LIMIT_MAX", "200")),
     debugPassphrase: env("GALGAME_DEBUG_PASSPHRASE", "") || undefined,
+    backgroundStallMs: Math.max(1000, Number(env("GALGAME_BG_STALL_MS", "120000")) || 120000),
     audit: {
       // 审核器必须独立配置：不继承主模型端点/key（否则等于同一家模型自己审自己），
       // 也不写死模型名（代码里不许出现具体模型）。三项齐全才算配好，缺一 → 放行态 + 启动告警。
