@@ -683,6 +683,19 @@ describe("MapService · 草案状态机", () => {
   });
 });
 
+/** 模拟 FileStore：load() 之前 seq() 只会给 0（未载入的内存视图是空的） */
+class UnloadedStore extends EventSourcedStore {
+  private loaded = false;
+  override seq(roomId: string): number {
+    return this.loaded ? super.seq(roomId) : 0;
+  }
+  override async load(roomId: string): Promise<number> {
+    const seq = await super.load(roomId);
+    this.loaded = true;
+    return seq;
+  }
+}
+
 describe("MapService · tick 与并发写入（PR #149 审阅 P1）", () => {
   it("modules.tick 期间的并发写入不会被旧快照覆盖", async () => {
     const f = await setup();
@@ -704,5 +717,34 @@ describe("MapService · tick 与并发写入（PR #149 审阅 P1）", () => {
     expect(res.code).toBe("E_SEQ_GAP");
     const after = await f.store.snapshot(ROOM_ID);
     expect(after.room.scene.locId).toBe("loc_canteen");
+  });
+
+  it("重启后首次直接调用 tick（未经 guardRoom/load）也拿得到权威 seq（PR #149 复审 P3）", async () => {
+    const f = await setup();
+    // 等价于"进程重启"：新 store 实例只有磁盘事件，内存视图还没 load
+    const restarted = new UnloadedStore({ worldId: WORLD.worldId, locId: WORLD.startLocId });
+    restarted.append(ROOM_ID, await f.store.events(ROOM_ID, 0));
+    const arbiter = new DefaultArbiter({ store: restarted, registry: f.registry });
+    const llm = new MockLlm({ responses: [VALID_SCENE] });
+    const turn = new DefaultTurn({ store: restarted, arbiter, registry: f.registry, modules: f.modules, memory: new InMemoryMemory(), llm });
+    const dialogue = new DialogueHost(() => makeCtx({ state: restarted.state(ROOM_ID), registry: f.registry }), [npcScene]);
+    const service = new MapService({
+      store: restarted,
+      turn,
+      arbiter,
+      modules: f.modules,
+      dialogue,
+      llm,
+      registry: f.registry,
+      contentDir: f.contentDir,
+      dataDir: f.dataDir,
+      adminToken: ADMIN_TOKEN,
+    });
+    // 未 load 时 seq() 只会给 0：旧实现既不载入日志、也拿 0 当 expectedSeq（真有写入时首拍即假 E_SEQ_GAP）
+    expect(restarted.seq(ROOM_ID)).toBe(0);
+    const res = await service.tick(ROOM_ID, { advance: false });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(restarted.seq(ROOM_ID)).toBeGreaterThan(0);
   });
 });

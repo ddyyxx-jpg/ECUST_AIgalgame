@@ -320,7 +320,9 @@ export class MapService {
     // 必须在 snapshot **之前**取 seq（PR #149 审阅 P1）：模块 tick / dryRun 期间如果有
     // /turns 提交（例如 scene.set），snapshot 之后取的 seq 已经是新值，expectedSeq 会通过，
     // 于是用旧快照算出的提案把并发写入覆盖掉。先取 seq 再读快照，最坏只是保守失败一次。
-    const seqBefore = this.seqOf(roomId);
+    // seq 必须来自已载入的事件日志：直接调用 tick（不经过 guardRoom）时 store.seq() 只会给 0，
+    // 首个 expectedSeq 就会假冲突。load() 顺带把内存视图准备好，snapshot 随后只读它。
+    const seqBefore = await this.seqOf(roomId);
     const state = await this.deps.store.snapshot(roomId);
     const phase = opts.advance ? nextPhase(state.clock.phase) : state.clock.phase;
     // 出站视角按调用者解析（PR #149 P3）：联机房不能用"1 号玩家"替别人过滤私忆
@@ -725,7 +727,8 @@ export class MapService {
 
     // cause.seq 恒 0 会让私忆 id（mem_<room>_<cause.seq>_<n>）跨夜碰撞，第二夜起被幂等丢弃
     // （PR #147 审阅 P1-1）：用"本批将要落库的下一个 seq"做前缀，夜与夜之间必然不同。
-    const seqBefore = this.seqOf(roomId);
+    // 第一批已经 apply 过，store 已载入；load() 在这里只读内存视图，顺带给出权威 seq。
+    const seqBefore = await this.seqOf(roomId);
     const cause = this.cause(roomId, "dialogue", (seqBefore ?? 0) + 1);
     const applied = await this.deps.arbiter.apply(roomId, [...closable, ...plotProposals], cause, {
       captureState: true,
@@ -772,10 +775,19 @@ export class MapService {
     }));
   }
 
-  /** Store 契约只保证回放 API；FileStore/EventSourcedStore 额外提供 seq()，测试替身可能没有 */
-  private seqOf(roomId: string): number | undefined {
-    const store = this.deps.store as Store & { seq?: (roomId: string) => number };
-    return typeof store.seq === "function" ? store.seq(roomId) : undefined;
+  /**
+   * Store 契约只保证回放 API；生产实现（FileStore / EventSourcedStore）另有 `load()`，
+   * 它返回载入后的权威 seq（未载入时 `seq()` 只会给 0，首拍 tick 会假冲突）。
+   */
+  private async seqOf(roomId: string): Promise<number | undefined> {
+    const store = this.deps.store as Store & { load?: (roomId: string) => Promise<number> };
+    if (typeof store.load !== "function") return undefined;
+    try {
+      return await store.load(roomId);
+    } catch {
+      // 坏档/待核对：后面 snapshot 会抛出同一个错，让它去报
+      return undefined;
+    }
   }
 
   private moduleContext(roomId: string, actorId: string, input: string, state: WorldState): ModuleContext {
