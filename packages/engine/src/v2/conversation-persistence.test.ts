@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 /**
  * issue #90 回归：ConversationSessionV2 跨重启持久化 / 重放不重复 / seq 连续。
  * 快照落独立文件，不新增 EventLog 事件类型 → 契约版本不变（见 conversation-snapshot.ts）。
@@ -22,7 +23,7 @@ import { ConversationHostV2 } from "./conversation.ts";
 import { MessageIndex } from "./message.ts";
 import { loadSnapshot, saveSnapshot, sessionSnapshotPath } from "./conversation-snapshot.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
 const POLICY = `${ROOT}content/v2/conversation-policy.json`;
 const ROOM = "room_chat";

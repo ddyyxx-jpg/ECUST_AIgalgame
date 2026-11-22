@@ -2,6 +2,7 @@
  * issue #130 回归（#131 提示词上下文 / #132 截断 / #133 准入 / #134 场景 / #135 记忆口径 / #137 注入边界）。
  * 只断言结构与字段，不断言文案（AGENTS.md §12）。
  */
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadConversationPolicy, loadModes } from "./delivery.ts";
 import { NpcAgent, buildNpcPrompt, formatDeliveryFor } from "./npc-agent.ts";
@@ -15,7 +16,7 @@ import { createInitialState } from "../projection.ts";
 import type { Delivery } from "../../../../packages/shared/src/contract/v2.ts";
 import type { LlmPort, LlmRequest, LlmResult } from "../../../../packages/shared/src/contract/types.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const modes = await loadModes(`${ROOT}content/v2/utterance-modes.json`);
 const policy = await loadConversationPolicy(`${ROOT}content/v2/conversation-policy.json`);
 

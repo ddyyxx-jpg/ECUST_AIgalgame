@@ -1,0 +1,22 @@
+Zpix（最像素）字体 — 授权说明
+================================
+
+文件：zpix.ttf
+字体名：Zpix / 最像素
+作者：SolidZORO
+上游项目：https://github.com/SolidZORO/zpix-pixel-font
+
+授权情况（以上游仓库说明为准，请在使用前自行复核）：
+- 个人使用免费；
+- 商用（含收费发行、附带广告的发行、企业内部分发等）需要向作者取得授权。
+
+本仓库把它用在 `apps/web/src/pixel-game.css` 的 `@font-face`（`/fonts/zpix.ttf`），
+用于像素风 HUD 与对话文本。
+
+风险提示：
+本项目如果将来要商用、上架应用商店或对外收费，必须二选一——
+  1) 向作者取得商用授权；
+  2) 换成一个可商用授权的像素字体（例如 Ark Pixel / Fusion Pixel，均为 SIL OFL）。
+换字体只需要替换本目录的字体文件并改 `pixel-game.css` 里的 `font-family` / `src`。
+
+如需替换字体文件，请同时更新本说明。

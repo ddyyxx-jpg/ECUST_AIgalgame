@@ -1,10 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { MockLlm } from "../../../llm/src/mock.ts";
 import { loadConversationPolicy, loadModes } from "./delivery.ts";
 import { NpcAgent, buildNpcPrompt } from "./npc-agent.ts";
 import { createInitialState } from "../projection.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const modes = await loadModes(`${ROOT}content/v2/utterance-modes.json`);
 const policy = await loadConversationPolicy(`${ROOT}content/v2/conversation-policy.json`);
 
