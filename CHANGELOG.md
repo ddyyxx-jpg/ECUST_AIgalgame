@@ -17,13 +17,18 @@
 - 场景级自动 travel 原先只在「刚进入点位范围」那一拍评估：回合 streaming 中蹭进范围、回合结束后原地不动，就再也不会自动到达（入口 dwell 却会重新计时，两条路行为不一致）。现在被 busy 挡下的点位记入 `pendingTravelRef`，回合结束后仍站在旁边补发一次；判定抽成 `decideTravel`（`skip` / `defer` / `go`），`shouldAutoTravel` 退化成 `travelIntent && !busy`。
 - 传送失败仍是「离开再靠近才重试」——不会原地每 160ms 重发。
 
+### 复审补充之二（PR #152 定向复审）
+- `decideTravel` 返回 `skip` 时清掉同点位的 `pendingTravelRef`：否则「busy 时 defer 了 A → 手动 travel 到 A → 又走到 B 但仍站在 A 点位旁」会补发一次回 A。
+- 删除被 `decideTravel` 取代的 `shouldAutoTravel`（生产已无调用），`travelIntent` 保留为纯谓词。
+- 复审暴露的共性问题（闭包读 props、副作用逻辑不可测、多出口只修一个、非阻断项不落单、PR 描述落后）已写进 `AGENTS.md` §13。
+
 ### 测试
-- 新增 `apps/web/src/map-autoenter.test.ts`（15 例）：busy 时站满不触发、busy 结束后重新计时并只触发一次、离开范围重新武装、同场景/已 travel 不重复发；`decideTravel` 的 `defer → go` 补发、pending 命中别的点位不发、补发后清零。
+- 新增 `apps/web/src/map-autoenter.test.ts`（14 例）：busy 时站满不触发、busy 结束后重新计时并只触发一次、离开范围重新武装、同场景/已 travel 不重复发；`decideTravel` 的 `defer → go` 补发、pending 命中别的点位不发、补发后清零。
 - 这两段逻辑原先埋在 rAF/interval 闭包里只能靠真人走查，抽成纯函数后可在 node 断言。
 - #151 的其余非阻断项（`ENTER_DIST` 手感、`CandidatePanel` waiting 态、`pathfind`/`interior` 零单测、字体授权、资产体积、CSS 作用域）与本节新增的人工走查清单已落进 #150。
 
 ### 验证
-- `npm run typecheck` 0；`npx vitest run` **125 文件 / 1015 例**全过；`npm run check:contract` 8/8（3.8.0）。
+- `npm run typecheck` 0；`npx vitest run` **125 文件 / 1014 例**全过；`npm run check:contract` 8/8（3.8.0）。
 
 
 ## v0.6.0 — 2026-11-22 像素风 UI + 开放 issue 收口 + dev/v2 群聊（PR #144 / #148 / #149；合入 main `657d6c5`；CONTRACT 3.6.2 → 3.8.0）

@@ -536,6 +536,8 @@ export default function CampusMap({
         // 回合 streaming：不发请求，但记住这个点位；回合结束后仍站在旁边就补一次（与入口 dwell 对齐）
         if (decision === "defer") pendingTravelRef.current = bestScene.id;
         else if (decision === "go") goTravel(bestScene);
+        // 已经不需要再去了（手动 travel 到了 / 已发过）：清掉待补，避免之后站回老点位时"补发"回旧场景
+        else if (pendingTravelRef.current === bestScene.id) pendingTravelRef.current = "";
       }
 
       let bestNpc: { id: string; name: string } | null = null;

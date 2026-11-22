@@ -62,6 +62,7 @@ export function stepEntryDwell(input: EntryDwellInput): EntryDwellStep {
 }
 
 export interface AutoTravelInput {
+  /** 回合 streaming 中：只记待补，不发请求 */
   busy: boolean;
   sceneId: string | null;
   /** 玩家当前所在场景（同一场景不 travel） */
@@ -76,12 +77,6 @@ export function travelIntent(input: Omit<AutoTravelInput, "busy">): boolean {
   if (!sceneId) return false;
   if (sceneId === playerLocId) return false;
   return enteredId !== sceneId;
-}
-
-/** 大地图：走到 built 点位旁自动静默 travel；busy 期间不发请求（P1-1） */
-export function shouldAutoTravel(input: AutoTravelInput): boolean {
-  if (input.busy) return false;
-  return travelIntent(input);
 }
 
 export type TravelDecision = "skip" | "defer" | "go";

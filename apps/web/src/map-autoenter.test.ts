@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideTravel, shouldAutoTravel, stepEntryDwell, stepExitDwell, travelIntent, type DwellState } from "./map-autoenter.ts";
+import { decideTravel, stepEntryDwell, stepExitDwell, travelIntent, type DwellState } from "./map-autoenter.ts";
 
 const NONE: DwellState = { id: "", since: 0, fired: false };
 const DWELL_MS = 1500;
@@ -51,16 +51,12 @@ describe("stepEntryDwell · 大地图靠近入口自动进室内（#151 P1-1）"
   });
 });
 
-describe("shouldAutoTravel · 靠近点位静默 travel（#151 P1-1）", () => {
-  it("busy 期间不发 travel", () => {
-    expect(shouldAutoTravel({ busy: true, sceneId: "loc_lib", playerLocId: "loc_canteen", enteredId: "" })).toBe(false);
-  });
-
+describe("travelIntent · 靠近点位静默 travel（#151 P1-1）", () => {
   it("只在换了场景且没发过时放行", () => {
-    expect(shouldAutoTravel({ busy: false, sceneId: "loc_lib", playerLocId: "loc_canteen", enteredId: "" })).toBe(true);
-    expect(shouldAutoTravel({ busy: false, sceneId: "loc_lib", playerLocId: "loc_lib", enteredId: "" })).toBe(false);
-    expect(shouldAutoTravel({ busy: false, sceneId: "loc_lib", playerLocId: "loc_canteen", enteredId: "loc_lib" })).toBe(false);
-    expect(shouldAutoTravel({ busy: false, sceneId: null, playerLocId: "loc_canteen", enteredId: "" })).toBe(false);
+    expect(travelIntent({ sceneId: "loc_lib", playerLocId: "loc_canteen", enteredId: "" })).toBe(true);
+    expect(travelIntent({ sceneId: "loc_lib", playerLocId: "loc_lib", enteredId: "" })).toBe(false);
+    expect(travelIntent({ sceneId: "loc_lib", playerLocId: "loc_canteen", enteredId: "loc_lib" })).toBe(false);
+    expect(travelIntent({ sceneId: null, playerLocId: "loc_canteen", enteredId: "" })).toBe(false);
   });
 });
 
@@ -119,9 +115,9 @@ describe("decideTravel · 被 busy 挡下的点位在回合结束后补发（PR 
     expect(decideTravel({ ...base, sceneId: null, busy: false, enteredRange: true, pendingId: "" })).toBe("skip");
   });
 
-  it("travelIntent 与 shouldAutoTravel 的分工：后者只是加 busy 门", () => {
+  it("busy 只影响决定，不影响 travelIntent 本身", () => {
     expect(travelIntent(base)).toBe(true);
-    expect(shouldAutoTravel({ ...base, busy: true })).toBe(false);
-    expect(shouldAutoTravel({ ...base, busy: false })).toBe(true);
+    expect(decideTravel({ ...base, busy: true, enteredRange: true, pendingId: "" })).toBe("defer");
+    expect(decideTravel({ ...base, busy: false, enteredRange: true, pendingId: "" })).toBe("go");
   });
 });
