@@ -21,7 +21,7 @@
 - **对话打断 NPC 动作（D22）**：`/conversation` 的 target/interject 或 v1 `/turns` 的 `targetNpcId` 命中正在行动的 NPC 时，服务端把 `sim_lease` 冻结为 `{action:"talk",resume:原租约}`（空闲 NPC 也写 talk，防止对话途中被自动 tick 起新动作）；map tick 跳过 talk，回合结束（含异常）恢复原租约并继续剩余占用；talk 跨 phase 视为过期清空，并带 `expiresAt` 超时兜底（默认 12 tick），避免崩溃后永久冻结。
 
 ### 验证
-- `npm run typecheck` 0 错；`npx vitest run` 132 文件/1064 例全过；`npm run check:contract` 8/8。
+- `npm run typecheck` 0 错；`npx vitest run` 132 文件/1068 例全过；`npm run check:contract` 8/8。
 - 新增 `turn.action-points.test.ts`（含 FileStore 重启探针）、`sim-clock.test.ts`、`sim.policy.test.ts`，map 模块补租约/停留/跨 phase/超时用例，对话路由补数组 target、v1 `/turns` 与恢复失败不冒充已恢复的用例。
 
 ### 已知边界

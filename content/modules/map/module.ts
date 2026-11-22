@@ -255,9 +255,14 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
   const proposals: Proposal[] = [];
   const finalLoc = new Map<string, string>();
 
-  for (const npcId of Object.keys(SCHEDULES.schedules).sort()) {
-    const targetId = SCHEDULES.schedules[npcId]?.[phase];
-    if (!targetId || !liveLoc(ctx, targetId)) continue;
+  // 日程名单 ∪ 仍持有租约的 active NPC：非日程 NPC 一旦被决策/对话写入租约，
+  // 也必须由同一个 tick 消费或清掉，否则会永远占着租约不再被选。
+  const npcIds = new Set<string>(Object.keys(SCHEDULES.schedules));
+  for (const e of liveNpcs(ctx)) {
+    if (parseLease(e.attrs[LEASE])) npcIds.add(e.id);
+  }
+
+  for (const npcId of [...npcIds].sort()) {
     const npc = ctx.query.entity(npcId);
     if (npc?.kind !== "npc" || npc.status !== "active") continue;
     const from = locatedAt(ctx, npcId);
@@ -301,6 +306,13 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
         proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_Y, value: coord.y }, reason: `${npc.name}坐标`, by: BY });
       }
       finalLoc.set(npcId, lease.target);
+      continue;
+    }
+
+    const targetId = SCHEDULES.schedules[npcId]?.[phase];
+    if (!targetId || !liveLoc(ctx, targetId)) {
+      // 非日程 NPC 没有可回的日程：租约消费完/过期后直接清空回到空闲。
+      if (old && old.action !== "talk") proposals.push(leaseProposal(npc.id, null, "无日程，结束租约"));
       continue;
     }
 

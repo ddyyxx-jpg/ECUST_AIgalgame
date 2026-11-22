@@ -249,6 +249,17 @@ describe("tick（NPC 日程）", () => {
     expect(JSON.parse(String(lease.args.value))).toMatchObject({ action: "stay", target: "loc_canteen", remaining: 2, phase: "night" });
   });
 
+  it("非日程 NPC 的租约也会被消费，不会永远占着租约", async () => {
+    const state = buildRoom();
+    state.entities["npc_guest"] = entity("npc_guest", "npc", "访客");
+    state.links.push(located("npc_guest", "loc_library"));
+    state.entities["npc_guest"]!.attrs.sim_lease = JSON.stringify({ action: "move", target: "loc_canteen", remaining: 1, phase: "night" });
+    const out = await mod.tick!(ctxOf(state), "night");
+    expect(movesOf(out, "npc_guest")).toEqual(["loc_canteen"]);
+    const lease = out.filter((p) => p.op === "attr.set" && p.args.entityId === "npc_guest" && p.args.key === "sim_lease").at(-1)!;
+    expect(JSON.parse(String(lease.args.value))).toMatchObject({ action: "stay", target: "loc_canteen", remaining: 2, phase: "night" });
+  });
+
   it("talk 租约冻结动作：不递减、不重排、不移动（玩家对话打断）", async () => {
     const state = buildRoom();
     const npc = state.entities["npc_lin"]!;

@@ -79,6 +79,8 @@ export class SimClock {
               this.warn(`[sim-clock] 房间 ${roomId} 决策失败，本拍继续推进：${e instanceof Error ? e.message : String(e)}`);
             }
           }
+          // 决策可能很慢；玩家回合若在 beforeTick 期间开始，本拍不要再写地图。
+          if (this.deps.isBusy?.(roomId)) continue;
           const ticks = Math.min(this.policy.ticksPerBeat, roomLeft);
           const result = await this.tickRoom(roomId, ticks);
           if (result === undefined) {

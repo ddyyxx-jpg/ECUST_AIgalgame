@@ -101,6 +101,32 @@ describe("/state 原始 attrs 通道（docs/03 §5.2.5）", () => {
   });
 });
 
+describe("/events 的 sim_lease 裁剪（结构断言）", () => {
+  it("attr.changed(key=sim_lease) 整条不出站，普通属性事件保留", async () => {
+    const events = [
+      { v: 1, id: "evt_lease", roomId: ROOM, seq: 1, ts: 1, actorId: "system", type: "attr.changed", payload: { entityId: NPC, key: "sim_lease", from: "", to: '{"action":"talk","resume":"{}"}', clamped: false } },
+      { v: 1, id: "evt_stamina", roomId: ROOM, seq: 2, ts: 1, actorId: "system", type: "attr.changed", payload: { entityId: NPC, key: "stamina", from: 80, to: 79, clamped: false } },
+    ];
+    const app = Fastify();
+    registerRoutes(app, {
+      store: { snapshot: async () => world(), listRooms: async () => [ROOM], events: async () => events },
+      turn: {},
+      map: {},
+      registry: await realRegistry(),
+      settings: { view: () => ({ mode: "offline", baseUrl: "", model: "", persisted: false }), apply: async () => ({ ok: false }), clear: async () => undefined },
+      createRoom: async () => ({ roomId: ROOM, actorId: PLR }),
+      version: "test",
+    } as unknown as AppDeps);
+    await app.ready();
+    const res = await app.inject({ method: "GET", url: `/api/v1/rooms/${ROOM}/events?fromSeq=0` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { events: { type: string; payload: { key?: string } }[] };
+    expect(body.events.map((e) => e.payload.key)).toEqual(["stamina"]);
+    expect(JSON.stringify(body)).not.toContain("sim_lease");
+    await app.close();
+  });
+});
+
 describe("GalleryView 的 self 对他人口径（docs/03 §5.2.5，结构断言）", () => {
   it("真实 registry：self/secret 读数无精确字段，public 读数有精确值", async () => {
     const view = buildGalleryView({ roomId: ROOM, state: world(), registry: await realRegistry(), profiles: [] });
@@ -136,5 +162,24 @@ describe("GalleryView 的 self 对他人口径（docs/03 §5.2.5，结构断言�
       expect(stat).not.toHaveProperty("ratio");
       expect(stat).not.toHaveProperty("text");
     }
+  });
+});
+
+describe("attr.changed 出站裁剪", () => {
+  it("丢弃 sim_lease 的历史事件，普通属性事件保留", async () => {
+    const { projectEventForPlayer } = await import("./outbound-secrets.ts");
+    const base = { v: 1, id: "evt_x", roomId: ROOM, seq: 1, ts: 1, actorId: "system" } as const;
+    const lease = {
+      ...base,
+      type: "attr.changed",
+      payload: { entityId: NPC, key: "sim_lease", from: "", to: "{\"action\":\"talk\"}", clamped: false },
+    };
+    expect(projectEventForPlayer(lease as never)).toBeUndefined();
+    const stamina = {
+      ...base,
+      type: "attr.changed",
+      payload: { entityId: NPC, key: "stamina", from: 100, to: 90, clamped: false },
+    };
+    expect(projectEventForPlayer(stamina as never)).not.toBeUndefined();
   });
 });

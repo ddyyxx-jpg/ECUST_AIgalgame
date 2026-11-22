@@ -13,6 +13,10 @@
 import type { Envelope, Plot, Proposal, WorldState } from "../../../packages/shared/src/index.ts";
 import { projectProposals, stripPlotSecrets } from "../../../packages/engine/src/v2/index.ts";
 
+/** 引擎内部属性：只给 tick/对话/调试用，任何玩家可读出口都必须剥掉。 */
+const ENGINE_INTERNAL_ATTRS = ["sim_lease"] as const;
+const INTERNAL_ATTR_SET = new Set<string>(ENGINE_INTERNAL_ATTRS);
+
 /** 玩家能看到的 memory.written：public 广播，或自己的记忆；其余（private/secret）一律不下发 */
 function visibleMemory(env: Envelope, viewer: string | undefined): boolean {
   const payload = env.payload as { visibility?: unknown; ownerId?: unknown };
@@ -22,6 +26,12 @@ function visibleMemory(env: Envelope, viewer: string | undefined): boolean {
 
 /** 单条事件裁剪：plot 事件剥 GM 字段，私忆按 owner 过滤；其余事件原样返回 */
 export function projectEventForPlayer(env: Envelope, viewer?: string): Envelope | undefined {
+  // attr.changed 的 payload 带 key/to；sim_lease 是内部租约（下一步目标/剩余 tick），
+  // 不能靠 /state 剥了就算完——历史事件和 map.tick 的 events 都走这里。
+  if (env.type === "attr.changed") {
+    const key = (env.payload as { key?: unknown }).key;
+    if (typeof key === "string" && INTERNAL_ATTR_SET.has(key)) return undefined;
+  }
   if (env.type === "plot.upserted") {
     const payload = env.payload as { plot?: Plot };
     if (!payload.plot) return env;
@@ -58,8 +68,6 @@ export function projectEventsForPlayer(events: readonly Envelope[], viewer?: str
   }
   return out;
 }
-
-const ENGINE_INTERNAL_ATTRS = ["sim_lease"] as const;
 
 /** 剥掉引擎内部属性；不改原对象，返回同一引用当且仅当没有可剥字段。 */
 function stripEngineInternalAttrs(state: WorldState): WorldState {

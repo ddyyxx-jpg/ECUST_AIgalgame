@@ -49,6 +49,8 @@ export interface NpcPerception {
 
 interface StoreLike {
   snapshot(roomId: string): Promise<WorldState>;
+  /** 可选：用于 apply 的 expectedSeq，避免慢决策覆盖玩家刚写入的 talk 租约 */
+  load?(roomId: string): Promise<number>;
 }
 
 interface ArbiterLike {
@@ -258,6 +260,10 @@ export class NpcDecisionService {
   }
 
   private async applyLease(roomId: string, state: WorldState, npcId: string, option: DecisionOption, reason?: string): Promise<void> {
+    // 决策可能很慢；写入前重读一次，若玩家已经写了 talk 租约就放弃，避免覆盖对话冻结。
+    const seq = this.deps.store.load ? await this.deps.store.load(roomId) : undefined;
+    const latest = await this.deps.store.snapshot(roomId);
+    if (!emptyLease(latest.entities[npcId]?.attrs[LEASE])) return;
     // 目标不是当前地点时先写 move，下一次 map tick 会沿最短路移动并把租约改成 stay。
     const lease = {
       action: option.locId === this.currentLoc(state, npcId) ? "stay" : "move",
@@ -282,7 +288,10 @@ export class NpcDecisionService {
       by: "tick",
     };
     try {
-      const applied = await this.deps.arbiter.apply(roomId, [proposal], cause, { captureState: false });
+      const applied = await this.deps.arbiter.apply(roomId, [proposal], cause, {
+        captureState: false,
+        ...(seq === undefined ? {} : { expectedSeq: seq }),
+      });
       const rejected = applied.rejected?.[0];
       if (!applied.ok || rejected) {
         this.warn(`[npc-decision] ${npcId} 租约写入被拒：${rejected?.detail ?? applied.error?.message ?? "unknown"}`);

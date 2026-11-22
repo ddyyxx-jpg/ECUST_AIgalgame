@@ -91,6 +91,29 @@ describe("NpcDecisionService", () => {
     expect(JSON.parse(ops[0].args.value)).toMatchObject({ action: "move", target: "loc_b", phase: "morning" });
   });
 
+  it("慢决策期间玩家写了 talk 租约：放弃写入，不覆盖冻结", async () => {
+    let reads = 0;
+    let writes = 0;
+    const service = new NpcDecisionService({
+      store: {
+        load: async () => 7,
+        snapshot: async () => {
+          reads += 1;
+          const s = state();
+          if (reads > 1) s.entities.npc_1!.attrs.sim_lease = JSON.stringify({ action: "talk", target: "loc_a", remaining: 2, phase: "morning" });
+          return s;
+        },
+      },
+      arbiter: { apply: async () => { writes += 1; return { ok: true }; } },
+      llm: {
+        chat: async () => ({ raw: '{"choice":2}', json: { choice: 2 }, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "fake", latencyMs: 1 }),
+      },
+      policy: { enabled: true, maxPerBeat: 1, intervalTicks: 1, hourlyCalls: 10, maxOptions: 4 },
+    });
+    await service.run("room_a");
+    expect(writes).toBe(0);
+  });
+
   it("关闭时不调模型、不写状态", async () => {
     let calls = 0;
     const service = new NpcDecisionService({
