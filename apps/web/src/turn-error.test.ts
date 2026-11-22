@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { explainTurnError, isRetryableTurnError, shouldDropRetryOnMove } from "./turn-error.ts";
+import { explainTurnError, isRetryableTurnError, retrySubmission, shouldDropRetryOnMove } from "./turn-error.ts";
 
 describe("isRetryableTurnError（重试判定）", () => {
   it("服务端 retryable=true/false 优先于错误码集合", () => {
@@ -39,6 +39,20 @@ describe("explainTurnError（可读文案）", () => {
 
   it("完全空的输入也给可读兜底", () => {
     expect(explainTurnError("", "")).toBe("回合失败");
+  });
+});
+
+describe("retrySubmission（v2 blocked 后重试的提交参数，P2-7）", () => {
+  it("普通回合：保留原输入，auto=false", () => {
+    expect(retrySubmission({ text: "再问一次" })).toEqual({ text: "再问一次", auto: false });
+  });
+
+  it("auto 回合被 blocked：即使输入为空也带 auto=true，守卫不会被空文本吃掉", () => {
+    expect(retrySubmission({ text: "", auto: true })).toEqual({ text: "", auto: true });
+  });
+
+  it("没有上一回合时不构造提交", () => {
+    expect(retrySubmission(null)).toBeNull();
   });
 });
 

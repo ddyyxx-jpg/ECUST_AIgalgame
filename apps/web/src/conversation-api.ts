@@ -101,13 +101,11 @@ export function validateUtteranceDraft(
 }
 
 /**
- * 只按「auto 回合 + 服务端机器标记」判定已结算（PR #147 P2-6）。
+ * 只按服务端机器标记判定已结算（PR #147 P2-6 / PR #149 P2-6）。
  *
- * 3.8.0 起 `conversation.notice` 带 `reason?: "autoLimit"`——notice 文案来自
- * `content/v2/conversation-policy.json`（可改语言），文本匹配不可靠，所以优先看 reason。
- * 文本匹配只作为老服务端（无 reason 字段）的兜底，且限定在 auto 路径内。
+ * `conversation.notice` 的文案来自 `content/v2/conversation-policy.json`（可改语言），
+ * 文本匹配永远不可靠；唯一可信的是 `reason === "autoLimit"`，不再保留英文文案兜底死代码。
  */
-const AUTO_LIMIT_NOTICE = "auto rounds exhausted";
 
 export interface ConversationStreamHandlers {
   onEvent?: (ev: ConversationEvent) => void;
@@ -164,12 +162,12 @@ async function postConversationStream(
     ...h,
     onEvent: (ev) => {
       if (ev.type === "conversation.committed" || ev.type === "conversation.error") settled = true;
-      // auto 超限时服务端只回 notice 且 ledger 已记 failed（见 routes.ts 结算分支），
-      // 客户端不能把它当「未确认」重试；blocked notice 文案不同，保持 unconfirmed。
+      // auto 超限时服务端回 notice(reason:"autoLimit") 且 ledger 已记 failed（见 routes.ts），
+      // 不能当「未确认」重试；blocked notice 没有该 reason，保持 unconfirmed 供玩家重试。
       if (
         h.treatAutoLimitNoticeAsSettled === true &&
         ev.type === "conversation.notice" &&
-        (ev.reason === "autoLimit" || ev.text.toLowerCase().includes(AUTO_LIMIT_NOTICE))
+        ev.reason === "autoLimit"
       ) settled = true;
       h.onEvent?.(ev);
     },

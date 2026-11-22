@@ -49,3 +49,17 @@ export function isRetryableTurnError(code: string, retryable?: boolean): boolean
 export function shouldDropRetryOnMove(prevLocId: string, nextLocId: string): boolean {
   return Boolean(prevLocId) && Boolean(nextLocId) && prevLocId !== nextLocId;
 }
+
+/**
+ * v2「重试」提交参数（PR #149 P2-7）：blocked 的 auto 回合没有玩家输入，
+ * 但必须带上 auto 标记才能走真正的自主轮，否则空输入会被 dispatch 的守卫直接吃掉。
+ */
+export interface RetrySubmission {
+  text: string;
+  auto: boolean;
+}
+
+export function retrySubmission(last: { text: string; auto?: boolean } | null): RetrySubmission | null {
+  if (!last) return null;
+  return { text: last.text, auto: last.auto === true };
+}

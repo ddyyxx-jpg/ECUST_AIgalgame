@@ -20,10 +20,10 @@ import MapOverlay from "./MapOverlay.tsx";
 import TitleScreen from "./TitleScreen.tsx";
 import { fetchScenarios } from "./scenarios.ts";
 import type { Scenario } from "./scenarios.ts";
-import { positionFromState, turnSuggestions } from "./suggestions.ts";
+import { candidatePosition, positionFromState, turnSuggestions } from "./suggestions.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
-import { shouldDropRetryOnMove } from "./turn-error.ts";
+import { retrySubmission, shouldDropRetryOnMove } from "./turn-error.ts";
 import { createSessionResync, type SessionResync } from "./session-wiring.ts";
 import { loadRoomThenReset } from "./room-enter.ts";
 import { isTimeoutError } from "./timeout-error.ts";
@@ -99,6 +99,9 @@ export default function App() {
   const convModeRef = useRef<"v1" | "v2">("v1");
   convModeRef.current = convMode;
   const [convLines, setConvLines] = useState<Line[]>([]);
+  /** reset 前的最新会话行：异步 capture 读 ref，避免闭包拿到过期 state */
+  const convLinesRef = useRef<Line[]>([]);
+  convLinesRef.current = convLines;
   /** v2 说话类型清单（GET /conversation/modes）；空数组 = 老流程或取清单失败 */
   const [v2Modes, setV2Modes] = useState<UtteranceModeInfo[]>([]);
   const convView = useRef<ConversationView>(initialConversationView());
@@ -128,7 +131,7 @@ export default function App() {
    */
   const [eventsNotice, setEventsNotice] = useState<string>("");
   /** 最近一次玩家行动：重试时原样再发，不重复打印玩家行 */
-  const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null; utterance?: UtteranceDraft } | null>(null);
+  const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null; utterance?: UtteranceDraft; auto?: boolean } | null>(null);
   /** 断流前已收到的叙事/facts：核对到 committed 后只补历史里的差集，避免重复刷屏 */
   const pendingTurn = useRef<{ clientTurnId: string; narrative: string; facts: string[] } | null>(null);
   /** 全屏地图层：点对话页左上角的小地图打开 */
@@ -411,6 +414,7 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
               currentRoomId: roomIdRef.current,
               currentDraft: inputRef.current,
               currentConvMode: convModeRef.current,
+              currentConvLines: convModeRef.current === "v2" ? convLinesRef.current : null,
             });
             return { snapshot, page, sc, resolvedActorId, local };
           },
@@ -419,6 +423,9 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
             const local = restoreRoomLocalState(entry.local);
             if (local.input !== null) setInput(local.input);
             if (local.convMode !== null) setConvMode(local.convMode);
+            // P2-1：同一房间 resumed 时恢复 v2 会话行；换房/新开局走 resetRoomUi 的清空值。
+            // 历史里没有 v2 回合，恢复这些行才能避免重放开场、playedTurns 归零。
+            if (local.convLines !== null) setConvLines(local.convLines);
             const restored = restoreConversation(entry.page.history, entry.sc, opts.resumed === true, () => ++lineId);
             if (restored.lines.length > 0) {
               setLines(restored.lines);
@@ -708,7 +715,7 @@ const token = scopeRef.current.current();
       // 没有完整 utterance 时退回 #85 别名端点：它只收自然语言 input，目标靠 targetNpcId 传，
       // 所以这里保留「对<展示名>说：」的兜底拼法（服务端会先换回真名再喂模型）。
       const text = targetNpc ? `对${targetNpc.name}说：${base}` : base;
-      lastTurn.current = { text: base, target: targetNpc, ...(utterance ? { utterance } : {}) };
+      lastTurn.current = { text: base, target: targetNpc, ...(utterance ? { utterance } : {}), ...(auto ? { auto: true } : {}) };
       // 乐观行：玩家自己的 utterance 要等引擎投回（SSE 非流式），先本地显示浅色的。
       // 新一轮只在「本次派发之后追加的行」里查重（同一句两轮都发仍要显示）；
       // 重试复用同一 clientTurnId，扫全部已渲染行——真行已在就不挂，避免短暂重复。
@@ -1004,11 +1011,14 @@ await runTurn(
 
   /** 重试上一回合：失败（尤其 E_LLM_FORMAT）时对话区出现按钮，不自动重试 */
   const retry = useCallback(() => {
-    const last = lastTurn.current;
-    if (!last) return;
+    const submission = retrySubmission(lastTurn.current);
+    if (!submission) return;
+    const last = lastTurn.current!;
     if (convMode === "v2") {
-      // v2 按 clientTurnId 去重；未确认回合复用同一 ID，服务端已提交就直接回放结果
-      void dispatchConversationTurn(last.text, last.target, false, unconfirmed?.clientTurnId, last.utterance);
+      // P2-7：blocked auto 回合没有玩家输入，重试必须沿用提交的 auto 标记，
+      // 否则空文本会被 dispatch 守卫吃掉；空输入/并发守卫仍在 dispatch 内统一生效。
+      // v2 按 clientTurnId 去重；未确认回合复用同一 ID，服务端已提交就直接回放结果。
+      void dispatchConversationTurn(submission.text, last.target, false, unconfirmed?.clientTurnId, last.utterance, submission.auto);
       return;
     }
     // NPC 可能在回合之间换场景；重发前用当前状态再核一次在场，
@@ -1154,13 +1164,16 @@ await runTurn(
    * 只用 committed 视图避免乐观行被回退后仍然把 round 推进（PR #147 P2-7）。
    */
   const visibleLines = convMode === "v2" ? [...lines, ...convLines] : lines;
-  const playedTurns = visibleLines.filter((l) => l.kind === "player").length;
+  // v2 只数 convView 里的已提交自身 utterance 行；v1 沿用 history 还原的玩家行。
+  const playedTurns = convMode === "v2"
+    ? convView.current.lines.filter((l) => l.kind === "utterance" && l.speaker === actorId).length
+    : lines.filter((l) => l.kind === "player").length;
   /**
    * 下一步能干什么：开局给剧本建议，之后按当前场景推导（出口 + 在场的人）。
    * v2 的 view.position 几乎为空，改用会话状态里的在场 NPC 投影（不编造出口）；
    * v1 仍用服务端下发的 position，行为不变。
    */
-  const candidatePos = convMode === "v2" && playedTurns > 0 ? (pos ?? positionFromState(state, actorId)) : pos;
+  const candidatePos = convMode === "v2" && playedTurns > 0 ? candidatePosition(pos, state, actorId) : pos;
   const nextActions = playedTurns === 0 ? (scenario?.suggestions ?? []) : turnSuggestions(candidatePos, playedTurns, actorId);
 
   return (

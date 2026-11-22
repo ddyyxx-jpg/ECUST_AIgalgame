@@ -232,46 +232,35 @@ describe("runConversationAuto（#136 自主轮 POST body）", () => {
     expect(body).toEqual({ actorId: "plr", clientTurnId: "ct-auto", auto: true });
   });
 
-  it("P2-6：auto 超限 notice 视为已结算，不触发 onUnconfirmed（服务端 ledger 已 failed）", async () => {
+  it("P2-6：autoLimit reason 的 notice 视为已结算；不再按英文文案兜底", async () => {
     const unconfirmed = vi.fn();
     const events: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        sseResponse([
-          'event: conversation.notice\ndata: {"type":"conversation.notice","text":"auto rounds exhausted; waiting for player"}\n\n',
-        ]),
-      ),
-    );
-    await runConversationAuto("r1", "plr", "ct-auto-limit", {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(sseResponse([
+        'event: conversation.notice\ndata: {"type":"conversation.notice","text":"自主推进已达上限","reason":"autoLimit"}\n\n',
+      ]))
+      .mockResolvedValueOnce(sseResponse([
+        'event: conversation.notice\ndata: {"type":"conversation.notice","text":"auto rounds exhausted; waiting for player"}\n\n',
+      ]));
+    vi.stubGlobal("fetch", fetchMock);
+    await runConversationAuto("r1", "plr", "ct-auto-limit-cn", {
       onEvent: (ev) => events.push(ev.type),
       onUnconfirmed: unconfirmed,
     });
     expect(events).toEqual(["conversation.notice"]);
     expect(unconfirmed).not.toHaveBeenCalled();
+    // 老英文文案但无 reason：服务端新路径不会再这样结算，按未确认处理，绝不放过 blocked 语义
+    await runConversationAuto("r1", "plr", "ct-auto-limit-en", { onUnconfirmed: unconfirmed });
+    expect(unconfirmed).toHaveBeenCalledTimes(1);
   });
 
-  it("P2-6：中文 autoLimit 文案靠 reason 判定结算（不依赖文本）", async () => {
-    const unconfirmed = vi.fn();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        sseResponse([
-          'event: conversation.notice\ndata: {"type":"conversation.notice","text":"自主推进已达上限，等玩家说话","reason":"autoLimit"}\n\n',
-        ]),
-      ),
-    );
-    await runConversationAuto("r1", "plr", "ct-auto-limit-cn", { onUnconfirmed: unconfirmed });
-    expect(unconfirmed).not.toHaveBeenCalled();
-  });
-
-  it("P2-6：审核 blocked notice 仍触发 onUnconfirmed；普通回合的 autoLimit 文案也不吞", async () => {
+  it("P2-6：审核 blocked notice 仍触发 onUnconfirmed；普通回合的 notice 也不吞", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(
         sseResponse(['event: conversation.notice\ndata: {"type":"conversation.notice","text":"内容未通过审核，请修改后重试"}\n\n']),
       )
       .mockResolvedValueOnce(
-        sseResponse(['event: conversation.notice\ndata: {"type":"conversation.notice","text":"auto rounds exhausted; waiting for player"}\n\n']),
+        sseResponse(['event: conversation.notice\ndata: {"type":"conversation.notice","text":"普通提示，没有 autoLimit reason"}\n\n']),
       );
     vi.stubGlobal("fetch", fetchMock);
     const blocked = vi.fn();

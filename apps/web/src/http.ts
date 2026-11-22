@@ -1,4 +1,5 @@
 /** 共享的 HTTP 小工具：统一错误分类与响应拆包（见 docs/06 §4）。 */
+import { TimeoutError } from "./timeout.ts";
 
 export const jsonHeaders = { "content-type": "application/json" };
 
@@ -37,8 +38,6 @@ let visitorId: string | null = null;
 export function setVisitorId(id: string | null): void {
   visitorId = id;
 }
-
-import { TimeoutError } from "./timeout.ts";
 
 type ApiInit = Omit<RequestInit, "headers"> & { headers?: Record<string, string> };
 
