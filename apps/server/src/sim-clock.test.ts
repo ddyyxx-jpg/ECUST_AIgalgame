@@ -112,8 +112,9 @@ describe("SimClock（D22 自动推进）", () => {
     await first;
   });
 
-  it("超时只停止等待：底层未结束时后续拍跳过同一房间", async () => {
+  it("超时只停止等待：底层未结束时后续拍跳过同一房间，且锁不提前释放", async () => {
     let calls = 0;
+    let holds = 0;
     let releaseFirst!: () => void;
     const gate = new Promise<void>((r) => { releaseFirst = r; });
     const clock = new SimClock({
@@ -121,15 +122,18 @@ describe("SimClock（D22 自动推进）", () => {
       map: { tick: async () => { calls += 1; if (calls === 1) await gate; return { ok: true }; } },
       policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 },
       roomTimeoutMs: 5,
+      acquire: () => { holds += 1; return () => { holds -= 1; }; },
       warn: () => {},
     });
     await clock.beat(); // 超时返回，底层仍在跑
     expect(calls).toBe(1);
+    expect(holds).toBe(1); // 超时不能提前放锁
     await clock.beat(); // 同房间仍在 in-flight，必须跳过
     expect(calls).toBe(1);
     releaseFirst();
     await gate;
     await new Promise((r) => setTimeout(r, 0));
+    expect(holds).toBe(0); // 底层 settle 后才释放
     await clock.beat(); // 底层已结束，恢复推进
     expect(calls).toBe(2);
   });

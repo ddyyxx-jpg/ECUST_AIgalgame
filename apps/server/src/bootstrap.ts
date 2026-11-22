@@ -609,9 +609,17 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   });
   simClock.start();
 
-  if (simPolicy && simPolicy.actionCostPerTurn > 0 && !registry.attr(simPolicy.actionAttr)) {
-    // 老存档没有这个属性时 Turn 会跳过扣点；键名拼错也在这里暴露，而不是静默失效。
-    console.warn(`[sim] 行动点属性 ${simPolicy.actionAttr} 未在 registry 声明，行动点将不会生效`);
+  if (simPolicy && simPolicy.actionCostPerTurn > 0) {
+    const actionDef = registry.attr(simPolicy.actionAttr);
+    if (!actionDef) {
+      // 老存档没有这个属性时 Turn 会跳过扣点；键名拼错也在这里暴露，而不是静默失效。
+      console.warn(`[sim] 行动点属性 ${simPolicy.actionAttr} 未在 registry 声明，行动点将不会生效`);
+    } else if (typeof actionDef.max === "number" && actionDef.max !== simPolicy.actionMax) {
+      console.warn(`[sim] 行动点上限不一致：policy.max=${simPolicy.actionMax}，registry.max=${actionDef.max}；回满按 policy 写，可能被 Arbiter clamp`);
+    }
+  }
+  if (simPolicy?.decision?.enabled && !simPolicy.clock?.enabled) {
+    console.warn("[sim] decision.enabled=true 但 clock.enabled=false：NPC 自由活动只由自动时钟触发，当前不会运行");
   }
   if (simPolicy?.clock?.enabled) {
     console.info(`[sim] 自动时钟已启用：每 ${simPolicy.clock.intervalMs}ms 推 ${simPolicy.clock.ticksPerBeat} tick，maxTick=${simPolicy.clock.maxTick}`);

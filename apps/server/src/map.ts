@@ -7,6 +7,7 @@
  * - 草案：委托 DraftEngine（状态机 + AI 生成 + published.json 落盘）。
  */
 import { DEFAULT_LIMITS } from "../../../packages/engine/src/index.ts";
+import { bfs, buildAdjacencyOf } from "../../../content/modules/map/path.ts";
 import type { DefaultArbiter, MemoryIndex } from "../../../packages/engine/src/index.ts";
 import { isErrorCode } from "../../../packages/shared/src/contract/errors.ts";
 import type {
@@ -295,16 +296,14 @@ export class MapService {
       if (installFail) return this.outbound(installFail, roomId, state);
     }
 
-    // 回合前先做相邻校验：不可达就根本不跑 Turn，避免"回合已提交、行动点已扣，
-    // 最后才返回 E_NOT_ADJACENT"的白扣。懒安装可能刚补了锚点边，所以这里重新取快照。
+    // 回合前先做可达性校验：多跳场景由 map 模块 BFS 走过去，不能只允许直接相邻。
+    // 不可达就根本不跑 Turn，避免"回合已提交、行动点已扣，最后才返回 E_NOT_ADJACENT"的白扣。
+    // 与模块共用 path.ts 的同一套 BFS；懒安装可能刚补了锚点边，所以这里重新取快照。
     const checked = await this.deps.store.snapshot(roomId);
     const fromLoc = checked.links.find((l) => l.kind === "located_in" && l.from === actor)?.to
       ?? checked.room.scene.locId;
-    const adjacent = fromLoc === locId || checked.links.some(
-      (l) => l.kind === "located_in"
-        && ((l.from === fromLoc && l.to === locId) || (l.from === locId && l.to === fromLoc)),
-    );
-    if (!adjacent) {
+    const reachable = fromLoc === locId || bfs(buildAdjacencyOf(checked), fromLoc, locId) !== undefined;
+    if (!reachable) {
       return this.outbound(fail("E_NOT_ADJACENT", `从当前位置无法到达 ${locId}`), roomId, checked);
     }
 

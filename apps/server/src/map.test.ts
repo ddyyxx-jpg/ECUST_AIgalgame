@@ -24,6 +24,7 @@ import type {
   ViewPatch,
 } from "@galgame/shared";
 import npcScene from "../../../content/directors/npc.scene.ts";
+import { bfs, buildAdjacencyOf } from "../../../content/modules/map/path.ts";
 import { MapService } from "./map.ts";
 import type { SimPolicy } from "./sim.policy.ts";
 import type { MapDraft } from "./map.data.ts";
@@ -151,7 +152,14 @@ class FakeModules implements Modules {
     const hit = /^map\.travel (\S+)$/.exec(ctx.input);
     if (!hit) return { ok: false, proposals: [], error: { code: "E_TOOL_UNKNOWN", message: "无匹配意图" } };
     if (this.noTravel) return { ok: true, proposals: [] };
-    return { ok: true, proposals: [{ op: "move.to", args: { actorId: ctx.actorId, locId: hit[1] }, reason: "fake map intent" }] };
+    const from = ctx.state.links.find((l) => l.kind === "located_in" && l.from === ctx.actorId)?.to
+      ?? ctx.state.room.scene.locId;
+    const path = bfs(buildAdjacencyOf(ctx.state), from, hit[1]);
+    if (!path) return { ok: true, proposals: [] };
+    return {
+      ok: true,
+      proposals: path.slice(1).map((locId) => ({ op: "move.to", args: { actorId: ctx.actorId, locId }, reason: "fake map intent" })),
+    };
   }
   async callTool(): Promise<ModuleOutcome> {
     return { ok: false, proposals: [], error: { code: "E_TOOL_UNKNOWN", message: "n/a" } };
@@ -356,10 +364,37 @@ describe("MapService · travel", () => {
     expect(res).toMatchObject({ ok: false, code: "E_SCENE_NOT_FOUND" });
   });
 
-  it("不可达场景在回合前拒绝，不扣行动点", async () => {
+  it("多跳场景可达：预检放行，由 map 模块沿 BFS 路径移动", async () => {
     const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
     const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 6 });
-    // loc_annex 锚在食堂；玩家在图书馆，直接去 annex 不可达。
+    // loc_annex 锚在食堂；玩家在图书馆，library→canteen→annex 是两跳，不能按"直接相邻"拒绝。
+    const res = await f.service.travel(ROOM_ID, "plr_self", "loc_annex");
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scene.id).toBe("loc_annex");
+    expect(res.map.player.locId).toBe("loc_annex");
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(5);
+  });
+
+  it("可达性预检：已 live 但无边的场景在回合前拒绝，不扣行动点", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 6 });
+    const cause: Envelope = {
+      v: 1,
+      id: "evt_annex_no_edge",
+      roomId: ROOM_ID,
+      seq: f.store.seq(ROOM_ID) + 1,
+      ts: 1,
+      actorId: "system",
+      type: "room.bootstrap",
+      payload: {},
+    };
+    const seeded = await f.arbiter.apply(
+      ROOM_ID,
+      [{ op: "entity.create", args: { id: "loc_annex", kind: "loc", name: "食堂附属楼", attrs: { coord_x: 600, coord_y: 400 }, origin: "seed", canon: false } }],
+      cause,
+    );
+    expect(seeded.rejected).toEqual([]);
     const res = await f.service.travel(ROOM_ID, "plr_self", "loc_annex");
     expect(res).toMatchObject({ ok: false, code: "E_NOT_ADJACENT" });
     expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);

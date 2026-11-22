@@ -75,6 +75,7 @@ export class SimClock {
           // beforeTick 与 map.tick 都在锁内，玩家回合会在 acquire 处等本拍结束。
           const release = this.deps.acquire?.(roomId);
           if (this.deps.acquire && !release) continue;
+          let handedToTick = false;
           try {
             const state = await this.deps.store.snapshot(roomId);
             const roomLeft = this.policy.maxTick > 0 ? this.policy.maxTick - state.clock.tick : Number.POSITIVE_INFINITY;
@@ -87,14 +88,17 @@ export class SimClock {
               }
             }
             const ticks = Math.min(this.policy.ticksPerBeat, roomLeft);
-            const result = await this.tickRoom(roomId, ticks);
+            const result = await this.tickRoom(roomId, ticks, release ?? undefined);
+            handedToTick = release !== undefined;
             if (result === undefined) {
               this.warn(`[sim-clock] 房间 ${roomId} 推进超时（${this.deps.roomTimeoutMs ?? 30_000}ms），本拍跳过`);
             } else if (!result.ok) {
               this.warn(`[sim-clock] 房间 ${roomId} 推进被拒：${result.code ?? "E_UNKNOWN"} ${result.message ?? ""}`.trim());
             }
           } finally {
-            release?.();
+            // 已交给 tickRoom 的锁由底层 map.tick settle 后释放；超时只结束等待，
+            // 不能在 finally 里提前放锁，否则玩家回合会插进仍在写的 tick。
+            if (!handedToTick) release?.();
           }
         } catch (e) {
           this.warn(`[sim-clock] 房间 ${roomId} 推进失败：${e instanceof Error ? e.message : String(e)}`);
@@ -107,14 +111,19 @@ export class SimClock {
     }
   }
 
-  private async tickRoom(roomId: string, ticks: number): Promise<SimClockTickResult | undefined> {
+  private async tickRoom(
+    roomId: string,
+    ticks: number,
+    releaseLock?: () => void,
+  ): Promise<SimClockTickResult | undefined> {
     const underlying = this.deps.map.tick(roomId, { ticks });
     this.running.set(roomId, underlying);
-    // 底层 Promise 结束后才释放占位；超时只结束等待，不释放，避免下一拍重复排队。
-    const release = () => {
+    // 底层 Promise 结束后才释放占位与房间锁；超时只结束等待，不提前放锁。
+    const settle = () => {
       if (this.running.get(roomId) === underlying) this.running.delete(roomId);
+      releaseLock?.();
     };
-    void underlying.then(release, release);
+    void underlying.then(settle, settle);
 
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<undefined>((resolve) => {

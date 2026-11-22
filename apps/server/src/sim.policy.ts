@@ -107,7 +107,11 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
       ...(clockPolicy ? { clock: clockPolicy } : {}),
       ...(decision ? { decision } : {}),
     };
-  } catch {
+  } catch (e) {
+    // 文件不存在是"功能未配置"，静默关闭；坏 JSON / 读失败要留一条日志，避免配置写错后无线索。
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn(`[sim] 读取 content/sim/policy.json 失败，模拟功能关闭：${e instanceof Error ? e.message : String(e)}`);
+    }
     return undefined;
   }
 }
