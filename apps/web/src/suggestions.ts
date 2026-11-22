@@ -3,7 +3,9 @@
  *
  * 建议只是**输入辅助**，不值得为它每回合多花一次模型调用；新增一条
  * "服务端 → 前端"的建议通道也要动契约版本（docs/03 是唯一名字来源）。
- * 这里只用服务端已经下发的 View 推导：当前场景的去处 + 在场的人。
+ * 这里只用服务端已经下发的 View/WorldState 推导：当前场景的去处 + 在场的人。
+ * 出口只认 state.links 里两端都是活跃 loc 的 located_in（与 map 模块同一套邻接语义），
+ * 在场者只认 kind==="npc" 且 status==="active" 的实体；没有真实数据来源就不写。
  * kind 在生成时按来源写入：出口 → move，在场 NPC → talk；前端渲染层不再猜。
  *
  * 不重复的保证：不是"尽量避开上一轮"，而是**结构性不重叠**——
@@ -25,18 +27,44 @@ type Pos = ViewPatch["position"];
  */
 export function positionFromState(state: WorldState | null, selfId: string): Pos | undefined {
   if (!state) return undefined;
+  const here = state.room.scene.locId;
   const present = state.room.scene.presentIds;
+  const actors = present.flatMap((id) => {
+    const entity = state.entities[id];
+    if (!entity || entity.kind !== "npc" || entity.status !== "active") return [];
+    return [{ actorId: id, name: entity.name, present: true }];
+  });
+  // located_in 双向邻接，且只连"活跃 loc ↔ 活跃 loc"：NPC 自己的 located_in 不是出口。
+  const seen = new Set<string>();
+  const exits: NonNullable<Pos>["exits"] = [];
+  for (const link of state.links) {
+    if (link.kind !== "located_in") continue;
+    const from = state.entities[link.from];
+    const to = state.entities[link.to];
+    const neighbor = from?.id === here && to?.kind === "loc" && to.status === "active"
+      ? to
+      : to?.id === here && from?.kind === "loc" && from.status === "active"
+        ? from
+        : undefined;
+    if (!neighbor || seen.has(neighbor.id)) continue;
+    seen.add(neighbor.id);
+    exits.push({ locId: neighbor.id, name: neighbor.name });
+  }
   return {
-    locId: state.room.scene.locId,
-    name: state.entities[state.room.scene.locId]?.name ?? state.room.scene.locId,
-    actors: present.map((id) => ({
-      actorId: id,
-      name: state.entities[id]?.name ?? "",
-      present: true,
-    })),
-    // v2 没有可靠的出口投影：宁可只给"和在场 NPC 说话"，也不编造不存在的去处。
-    exits: [],
+    locId: here,
+    name: state.entities[here]?.name ?? here,
+    actors,
+    exits,
   };
+}
+
+/**
+ * 选候选用的位置：travel 后 view.position 可能还是 actors/exits 皆空的旧快照
+ * （App.enterScene 只改 locId/name），此时有 state 投影就用 state 的，避免候选整块消失。
+ */
+export function candidatePosition(pos: Pos | undefined, state: WorldState | null, selfId: string): Pos | undefined {
+  if (pos?.actors.length || pos?.exits.length) return pos;
+  return positionFromState(state, selfId) ?? pos;
 }
 
 /** 候选池：当前场景能去的地方 + 能说话的人（自己除外，不在场的人不算） */
