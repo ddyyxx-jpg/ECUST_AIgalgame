@@ -29,6 +29,18 @@ describe("loadSimPolicy", () => {
     });
   });
 
+  it("读取 NPC 自由活动决策；只配 decision 时也返回策略（时钟未开则不跑）", async () => {
+    const dir = await contentWith({
+      decision: { enabled: true, maxPerBeat: 1, intervalTicks: 4, hourlyCalls: 6, maxOptions: 3 },
+    });
+    const policy = await loadSimPolicy(dir);
+    expect(policy).toMatchObject({
+      actionCostPerTurn: 0,
+      decision: { enabled: true, maxPerBeat: 1, intervalTicks: 4, hourlyCalls: 6, maxOptions: 3 },
+    });
+    expect(policy?.clock).toBeUndefined();
+  });
+
   it("只配 clock 时也能启动自动时钟（行动点代价为 0）", async () => {
     const dir = await contentWith({ clock: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 } });
     const policy = await loadSimPolicy(dir);

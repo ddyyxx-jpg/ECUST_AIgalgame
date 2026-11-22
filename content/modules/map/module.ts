@@ -271,13 +271,36 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
       if (old.phase === phase && !expired) continue;
       proposals.push(leaseProposal(npc.id, null, expired ? "对话租约超时作废" : "对话租约跨 phase 作废"));
     }
-    const lease = old && old.action !== "talk" && old.target === targetId && old.phase === phase ? old : null;
+    // 租约优先于日程：NPC 自由活动/对话恢复可能把目标改到非日程地点。
+    // 只要求目标仍是 live loc、phase 未变，避免旧存档/被删场景把 NPC 卡死。
+    const lease = old && old.action !== "talk" && old.phase === phase && liveLoc(ctx, old.target) ? old : null;
     if (lease) {
       if (lease.remaining > 1) {
         proposals.push(leaseProposal(npcId, { ...lease, remaining: lease.remaining - 1 }, `${npc.name}继续${lease.action === "move" ? "赶路" : "停留"}`));
-      } else {
-        proposals.push(leaseProposal(npcId, null, `${npc.name}结束动作`));
+        continue;
       }
+      if (lease.action === "stay") {
+        proposals.push(leaseProposal(npcId, null, `${npc.name}结束停留`));
+        continue;
+      }
+      // move 租约到期：真正执行移动，然后转成 2 tick 的停留占用。
+      if (from === lease.target) {
+        proposals.push(leaseProposal(npcId, { action: "stay", target: lease.target, remaining: 2, phase }, `${npc.name}在${nameOf(ctx, lease.target)}停留`));
+        continue;
+      }
+      const leasePath = bfs(adj, from, lease.target);
+      if (!leasePath || leasePath.length < 2) {
+        proposals.push(leaseProposal(npcId, null, `${npc.name}的目的地不可达，取消动作`));
+        continue;
+      }
+      proposals.push(leaseProposal(npcId, { action: "stay", target: lease.target, remaining: 2, phase }, `${npc.name}到达${nameOf(ctx, lease.target)}`));
+      for (const hop of leasePath.slice(1)) {
+        proposals.push({ op: "move.to", args: { actorId: npcId, locId: hop }, reason: `${npc.name}前往${nameOf(ctx, hop)}`, by: BY });
+        const coord = coordOf(ctx, hop);
+        proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_X, value: coord.x }, reason: `${npc.name}坐标`, by: BY });
+        proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_Y, value: coord.y }, reason: `${npc.name}坐标`, by: BY });
+      }
+      finalLoc.set(npcId, lease.target);
       continue;
     }
 

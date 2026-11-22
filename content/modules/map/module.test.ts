@@ -239,6 +239,16 @@ describe("tick（NPC 日程）", () => {
     expect(movesOf(out, "npc_lin")).toEqual([]);
   });
 
+  it("自由活动租约优先于日程：目标不是日程地点也照走，到达后转停留", async () => {
+    const state = buildRoom();
+    const npc = state.entities["npc_lin"]!;
+    npc.attrs.sim_lease = JSON.stringify({ action: "move", target: "loc_canteen", remaining: 1, phase: "night" });
+    const out = await mod.tick!(ctxOf(state), "night");
+    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen"]);
+    const lease = out.filter((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease").at(-1)!;
+    expect(JSON.parse(String(lease.args.value))).toMatchObject({ action: "stay", target: "loc_canteen", remaining: 2, phase: "night" });
+  });
+
   it("talk 租约冻结动作：不递减、不重排、不移动（玩家对话打断）", async () => {
     const state = buildRoom();
     const npc = state.entities["npc_lin"]!;

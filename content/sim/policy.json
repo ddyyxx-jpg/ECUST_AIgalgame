@@ -13,5 +13,12 @@
     "intervalMs": 60000,
     "ticksPerBeat": 1,
     "maxTick": 24
+  },
+  "decision": {
+    "enabled": false,
+    "maxPerBeat": 2,
+    "intervalTicks": 6,
+    "hourlyCalls": 12,
+    "maxOptions": 4
   }
 }

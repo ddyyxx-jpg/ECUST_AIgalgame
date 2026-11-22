@@ -27,6 +27,8 @@ export interface SimClockDeps {
   map: SimClockMap;
   policy: SimClockPolicy;
   isBusy?: (roomId: string) => boolean;
+  /** 每次 tick 前跑一次（NPC 自由活动决策）；失败只 warn，不阻断本拍时间推进。 */
+  beforeTick?: (roomId: string) => Promise<void>;
   warn?: (message: string) => void;
   /** 单房间推进超时；防止一个卡死的房间拖住整条时钟 */
   roomTimeoutMs?: number;
@@ -70,6 +72,13 @@ export class SimClock {
           const state = await this.deps.store.snapshot(roomId);
           const roomLeft = this.policy.maxTick > 0 ? this.policy.maxTick - state.clock.tick : Number.POSITIVE_INFINITY;
           if (roomLeft <= 0) continue;
+          if (this.deps.beforeTick) {
+            try {
+              await this.deps.beforeTick(roomId);
+            } catch (e) {
+              this.warn(`[sim-clock] 房间 ${roomId} 决策失败，本拍继续推进：${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
           const ticks = Math.min(this.policy.ticksPerBeat, roomLeft);
           const result = await this.tickRoom(roomId, ticks);
           if (result === undefined) {

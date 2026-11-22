@@ -5,6 +5,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import type { NpcDecisionPolicy } from "./npc-decision.ts";
 
 const PolicySchema = z.object({
   schemaVersion: z.number().int().optional(),
@@ -24,6 +25,14 @@ const PolicySchema = z.object({
   }).optional(),
   /** talk 租约最多冻结多少个 tick（防进程崩溃后永久冻结）；默认 12 */
   talkLeaseTicks: z.number().int().min(1).max(1440).optional(),
+  /** NPC 自由活动决策：默认关闭；开启后每拍最多 maxPerBeat 个 NPC 调模型 */
+  decision: z.object({
+    enabled: z.boolean().optional(),
+    maxPerBeat: z.number().int().min(1).max(5).optional(),
+    intervalTicks: z.number().int().min(1).max(48).optional(),
+    hourlyCalls: z.number().int().min(1).max(120).optional(),
+    maxOptions: z.number().int().min(2).max(6).optional(),
+  }).optional(),
 }).passthrough();
 
 export interface SimClockPolicy {
@@ -46,6 +55,8 @@ export interface SimPolicy {
   clock?: SimClockPolicy;
   /** talk 租约超时（tick 数） */
   talkLeaseTicks?: number;
+  /** NPC 自由活动决策；未配置/关闭 = 不跑 */
+  decision?: NpcDecisionPolicy;
 }
 
 /**
@@ -62,8 +73,17 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
     }
     const ap = parsed.data.actionPoints;
     const clock = parsed.data.clock;
-    // 行动点与时钟是两份独立能力：只配 clock 时也必须能启动时钟（此前会整份返回 undefined）。
-    if ((!ap || ap.enabled === false) && !clock?.enabled) return undefined;
+    const decision = parsed.data.decision?.enabled
+      ? {
+          enabled: true,
+          maxPerBeat: parsed.data.decision.maxPerBeat ?? 2,
+          intervalTicks: parsed.data.decision.intervalTicks ?? 6,
+          hourlyCalls: parsed.data.decision.hourlyCalls ?? 12,
+          maxOptions: parsed.data.decision.maxOptions ?? 4,
+        }
+      : undefined;
+    // 行动点/时钟/决策是三份独立能力：只配其一时也必须能启动对应功能。
+    if ((!ap || ap.enabled === false) && !clock?.enabled && !decision) return undefined;
     const clockPolicy = clock
       ? { enabled: clock.enabled ?? false, intervalMs: clock.intervalMs, ticksPerBeat: clock.ticksPerBeat, maxTick: clock.maxTick }
       : undefined;
@@ -75,6 +95,7 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
         refillOnPhaseAdvance: false,
         talkLeaseTicks: parsed.data.talkLeaseTicks ?? 12,
         ...(clockPolicy ? { clock: clockPolicy } : {}),
+        ...(decision ? { decision } : {}),
       };
     }
     return {
@@ -84,6 +105,7 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
       refillOnPhaseAdvance: ap.refillOnPhaseAdvance ?? true,
       talkLeaseTicks: parsed.data.talkLeaseTicks ?? 12,
       ...(clockPolicy ? { clock: clockPolicy } : {}),
+      ...(decision ? { decision } : {}),
     };
   } catch {
     return undefined;

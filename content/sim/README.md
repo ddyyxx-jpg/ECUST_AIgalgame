@@ -50,6 +50,24 @@
 
 自动时钟**只推 tick，不切 phase**（D22）；`advance:true` 仍由玩家/前端显式触发，并回满行动点。`clock` 与 `actionPoints` 相互独立：只想跑时钟时，`actionPoints` 可以整段省略（行动点代价按 0 处理）。
 
+## `decision`（NPC 自由活动：感知投影 + 编号菜单 + 单选决策）
+
+```json
+"decision": { "enabled": false, "maxPerBeat": 2, "intervalTicks": 6, "hourlyCalls": 12, "maxOptions": 4 }
+```
+
+| 字段 | 含义 |
+|---|---|
+| `enabled` | 默认 `false`；开启后自动时钟在每拍 tick 前，对空闲 NPC 调一次 LLM 做单选 |
+| `maxPerBeat` | 每拍最多让几个 NPC 决策（硬上限，防止一开就烧钱） |
+| `intervalTicks` | 每多少个 tick 决策一次；`1` = 每拍 |
+| `hourlyCalls` | 每房间每小时最多调用次数（进程内计数，重启清零） |
+| `maxOptions` | 菜单最多几项（含“留下”），2..6 |
+
+流程：只挑 `sim_lease` 为空、且不与玩家同地点的 NPC → `buildPerception` 只投影地点/时段/在场者姓名 → 菜单只给“留下 + 相邻地点” → 模型只回 `{"choice": 2, "reason": "..."}` → 服务端把选择写成一条 `sim_lease`（去别处写 move、留下写 stay）。移动仍由 map 模块下一次 tick 沿最短路执行，决策层不直接改位置。
+
+模型坏输出/超时/未配置时走确定性 `fallbackChoice`（同房间同 NPC 同时刻同结果），不会让 tick 卡住。默认关闭是因为这是唯一按 NPC 计费的循环；开启前先确认 `hourlyCalls` 和房间规模。
+
 ## NPC 动作租约（WorldX 的核心机制）
 
 `content/registry/attrs.json` 的 `sim_lease` 是 NPC 身上的一条 JSON：
@@ -59,8 +77,10 @@
 ```
 
 - `remaining > 1`：本 tick 只递减，不接新动作；
-- `remaining == 1`：本 tick 结束动作并清空；
+- `remaining == 1` 且 `action:"move"`：本 tick 沿最短路走到 `target`，然后把租约改成 2 tick 的 stay；
+- `remaining == 1` 且 `action:"stay"`：本 tick 结束停留并清空，下一 tick 回到日程；
 - 没有租约：按 `npc-schedules.json` 的当前 phase 目标，决定“走完整条最短路 + 占用 1 tick”或“原地停留 2 tick”；
+- 自由活动/对话恢复写入的租约目标可以**不是当前日程地点**：租约优先于日程，只要目标仍是 live loc；
 - phase 变了：旧租约作废，按新 phase 重排；
 - `action:"talk"`：玩家对话中，map tick 整段跳过（不递减、不接新动作；空闲 NPC 也会写 talk，`resume` 为空）；`resume` 保存原租约（原 lease JSON 字符串），对话回合结束由服务端恢复；talk 跨 phase 视为过期，清空重排；另带 `expiresAt`（绝对 tick），到点即使没换 phase 也作废，兜底进程崩溃/恢复失败。
 - `sim_lease` 的 `visibility:self` + `hidden` 只影响 UI 与图鉴；出站投影还会整体剥掉该属性，`/state`、`/events`、`turn.patch.state` 都不返回租约（含 `resume`）。
@@ -72,7 +92,7 @@
 | 来源 | 机制 | 本仓库落点 | 状态 |
 |---|---|---|---|
 | WorldX | 动作租约（action lease） | `sim_lease` + map 模块 tick；对话打断用 talk 冻结 | 已落地 |
-| WorldX | 感知投影 + 编号行动菜单 + 单选决策 | `content/modules/<sim>/perception.ts`、`menu.ts`，只产 Proposal | 下一步 |
+| WorldX | 感知投影 + 编号行动菜单 + 单选决策 | `apps/server/src/npc-decision.ts`：空闲 NPC → 公开感知 → 编号菜单 → 单选 JSON → `sim_lease` | 已落地（默认关闭，`decision.enabled` 开启） |
 | WorldX | 记忆打分（相关/新近/重要/情绪）与反思回流 | 已有 `packages/engine` 记忆子系统，补决策侧召回 | 复用 |
 | SillyTavern | 角色卡 v2（description/personality/scenario/first_mes/mes_example） | `content/npcs/<id>.json`，由提示词组装器读取；现有 `scenarios/npcs.json` 只保留外观/展示字段 | 下一步 |
 | SillyTavern | World Info / Lorebook（关键词触发条目） | `content/lorebook.json` + `apps/server/src/lorebook.ts`；提示词只注入命中条目，字段 `keys/constant/order` | 已落地（内容层） |

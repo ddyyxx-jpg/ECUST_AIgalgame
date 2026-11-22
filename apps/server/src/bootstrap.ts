@@ -53,6 +53,7 @@ import { MapService } from "./map.ts";
 import { loadSimPolicy } from "./sim.policy.ts";
 import { RoomActivity } from "./room-activity.ts";
 import { SimClock } from "./sim-clock.ts";
+import { NpcDecisionService } from "./npc-decision.ts";
 import { AuthStore } from "./auth-store.ts";
 import { SessionStore } from "./sessions.ts";
 import { AuthService } from "./auth.ts";
@@ -592,12 +593,18 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     ...(simPolicy ? { simPolicy } : {}),
   });
 
+  // NPC 自由活动决策：默认关闭；开启后由自动时钟在每拍 tick 前调用，只写 sim_lease。
+  const npcDecision = simPolicy?.decision
+    ? new NpcDecisionService({ store, arbiter, llm, policy: simPolicy.decision })
+    : undefined;
+
   // 自动时钟默认关闭；enabled 时只推 phase 内 tick，到 maxTick 停下等玩家 advance。
   const simClock = new SimClock({
     store,
     map,
     policy: simPolicy?.clock ?? { enabled: false, intervalMs: 60_000, ticksPerBeat: 1, maxTick: 24 },
     isBusy: (roomId) => background.isBusy(roomId) || roomActivity.isBusy(roomId),
+    ...(npcDecision ? { beforeTick: (roomId: string) => npcDecision.run(roomId) } : {}),
   });
   simClock.start();
 
@@ -607,6 +614,9 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   }
   if (simPolicy?.clock?.enabled) {
     console.info(`[sim] 自动时钟已启用：每 ${simPolicy.clock.intervalMs}ms 推 ${simPolicy.clock.ticksPerBeat} tick，maxTick=${simPolicy.clock.maxTick}`);
+  }
+  if (simPolicy?.decision?.enabled) {
+    console.info(`[sim] NPC 自由活动决策已启用：每拍最多 ${simPolicy.decision.maxPerBeat} 人，每 ${simPolicy.decision.intervalTicks} tick 一次`);
   }
 
   const debugGate = createDebugGate(cfg.debugPassphrase ?? "");

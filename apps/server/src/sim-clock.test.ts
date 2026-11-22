@@ -44,6 +44,22 @@ describe("SimClock（D22 自动推进）", () => {
     expect(calls).toEqual(["r1"]);
   });
 
+  it("beforeTick 在 tick 前执行；决策失败只 warn，不阻断本拍推进", async () => {
+    const order: string[] = [];
+    const clock = new SimClock({
+      store: storeOf({ r1: 0, r2: 0 }),
+      map: { tick: async (roomId) => { order.push(`tick:${roomId}`); return { ok: true }; } },
+      policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 },
+      beforeTick: async (roomId) => {
+        order.push(`decide:${roomId}`);
+        if (roomId === "r2") throw new Error("model down");
+      },
+      warn: () => {},
+    });
+    await clock.beat();
+    expect(order).toEqual(["decide:r1", "tick:r1", "decide:r2", "tick:r2"]);
+  });
+
   it("单飞：上一拍未结束时第二拍直接返回", async () => {
     let calls = 0;
     let release!: () => void;
