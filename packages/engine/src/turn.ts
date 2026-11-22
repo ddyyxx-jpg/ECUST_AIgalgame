@@ -81,6 +81,14 @@ export interface TurnDeps {
   impressions?: Impressions;
   /** 组装提示词；默认实现见 turn.prompt。**必须**接收并使用第 4 个参数 mem（记忆注入） */
   buildPrompt?: (state: WorldState, actorId: ActorId, input: string, mem?: MemoryContext) => string | Promise<string>;
+  /**
+   * 房间级提示词补充（作者注 / 关键词触发的世界设定），在组装提示词时按当前状态与输入选取。
+   * 只影响"给 LLM 看什么"，不产生状态变更；由 server 的内容加载器实现。
+   */
+  worldInfo?: (state: WorldState, actorId: ActorId, input: string) => {
+    authorNote?: string;
+    entries: readonly string[];
+  };
   /** 行动点策略；不注入 = 不扣点、不拦截（测试/旧存档兼容） */
   actionPolicy?: TurnActionPolicy;
 }
@@ -152,6 +160,7 @@ export class DefaultTurn implements Turn {
       reality: this.reality,
       registry: deps.registry,
       ...(deps.buildPrompt ? { buildPrompt: deps.buildPrompt } : {}),
+      ...(deps.worldInfo ? { worldInfo: deps.worldInfo } : {}),
     });
     this.gate = new AuditGate({
       arbiter: deps.arbiter,

@@ -64,6 +64,7 @@ import { loadSceneDescs, offlineNarrative, resolveSceneDesc, sceneByName } from 
 import { LlmSwitch } from "./llm-switch.ts";
 import { LlmSettings, loadPersistedLlmSettings } from "./settings.ts";
 import { appearanceById, loadScenarios } from "./scenarios.ts";
+import { loadLorebook, selectWorldInfo } from "./lorebook.ts";
 import { createDebugGate } from "./debug.ts";
 import type { AppDeps } from "./routes.ts";
 import { isStoreFault } from "./store-fault.ts";
@@ -220,6 +221,8 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
 
   // 开局剧本 / NPC 公开档案是内容数据（content/scenarios/*.json）；缺文件 = 无预设，不影响启动
   const scenarios = await loadScenarios(path.join(contentDir, "scenarios"));
+  // 作者注 / 关键词世界设定：纯内容层，缺文件就整段省略
+  const lorebook = await loadLorebook(contentDir);
 
   // 审核策略（分类/阈值/扣分/删档线）是内容，不是代码；缺文件就用引擎默认值
   const auditPolicy = resolveAuditPolicy(await readOptionalJson(path.join(contentDir, "registry", "policy.json")));
@@ -369,6 +372,20 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions,
     ...(simPolicy && simPolicy.actionCostPerTurn > 0
       ? { actionPolicy: { attrKey: simPolicy.actionAttr, costPerTurn: simPolicy.actionCostPerTurn } }
+      : {}),
+    ...(lorebook
+      ? {
+          worldInfo: (state, _actorId, input) => {
+            const loc = state.entities[state.room.scene.locId]?.name ?? "";
+            const present = state.room.scene.presentIds
+              .map((id) => state.entities[id]?.name)
+              .filter((name): name is string => typeof name === "string");
+            return {
+              ...(lorebook.authorNote ? { authorNote: lorebook.authorNote } : {}),
+              entries: selectWorldInfo(lorebook, [input, loc, ...present].join("\n")),
+            };
+          },
+        }
       : {}),
   });
   const turn = withTurnRecording(rawTurn, { history, saves, store, now });

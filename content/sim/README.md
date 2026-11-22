@@ -75,8 +75,8 @@
 | WorldX | 感知投影 + 编号行动菜单 + 单选决策 | `content/modules/<sim>/perception.ts`、`menu.ts`，只产 Proposal | 下一步 |
 | WorldX | 记忆打分（相关/新近/重要/情绪）与反思回流 | 已有 `packages/engine` 记忆子系统，补决策侧召回 | 复用 |
 | SillyTavern | 角色卡 v2（description/personality/scenario/first_mes/mes_example） | `content/npcs/<id>.json`，由提示词组装器读取；现有 `scenarios/npcs.json` 只保留外观/展示字段 | 下一步 |
-| SillyTavern | World Info / Lorebook（关键词触发条目） | `content/lorebook/*.json` + 提示词组装器的关键词扫描；条目带 `keys/constant/order/depth` | 下一步 |
-| SillyTavern | Author's Note（作者注，稳定语气/当前剧情提示） | 每房间一张 `authorNote`，进系统提示词前缀并单独版本化 | 下一步 |
+| SillyTavern | World Info / Lorebook（关键词触发条目） | `content/lorebook.json` + `apps/server/src/lorebook.ts`；提示词只注入命中条目，字段 `keys/constant/order` | 已落地（内容层） |
+| SillyTavern | Author's Note（作者注，稳定语气/当前剧情提示） | `content/lorebook.json` 的全局 `authorNote`，进叙事提示词稳定前缀 | 已落地（内容层） |
 | SillyTavern | 群聊 / 多角色发言顺序 | 已有 dev/v2 群聊与 `conversation.step`，补“谁先说”的可配置策略 | 复用 |
 | SillyTavern | 分支/重开（swipe、checkpoint） | 已有 saves/slots；补“从某回合分叉”的 UI 入口 | 复用 |
 | SillyTavern | Quick Replies / 候选动作 | 已有 CandidatePanel；把行动菜单作为候选来源 | 复用 |
