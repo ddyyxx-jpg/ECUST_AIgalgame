@@ -58,6 +58,8 @@ const BY = "mod.map";
 // 属性键来自 docs/06 §1：坐标复用 registry 的 coord_x / coord_y，不在代码里发明新字段。
 const COORD_X = "coord_x";
 const COORD_Y = "coord_y";
+/** NPC 动作租约：JSON 字符串，visibility=self；键来自 registry（content/registry/attrs.json） */
+const LEASE = "sim_lease";
 const PHASES: readonly Phase[] = ["morning", "noon", "afternoon", "evening", "night"];
 
 /** 带中文动词前缀的输入：去/到/往/回/进/前往…，用于从自然语言里剥出地点词 */
@@ -196,6 +198,45 @@ function mapView(ctx: ModuleContext): ViewPatch {
   };
 }
 
+interface Lease {
+  action: "move" | "stay";
+  target: string;
+  /** 还需要占用几个 tick（含下一次 tick 检查）；0 表示本次结束 */
+  remaining: number;
+  phase: Phase;
+}
+
+/** 坏 JSON / 旧格式一律当空闲，不让一条脏租约卡死 NPC 的日程 */
+function parseLease(raw: unknown): Lease | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  try {
+    const v = JSON.parse(raw) as Partial<Lease>;
+    if ((v.action !== "move" && v.action !== "stay") || typeof v.target !== "string") return null;
+    if (typeof v.remaining !== "number" || !Number.isInteger(v.remaining) || v.remaining < 0) return null;
+    if (typeof v.phase !== "string" || !PHASES.includes(v.phase as Phase)) return null;
+    return { action: v.action, target: v.target, remaining: v.remaining, phase: v.phase as Phase };
+  } catch {
+    return null;
+  }
+}
+
+function leaseProposal(npcId: string, lease: Lease | null, reason: string): Proposal {
+  return {
+    op: "attr.set",
+    args: { entityId: npcId, key: LEASE, value: lease === null ? "" : JSON.stringify(lease) },
+    reason,
+    by: BY,
+  };
+}
+
+/**
+ * 日程 + 动作租约（D22 / WorldX 的 action lease）：
+ * - 有租约且未到期：只递减/清空，不接新动作（NPC 正在占用时间）；
+ * - 到达目标：停留 2 个 tick，再重新排日程；
+ * - 需要移动：一次走完整条最短路，随后占用 1 个 tick 结算；
+ * - phase 变了：旧租约作废，按新 phase 重排。
+ * 一个 tick 只处理一次，保证"自动推进不切 phase"时 NPC 也不会每 tick 重新决策。
+ */
 function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
   if (!PHASES.includes(phase)) return [];
   const adj = buildAdjacency(ctx);
@@ -208,9 +249,28 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
     const npc = ctx.query.entity(npcId);
     if (npc?.kind !== "npc" || npc.status !== "active") continue;
     const from = locatedAt(ctx, npcId);
-    if (!from || from === targetId) continue;
+    if (!from) continue;
+
+    const old = parseLease(npc.attrs[LEASE]);
+    const lease = old && old.target === targetId && old.phase === phase ? old : null;
+    if (lease) {
+      if (lease.remaining > 1) {
+        proposals.push(leaseProposal(npcId, { ...lease, remaining: lease.remaining - 1 }, `${npc.name}继续${lease.action === "move" ? "赶路" : "停留"}`));
+      } else {
+        proposals.push(leaseProposal(npcId, null, `${npc.name}结束动作`));
+      }
+      continue;
+    }
+
+    if (from === targetId) {
+      proposals.push(leaseProposal(npcId, { action: "stay", target: targetId, remaining: 2, phase }, `${npc.name}在${nameOf(ctx, targetId)}停留`));
+      continue;
+    }
+
     const path = bfs(adj, from, targetId);
     if (!path || path.length < 2) continue; // 无路径：跳过该 NPC，不产错误
+    // 先写租约，再写移动：末尾两条仍应是坐标，方便既有测试与前端按"最后一跳"定位
+    proposals.push(leaseProposal(npcId, { action: "move", target: targetId, remaining: 1, phase }, `${npc.name}前往${nameOf(ctx, targetId)}`));
     for (const hop of path.slice(1)) {
       proposals.push({ op: "move.to", args: { actorId: npcId, locId: hop }, reason: `${npc.name}前往${nameOf(ctx, hop)}`, by: BY });
       const coord = coordOf(ctx, hop);
@@ -219,7 +279,7 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
     }
     finalLoc.set(npcId, targetId);
   }
-  if (proposals.length === 0) return [];
+  if (proposals.length === 0 || finalLoc.size === 0) return proposals;
 
   // 镜头保护：solo 房间的 actor.moved 会让镜头跟着每个 NPC 跑，末尾必须放回玩家所在地
   const playerLoc = ctx.state.room.scene.locId;

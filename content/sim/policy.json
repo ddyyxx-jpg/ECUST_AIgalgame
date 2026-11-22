@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "actionPoints": {
+    "enabled": true,
+    "attr": "action_points",
+    "perTurn": 1,
+    "max": 6,
+    "refillOnPhaseAdvance": true
+  },
+  "clock": {
+    "enabled": false,
+    "intervalMs": 60000,
+    "ticksPerBeat": 1,
+    "maxTick": 24
+  }
+}

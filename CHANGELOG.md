@@ -5,6 +5,26 @@
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）→ `v0.6.0` dev/v2 群聊 + 开放 issue 收口 + 像素 UI（PR #144 / #149 / #148，CONTRACT 3.6.2 → 3.8.0）。
 
 
+## 未发布 — sim-v2 第一步：行动点 + NPC 动作租约 + 自动时钟
+
+> 时间骨架，不改 op/契约（CONTRACT 3.8.0 不变）；所有状态变更仍走 Proposal → Arbiter。
+
+### 新增
+- **行动点**：`content/registry/attrs.json` 新增 `action_points`（plr，0..6，默认 6）。`TurnDeps.actionPolicy` 可按内容配置启用；不足时 `E_PRECONDITION` 且不调模型，扣点 `attr.delta{mustKeep:true}` 与回合提案同批 atomic，失败不扣。参数在 `content/sim/policy.json`。
+- **NPC 动作租约**：`sim_lease`（npc，JSON 字符串，visibility self）。map 模块 tick 按“移动占 1 tick / 原地停留 2 tick / 租约未到期不接新动作 / phase 变化重排”维护，自动 tick 不会让 NPC 每拍重新决策。
+- **自动时钟**：`apps/server/src/sim-clock.ts`，默认关闭；只推 `time.advance{ticks}`，到 `maxTick` 停下等玩家 `advance`，不替玩家切 phase。
+- **推进时段回满**：`advance:true` 时在同一批里把玩家行动点回满。
+
+### 验证
+- `npm run typecheck` 0 错；`npx vitest run` 128 文件/1042 例全过；`npm run check:contract` 8/8。
+- 新增 `turn.action-points.test.ts`（含 FileStore 重启探针）、`sim-clock.test.ts`、`sim.policy.test.ts`，map 模块补租约/停留/跨 phase 用例。
+
+### 已知边界
+- `travel` 不可达：map 模块按既有语义返回 `ok:true + 空 proposals`，回合仍会提交并扣 1 点；请求层随后复核位置才返回 `E_NOT_ADJACENT`（不额外扣点）。下一版在扣点前做邻接预检或退款。
+- 旧存档没有 `action_points` 时不强制扣点；自动时钟默认关闭，需在 `content/sim/policy.json` 显式开启。
+- 自动时钟与玩家回合的并发门禁尚未接（回合进行中可能推一次 tick）；放在下一版用房间活动锁收口。
+- 单房间 tick 超过 30s 时只停止等待、不取消底层执行；在该 Promise settle 前，同房间的后续拍会跳过，避免重复排队。
+
 ## 未发布 — #151 复审两条 P1（`busy` 时自动进出室内）
 
 > 仅前端表现层：不改契约、不新增 op、不动服务端；`CONTRACT_VERSION` 3.8.0 不变。

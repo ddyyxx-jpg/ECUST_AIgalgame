@@ -40,6 +40,7 @@ import { DraftEngine } from "./map.drafts.ts";
 import type { DraftListResult, DraftResult, PublishResult } from "./map.drafts.ts";
 import { displayNameOf, knowsNameOf, maskNamesDeep, maskTurnEvents, unknownPlaceholders } from "./view-names.ts";
 import { projectEventsForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
+import type { SimPolicy } from "./sim.policy.ts";
 
 // ---------------------------------------------------------------- 对外视图（docs/06 §4）
 export interface MapViewLink {
@@ -117,7 +118,28 @@ export interface MapServiceDeps {
   adminToken: string;
   /** npcId → 外貌描述（content/scenarios/npcs.json 的 appearance）：未认识时用作占位名 */
   appearance?: Map<string, string>;
+  /** 行动点策略；不传 = 推进时段不回满（测试/旧部署） */
+  simPolicy?: SimPolicy;
   now?: () => number;
+}
+
+/** 推进时段时把玩家行动点回满；只处理已经有该属性的实体（老存档不凭空造属性）。 */
+function refillActionPoints(state: WorldState, policy: SimPolicy, actorId?: string): Proposal[] {
+  if (policy.actionMax <= 0) return [];
+  const ops: Proposal[] = [];
+  for (const entity of Object.values(state.entities)) {
+    if (entity.kind !== "plr" || entity.status !== "active") continue;
+    // actorId 缺失 = 内部/旧调用：回满所有 active plr（正常路由在已登录时必传 viewer）。
+    if (actorId && entity.id !== actorId) continue;
+    const value = entity.attrs[policy.actionAttr];
+    if (typeof value !== "number" || value >= policy.actionMax) continue;
+    ops.push({
+      op: "attr.set",
+      args: { entityId: entity.id, key: policy.actionAttr, value: policy.actionMax },
+      reason: "推进时段，行动点回满",
+    });
+  }
+  return ops;
 }
 
 const PHASES: readonly Phase[] = ["morning", "noon", "afternoon", "evening", "night"];
@@ -303,7 +325,15 @@ export class MapService {
    */
   private readonly tickQueues = new Map<string, Promise<unknown>>();
 
-  async tick(roomId: string, opts: { advance?: boolean; viewer?: string } = {}): Promise<TickResult> {
+  async tick(roomId: string, opts: { advance?: boolean; ticks?: number; viewer?: string } = {}): Promise<TickResult> {
+    // ticks 是自动时钟的内部参数：HTTP schema 只有 advance，内部调用也不允许两者同给。
+    if (opts.advance && opts.ticks !== undefined) {
+      return fail("E_SCHEMA_INVALID", "advance 与 ticks 不能同时使用");
+    }
+    if (opts.ticks !== undefined && (!Number.isInteger(opts.ticks) || opts.ticks < 1 || opts.ticks > 8)) {
+      // 与 shared/zod 的 time.advance.ticks 上限保持一致；更长的推进拆成多拍。
+      return fail("E_SCHEMA_INVALID", "ticks 必须是 1..8 的整数");
+    }
     const prev = this.tickQueues.get(roomId) ?? Promise.resolve();
     const next = prev.then(
       () => this.tickInner(roomId, opts),
@@ -314,7 +344,7 @@ export class MapService {
     return next;
   }
 
-  private async tickInner(roomId: string, opts: { advance?: boolean; viewer?: string } = {}): Promise<TickResult> {
+  private async tickInner(roomId: string, opts: { advance?: boolean; ticks?: number; viewer?: string } = {}): Promise<TickResult> {
     const events: Envelope[] = [];
     let stateAfter: WorldState | undefined;
     // 必须在 snapshot **之前**取 seq（PR #149 审阅 P1）：模块 tick / dryRun 期间如果有
@@ -341,9 +371,25 @@ export class MapService {
     // issue #38：time.advance 与模块提案必须合成**同一批**提交。旧实现先单独提交时间推进，
     // 后阶段失败时时段已经前进且无法撤销（响应 ok:false 但世界变了，重试还会多推一次）。
     // 注意：模块拿到的 ctx.clock 是推进前状态，目标 phase 以 `tick(ctx, phase)` 的参数为准。
-    const batch: Proposal[] = opts.advance
-      ? [{ op: "time.advance", args: { phase }, reason: "地图 tick 推进时段", by: "tick" }, ...proposals]
-      : proposals;
+    // 推进时段 = 玩家休息：把行动点回满。和 time.advance、模块提案同批 atomic，
+    // 避免"时间进了下一段、行动点没回"的半成功状态。
+    const refill = opts.advance && this.deps.simPolicy?.refillOnPhaseAdvance
+      ? refillActionPoints(state, this.deps.simPolicy, opts.viewer)
+      : [];
+    // 两种时间推进共用一条通道：
+    // - advance=true：切到下一 phase（同时回满行动点）；
+    // - ticks=N：只在 phase 内走 N 个 tick，不换 phase（D22 的"自动推进不切阶段"）。
+    // 两者互斥；tick() 入口已拒绝同时给（ticks 只供自动时钟内部使用）。
+    const timeProposal: Proposal | undefined = opts.advance
+      ? { op: "time.advance", args: { phase }, reason: "地图 tick 推进时段", by: "tick" }
+      : opts.ticks !== undefined
+        ? { op: "time.advance", args: { ticks: opts.ticks }, reason: "地图 tick 推进时间刻度", by: "tick" }
+        : undefined;
+    const batch: Proposal[] = [
+      ...(timeProposal ? [timeProposal] : []),
+      ...refill,
+      ...proposals,
+    ];
     if (batch.length > 0) {
       // 先整批 dryRun：任何一条被拒就整批不落库，避免 NPC 半移动、坐标与镜头不一致。
       // 注意 dryRun 的信封来源是 `arbiter.dryRun`，3.2.1 的 `time.advance` 只认

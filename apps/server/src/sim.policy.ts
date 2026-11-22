@@ -1,0 +1,85 @@
+/**
+ * 模拟策略：把"每回合扣多少行动点、推进时段是否回满"这类可调参数放在内容层，
+ * 而不是写死在引擎/服务端代码里（I2/I3）。文件缺失 = 功能关闭，测试与旧部署不受影响。
+ */
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { z } from "zod";
+
+const PolicySchema = z.object({
+  schemaVersion: z.number().int().optional(),
+  actionPoints: z.object({
+    enabled: z.boolean().optional(),
+    attr: z.string().min(1),
+    perTurn: z.number().int().min(0).max(6),
+    max: z.number().int().min(0).max(99),
+    refillOnPhaseAdvance: z.boolean().optional(),
+  }).optional(),
+  clock: z.object({
+    enabled: z.boolean().optional(),
+    intervalMs: z.number().int().min(1_000).max(3_600_000),
+    ticksPerBeat: z.number().int().min(1).max(8),
+    /** 0 = 不设上限；>0 时 tick 到达上限就停下等玩家推进时段（D22：自动推进不切 phase） */
+    maxTick: z.number().int().min(0).max(24),
+  }).optional(),
+}).passthrough();
+
+export interface SimClockPolicy {
+  enabled: boolean;
+  intervalMs: number;
+  ticksPerBeat: number;
+  maxTick: number;
+}
+
+export interface SimPolicy {
+  /** 行动点属性键（必须在 registry 声明） */
+  actionAttr: string;
+  /** 每个普通回合扣多少点 */
+  actionCostPerTurn: number;
+  /** 行动点上限；推进时段回满到这个值 */
+  actionMax: number;
+  /** 推进时段时是否把玩家的行动点回满 */
+  refillOnPhaseAdvance: boolean;
+  /** 自动时钟；未配置 = 不启动 */
+  clock?: SimClockPolicy;
+}
+
+/**
+ * 读 `<contentDir>/sim/policy.json`。缺文件、坏 JSON、缺 actionPoints 都返回 undefined
+ * （= 不启用），避免一个手滑的配置文件把整个服务卡死。
+ */
+export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | undefined> {
+  try {
+    const raw = JSON.parse(await readFile(path.join(contentDir, "sim", "policy.json"), "utf8")) as unknown;
+    const parsed = PolicySchema.safeParse(raw);
+    if (!parsed.success) {
+      console.warn("[sim] content/sim/policy.json 校验失败，行动点功能关闭");
+      return undefined;
+    }
+    const ap = parsed.data.actionPoints;
+    const clock = parsed.data.clock;
+    // 行动点与时钟是两份独立能力：只配 clock 时也必须能启动时钟（此前会整份返回 undefined）。
+    if ((!ap || ap.enabled === false) && !clock?.enabled) return undefined;
+    const clockPolicy = clock
+      ? { enabled: clock.enabled ?? false, intervalMs: clock.intervalMs, ticksPerBeat: clock.ticksPerBeat, maxTick: clock.maxTick }
+      : undefined;
+    if (!ap || ap.enabled === false) {
+      return {
+        actionAttr: "action_points",
+        actionCostPerTurn: 0,
+        actionMax: 0,
+        refillOnPhaseAdvance: false,
+        ...(clockPolicy ? { clock: clockPolicy } : {}),
+      };
+    }
+    return {
+      actionAttr: ap.attr,
+      actionCostPerTurn: ap.perTurn,
+      actionMax: ap.max,
+      refillOnPhaseAdvance: ap.refillOnPhaseAdvance ?? true,
+      ...(clockPolicy ? { clock: clockPolicy } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}

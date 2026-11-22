@@ -25,6 +25,7 @@ import type {
 } from "@galgame/shared";
 import npcScene from "../../../content/directors/npc.scene.ts";
 import { MapService } from "./map.ts";
+import type { SimPolicy } from "./sim.policy.ts";
 import type { MapDraft } from "./map.data.ts";
 
 const ADMIN_TOKEN = "dev-admin";
@@ -33,6 +34,7 @@ const ROOM_ID = "room_test";
 const COORD_ATTRS: AttrDef[] = [
   { key: "coord_x", type: "number", scope: ["loc", "npc", "plr"], min: 0, max: 2000, default: 0, visibility: "public", display: { label: "X", hidden: true } },
   { key: "coord_y", type: "number", scope: ["loc", "npc", "plr"], min: 0, max: 2000, default: 0, visibility: "public", display: { label: "Y", hidden: true } },
+  { key: "action_points", type: "number", scope: ["plr"], min: 0, max: 6, default: 6, visibility: "public", display: { label: "行动点" } },
 ];
 
 const WORLD = {
@@ -207,6 +209,7 @@ class FlakyStore extends EventSourcedStore {
 async function setup(
   llm = new MockLlm({ responses: [VALID_SCENE] }),
   store: EventSourcedStore = new EventSourcedStore({ worldId: WORLD.worldId, locId: WORLD.startLocId }),
+  opts: { simPolicy?: SimPolicy; actionPoints?: number; secondPlayer?: { id: string; actionPoints: number } } = {},
 ): Promise<Fixture> {
   const root = tempDir("galgame-map-test-");
   const contentDir = path.join(root, "content");
@@ -224,6 +227,13 @@ async function setup(
     entity("npc_lin", "npc", "林夏", true),
     entity("plr_self", "plr", "你", false),
   ];
+  const player = seeded.find((e) => e.id === "plr_self");
+  if (player && opts.actionPoints !== undefined) player.attrs.action_points = opts.actionPoints;
+  if (opts.secondPlayer) {
+    const second = entity(opts.secondPlayer.id, "plr", "第二位玩家", false);
+    second.attrs.action_points = opts.secondPlayer.actionPoints;
+    seeded.push(second);
+  }
   store.append(
     ROOM_ID,
     seeded.map((e, i) => ({
@@ -270,6 +280,7 @@ async function setup(
     contentDir,
     dataDir,
     adminToken: ADMIN_TOKEN,
+    ...(opts.simPolicy ? { simPolicy: opts.simPolicy } : {}),
   });
   return { service, store, arbiter, turn, dialogue, registry, modules, llm, contentDir, dataDir };
 }
@@ -451,6 +462,63 @@ describe("MapService · tick", () => {
     expect(f.store.state(ROOM_ID).clock.phase).toBe("noon");
     expect(f.modules.tickedPhases).toEqual(["noon"]);
     expect(res.moved).toEqual([{ actorId: "npc_lin", name: "林夏", from: "loc_library", to: "loc_canteen" }]);
+  });
+
+  it("ticks:3 只在 phase 内走刻度，不换阶段（D22）", async () => {
+    const f = await setup();
+    const res = await f.service.tick(ROOM_ID, { ticks: 3 });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).clock).toMatchObject({ phase: "morning", tick: 3 });
+    expect(f.modules.tickedPhases).toEqual(["morning"]);
+  });
+
+  it("advance:true 把玩家行动点回满（与 time.advance 同批）", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 0 });
+    const res = await f.service.tick(ROOM_ID, { advance: true });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
+  });
+
+  it("多人房只回满触发 advance 的玩家（viewer）", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, {
+      simPolicy: policy,
+      actionPoints: 0,
+      secondPlayer: { id: "plr_two", actionPoints: 3 },
+    });
+    const res = await f.service.tick(ROOM_ID, { advance: true, viewer: "plr_self" });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
+    expect(f.store.state(ROOM_ID).entities.plr_two?.attrs.action_points).toBe(3);
+  });
+
+  it("未传 viewer（内部/旧调用）时回满所有 active 玩家", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, {
+      simPolicy: policy,
+      actionPoints: 0,
+      secondPlayer: { id: "plr_two", actionPoints: 2 },
+    });
+    const res = await f.service.tick(ROOM_ID, { advance: true });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
+    expect(f.store.state(ROOM_ID).entities.plr_two?.attrs.action_points).toBe(6);
+  });
+
+  it("advance 与 ticks 同给 / ticks 越界 → E_SCHEMA_INVALID，不推进时间", async () => {
+    const f = await setup();
+    expect(await f.service.tick(ROOM_ID, { advance: true, ticks: 3 })).toMatchObject({ ok: false, code: "E_SCHEMA_INVALID" });
+    expect(await f.service.tick(ROOM_ID, { ticks: 25 })).toMatchObject({ ok: false, code: "E_SCHEMA_INVALID" });
+    expect(f.store.state(ROOM_ID).clock).toMatchObject({ phase: "morning", tick: 0 });
+  });
+
+  it("advance:false 不回满行动点", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 2 });
+    const res = await f.service.tick(ROOM_ID, { advance: false });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(2);
   });
 
   it("advance:false 只按当前 phase 重排", async () => {

@@ -50,6 +50,8 @@ import { SaveIndex } from "./saves.ts";
 import { TurnHistory, withTurnRecording } from "./turn-history.ts";
 import { LlmAudit } from "./audit.ts";
 import { MapService } from "./map.ts";
+import { loadSimPolicy } from "./sim.policy.ts";
+import { SimClock } from "./sim-clock.ts";
 import { AuthStore } from "./auth-store.ts";
 import { SessionStore } from "./sessions.ts";
 import { AuthService } from "./auth.ts";
@@ -119,6 +121,8 @@ export type App = AppDeps & {
   jobLedger: JobLedger;
   /** 每房间单飞 + 看门狗的后台调度器（PR-2） */
   background: BackgroundCycle;
+  /** 自动时钟（D22）：默认关闭；只推 phase 内 tick，不切 phase */
+  simClock: SimClock;
   /** 本次启动的对账结果（PR-2）：inflight→failed 计数 + prepared backlog 计数，供运维/测试断言 */
   jobReconcile: JobReconcileSummary;
   /** 后台调度运行期遥测（PR #125 复审可观测性）：终态投影写失败/看门狗触发次数，进程内累计 */
@@ -218,6 +222,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   const auditPolicy = resolveAuditPolicy(await readOptionalJson(path.join(contentDir, "registry", "policy.json")));
   // 现实锚定：识别"我全知全能"这类诱导性发言并修饰回世界内（缺文件则只带基础世界规则）
   const reality = resolveRealityPolicy(await readOptionalJson(path.join(contentDir, "registry", "reality.json")));
+  const simPolicy = await loadSimPolicy(contentDir);
 
   // 初始状态必须有真实地点：world.json 可以省略 startLocId，此时用第一个地点，
   // 否则 createInitialState 会退回占位值 loc_campus_gate，房间一出生就"在不存在的地方"
@@ -357,7 +362,12 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   if (auth.required && !cfg.publicOrigin) {
     console.warn("[auth] GALGAME_AUTH_REQUIRED=1 但未配置 GALGAME_PUBLIC_ORIGIN：Cookie 写请求的 CSRF Origin 校验将拒绝缺失 Origin 的请求");
   }
-  const rawTurn = new DefaultTurn({ store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions });
+  const rawTurn = new DefaultTurn({
+    store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions,
+    ...(simPolicy && simPolicy.actionCostPerTurn > 0
+      ? { actionPolicy: { attrKey: simPolicy.actionAttr, costPerTurn: simPolicy.actionCostPerTurn } }
+      : {}),
+  });
   const turn = withTurnRecording(rawTurn, { history, saves, store, now });
 
   // ---------------------------------------------------------------- 世界层永久记忆（docs/08 §7）
@@ -558,7 +568,25 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     dataDir: path.resolve(cfg.dataDir),
     adminToken: cfg.adminToken,
     appearance: appearanceById(scenarios),
+    ...(simPolicy ? { simPolicy } : {}),
   });
+
+  // 自动时钟默认关闭；enabled 时只推 phase 内 tick，到 maxTick 停下等玩家 advance。
+  const simClock = new SimClock({
+    store,
+    map,
+    policy: simPolicy?.clock ?? { enabled: false, intervalMs: 60_000, ticksPerBeat: 1, maxTick: 24 },
+    isBusy: (roomId) => background.isBusy(roomId),
+  });
+  simClock.start();
+
+  if (simPolicy && simPolicy.actionCostPerTurn > 0 && !registry.attr(simPolicy.actionAttr)) {
+    // 老存档没有这个属性时 Turn 会跳过扣点；键名拼错也在这里暴露，而不是静默失效。
+    console.warn(`[sim] 行动点属性 ${simPolicy.actionAttr} 未在 registry 声明，行动点将不会生效`);
+  }
+  if (simPolicy?.clock?.enabled) {
+    console.info(`[sim] 自动时钟已启用：每 ${simPolicy.clock.intervalMs}ms 推 ${simPolicy.clock.ticksPerBeat} tick，maxTick=${simPolicy.clock.maxTick}`);
+  }
 
   const debugGate = createDebugGate(cfg.debugPassphrase ?? "");
 
@@ -601,6 +629,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     conversation: { host: conversation, modes: conversationModes, dataDir: dataRoot },
     turn,
     map,
+    simClock,
     settings,
     registry,
     scenarios,

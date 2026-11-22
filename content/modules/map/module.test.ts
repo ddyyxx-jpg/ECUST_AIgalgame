@@ -214,12 +214,52 @@ describe("tick（NPC 日程）", () => {
     expect(out.at(-1)!.op).toBe("scene.set");
   });
 
-  it("所有人已在目标地点：返回空数组（镜头本来就对）", async () => {
+  it("所有人已在目标地点：只写停留租约，不产生移动，也不动玩家镜头", async () => {
     const state = buildRoom();
     state.links = state.links.filter((l) => !(l.kind === "located_in" && ["npc_lin", "npc_zhou", "npc_ma"].includes(l.from)));
     state.links.push(located("npc_lin", "loc_dorm3"), located("npc_zhou", "loc_dorm3"), located("npc_ma", "loc_dorm3"));
     const out = await mod.tick!(ctxOf(state), "night");
-    expect(out).toEqual([]);
+    expect(movesOf(out, "npc_lin")).toEqual([]);
+    const leases = out.filter((p) => p.op === "attr.set" && p.args.key === "sim_lease");
+    expect(leases).toHaveLength(3);
+    for (const p of leases) expect(JSON.parse(String(p.args.value))).toMatchObject({ action: "stay", remaining: 2, phase: "night" });
+    expect(out.some((p) => p.op === "scene.set")).toBe(false);
+  });
+
+  it("租约未到期时只递减，不重新排日程（NPC 正在占用时间）", async () => {
+    const state = buildRoom();
+    const npc = state.entities["npc_lin"]!;
+    npc.attrs.sim_lease = JSON.stringify({ action: "stay", target: "loc_dorm3", remaining: 2, phase: "night" });
+    state.links = state.links.filter((l) => !(l.kind === "located_in" && l.from === "npc_lin"));
+    state.links.push(located("npc_lin", "loc_library"));
+    const out = await mod.tick!(ctxOf(state), "night");
+    const lease = out.find((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
+    expect(lease).toBeTruthy();
+    expect(JSON.parse(String(lease!.args.value))).toMatchObject({ action: "stay", remaining: 1, phase: "night" });
+    expect(movesOf(out, "npc_lin")).toEqual([]);
+  });
+
+  it("坏租约 JSON 当空闲处理，不阻塞 NPC 重排", async () => {
+    const state = buildRoom();
+    state.entities["npc_lin"]!.attrs.sim_lease = "{not json";
+    state.links = state.links.filter((l) => !(l.kind === "located_in" && l.from === "npc_lin"));
+    state.links.push(located("npc_lin", "loc_library"));
+    const out = await mod.tick!(ctxOf(state), "night");
+    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
+    const lease = out.find((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
+    expect(JSON.parse(String(lease!.args.value))).toMatchObject({ action: "move", target: "loc_dorm3", phase: "night" });
+  });
+
+  it("租约到期后清空，不把旧动作带进下一个 phase", async () => {
+    const state = buildRoom();
+    const npc = state.entities["npc_lin"]!;
+    npc.attrs.sim_lease = JSON.stringify({ action: "stay", target: "loc_canteen", remaining: 1, phase: "evening" });
+    state.links = state.links.filter((l) => !(l.kind === "located_in" && l.from === "npc_lin"));
+    state.links.push(located("npc_lin", "loc_library"));
+    const out = await mod.tick!(ctxOf(state), "night");
+    const lease = out.find((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
+    // phase 不匹配 → 旧租约作废，直接按 night 重排（图书馆→食堂→…→宿舍），而不是执行 evening 的停留
+    expect(JSON.parse(String(lease!.args.value))).toMatchObject({ action: "move", target: "loc_dorm3", phase: "night" });
   });
 });
 

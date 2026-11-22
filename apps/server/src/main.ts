@@ -40,6 +40,7 @@ function handleSignal(signal: NodeJS.Signals): void {
   void (async () => {
     try {
       app.log.info(`[shutdown] 收到 ${signal}，正在中止后台任务`);
+      deps.simClock.stop();
       await shutdownBackground(deps.background, () => app.close(), `shutdown(${signal})`);
       process.exit(0);
     } catch (e) {
