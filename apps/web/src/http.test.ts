@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GameError, HttpError, apiFetch, authFailMessage, httpFailMessage, isUnauthorized, onUnauthorized, request, setVisitorId, unwrap } from "./http.ts";
+import { TimeoutError, createDeadline } from "./timeout.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -92,5 +93,38 @@ describe("apiFetch（同源 Cookie + 访客头）", () => {
     expect((calls[1]?.headers as Record<string, string>)["x-user-id"]).toBe("visitor_x");
     expect((calls[1]?.headers as Record<string, string>)["content-type"]).toBe("application/json");
     expect((calls[2]?.headers as Record<string, string>)["x-user-id"]).toBeUndefined();
+  });
+
+  it("signal 贯通到 fetch；旧调用不传 signal 时行为不变", async () => {
+    const controller = new AbortController();
+    const calls: RequestInit[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_path: string, init?: RequestInit) => {
+        calls.push(init ?? {});
+        return new Response("{}", { status: 200 });
+      }),
+    );
+    await apiFetch("/with-signal", { signal: controller.signal });
+    await apiFetch("/without-signal");
+    expect(calls[0]?.signal).toBe(controller.signal);
+    expect(calls[1]?.signal).toBeUndefined();
+  });
+
+  it("deadline 超时后 fetch 的 DOMException 被统一换成 TimeoutError（可重试提示）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_path: string, init?: RequestInit) => {
+        throw new DOMException("aborted", "AbortError");
+      }),
+    );
+    const d = createDeadline(5);
+    await new Promise<void>((resolve) => {
+      d.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    const e = await apiFetch("/timeout", { signal: d.signal }).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(TimeoutError);
+    expect(httpFailMessage(e)).toBe("装载超时");
+    d.clear();
   });
 });

@@ -25,6 +25,7 @@ import type { EventLog } from "./store.ts";
 import { isRoomSyncFault } from "./store-write.ts";
 import type { AuditPolicy, AuditPort } from "./audit.ts";
 import { codeOf, errMessage } from "./turn.parse.ts";
+import { expectAttrsFor } from "./attr-expect.ts";
 import { RETRYABLE } from "../../shared/src/index.ts";
 import { buildTurnPrompt } from "./turn.prompt.ts";
 import { makeContext } from "./turn.context.ts";
@@ -273,15 +274,20 @@ export class DefaultTurn implements Turn {
       // ① 裁决：默认 atomic —— 任何一条被拒，整批不落库。
       // 两阶段兜底：记忆写坏了不该毁掉整回合（玩家行动本身是合法的），去掉记忆重提一次。
       const applyBatch = async (ops: Proposal[], expectedSeq: number) => {
+        // #138：提案基于 state0 的属性快照算出；apply 前在房间串行链内复核这些属性，
+        // 值变了就整批拒绝（E_PRECONDITION），不把"按旧值算的 delta"叠到新值上。
         let result = await this.deps.arbiter.apply(req.roomId, ops, causeForBudget, {
           expectedSeq, turnBudget, commitEvidence: evidence, captureState: true,
+          expectAttrs: expectAttrsFor(state0, ops),
         });
         if (!result.ok && memoryProposals.length > 0 && result.rejected.length > 0) {
           const onlyMemory = result.rejected.every((r) => memoryProposals.includes(r.proposal));
           if (onlyMemory) {
             memoryRejected = true;
-            result = await this.deps.arbiter.apply(req.roomId, [...moduleProposals, ...llmProposals], causeForBudget, {
+            const retryOps = [...moduleProposals, ...llmProposals];
+            result = await this.deps.arbiter.apply(req.roomId, retryOps, causeForBudget, {
               expectedSeq, turnBudget, commitEvidence: evidence, captureState: true,
+              expectAttrs: expectAttrsFor(state0, retryOps),
             });
           }
         }

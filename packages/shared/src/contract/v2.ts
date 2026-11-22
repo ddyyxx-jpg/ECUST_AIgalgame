@@ -294,7 +294,7 @@ export type ConversationEvent =
   | { type: "conversation.mental"; actorId: ActorId; mental: MentalActivity }
   | { type: "conversation.scene"; beat: SceneBeat }
   | { type: "conversation.phase"; sessionId: Id; phase: ConversationPhase }
-  | { type: "conversation.notice"; text: string; facts?: string[] }
+  | { type: "conversation.notice"; text: string; facts?: string[]; reason?: "autoLimit" }
   | {
       type: "conversation.committed";
       sessionId: Id;

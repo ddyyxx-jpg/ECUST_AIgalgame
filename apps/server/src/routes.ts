@@ -6,6 +6,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ActorId, Memory, MemoryRecord, Registry, RoomId, Store, Turn, TurnEvent, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import type { ConversationEvent, GossipEvent, MessageDigest, UtteranceModeDef } from "../../../packages/shared/src/contract/v2.ts";
+import { projectEventsForPlayer, playerOf, projectStateForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
 import { projectConversationEvents, saveSnapshot, sessionSnapshotPath, type ConversationHostV2 } from "../../../packages/engine/src/v2/index.ts";
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
@@ -61,6 +62,8 @@ export interface AppDeps {
   canonize?: {
     retireRoom(roomId: string): Promise<{ written: string[]; candidates: number }>;
     tombstone(memoryId: string, reason: string): Promise<boolean>;
+    /** 带失败原因的同路径版本（PR #149 P2-4）：区分并发冲突与真正不可变 */
+    tombstoneWithReason?(memoryId: string, reason: string): Promise<{ ok: boolean; code?: string }>;
     stats(): { worldId: string; version: number; writtenToday: number; writtenTotal: number; circuitOpen: boolean; consecutiveJudgeFailures: number };
     sample(limit: number): MemoryRecord[];
   };
@@ -865,7 +868,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!access) return reply;
     // 原始快照里带着实体真名：未认识的人必须在这里也脱敏，否则"服务端不下发真名"
     // 只是口号——新建房间就能从 /state 看光所有 NPC（审阅 P0-1）。
-    return maskNamesDeep(access.state, unknownPlaceholders(access.state, deps.appearance));
+    // plot 的 GM 字段（forbidReveal/leakPoints/goal…）不能随 /state 下发（PR #147 审阅 P0）
+    return maskNamesDeep(projectStateForPlayer(access.state), unknownPlaceholders(access.state, deps.appearance));
   });
 
   app.get("/api/v1/rooms/:roomId/events", async (req, reply) => {
@@ -885,8 +889,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       return e.audience.includes(viewer);
     });
     // 历史回放同样脱敏：旧回合的叙事里可能带着尚未认识的人的真名
-    const placeholders = unknownPlaceholders(await deps.store.snapshot(roomId), deps.appearance);
-    return { events: maskNamesDeep(events, placeholders), lastSeq: events.length ? events[events.length - 1]!.seq : from };
+    const snapshot = await deps.store.snapshot(roomId);
+    const placeholders = unknownPlaceholders(snapshot, deps.appearance);
+    // 秘密裁剪（PR #147 审阅 P0）：plot 事件剥 GM 字段，私忆只留 public 与玩家本人；
+    // viewer 取服务端解析的玩家身份，不信任 query 里的 actorId。
+    const visible = projectEventsForPlayer(events, playerOf(snapshot, access.userId));
+    return { events: maskNamesDeep(visible, placeholders), lastSeq: visible.length ? visible[visible.length - 1]!.seq : from };
   });
 
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */
@@ -1037,7 +1045,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         console.warn(`[names] 回合已提交，但脱敏快照失败，改用回合开始前快照：${roomId}`, e);
         placeholders = unknownPlaceholders(snapshotForInput, deps.appearance);
       }
-      for (const ev of events) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, placeholders));
+      // turn.patch.state 也带 plots，必须和 /state 同口径剥秘密（PR #147 审阅 P0）
+      for (const ev of events) sseWrite(reply.raw, ev.type, maskNamesDeep(projectTurnEventForPlayer(ev), placeholders));
     } catch (e) {
       errored = true;
       // 收到 turn.commit 后才会走到这里的旁路异常：账本保持 committed，也不给客户端可重试信号
@@ -1143,8 +1152,15 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!verdict.ok) return reply.code(403).send({ ok: false, code: "E_FORBIDDEN", message: "需要管理员令牌" });
     const body = (req.body ?? {}) as { memoryId?: string; reason?: string };
     if (!body.memoryId) return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "memoryId 必填" });
-    const done = await deps.canonize.tombstone(body.memoryId, body.reason ?? "管理员撤回");
-    if (done) return { ok: true };
+    const port = deps.canonize;
+    const outcome = port.tombstoneWithReason
+      ? await port.tombstoneWithReason(body.memoryId, body.reason ?? "管理员撤回")
+      : { ok: await port.tombstone(body.memoryId, body.reason ?? "管理员撤回") };
+    if (outcome.ok) return { ok: true };
+    // 并发冲突 ≠ 不可变：世界层正被别的任务写入时，同一个请求重试就能成功（PR #149 P2-4）
+    if (outcome.code === "E_SEQ_GAP") {
+      return reply.code(503).send({ ok: false, code: "E_SEQ_GAP", message: "世界记忆正在被其他任务写入，请稍后重试", retryable: true });
+    }
     // 撤回失败的真实原因从世界层记忆状态推：不存在 = 404 语义，已撤回 = 不可变
     // 存在性用记忆索引判（sample(200) 在世界层 >200 条时会误判 404，审阅 P2-⑤）
     const hit = deps.memory.get?.(body.memoryId);
@@ -1204,7 +1220,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    return safe(reply, () => deps.map.tick(roomId, parsed.data));
+    // viewer：出站事件按调用者自己的视角裁私忆（PR #149 P3）；未登录时由 MapService 回退到玩家角色
+    const viewer = access.userId ? playerOf(access.state, access.userId) : undefined;
+    return safe(reply, () => deps.map.tick(roomId, { ...parsed.data, ...(viewer ? { viewer } : {}) }));
   });
 
   app.post("/api/v1/rooms/:roomId/map/dialogue", async (req, reply) => {

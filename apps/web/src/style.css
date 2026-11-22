@@ -87,11 +87,16 @@ dl { margin:0; } .row { display:flex; justify-content:space-between; font-size:1
 .v2-action { flex:1 1 220px; background:#0b0d13; border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:8px 12px; font:inherit; }
 .v2-hint { padding:8px 18px 0; font-size:13px; color:#e0a458; }
 .v2-contentless-note { flex:1; background:transparent; border:1px dashed var(--line); color:var(--muted,#98a2b3); border-radius:10px; padding:12px 14px; font:inherit; font-style:italic; }
-/* 每回合结束后的快捷行动建议：点一下 = 说出这句话；输入框仍然可以自由输入 */
-.suggestions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:12px 18px 0; animation: fade-in .3s ease both; }
-.suggest-chip { background:#1a2030; color:var(--fg); border:1px solid #2c3448; border-radius:999px; padding:7px 14px; font:inherit; font-size:13px; cursor:pointer; transition:border-color .15s, background .15s; }
-.suggest-chip:hover:not(:disabled) { border-color:var(--accent); background:#1f2740; }
-.suggest-chip:disabled { opacity:.5; cursor:default; }
+
+/* 候选行动：分组候选 + 数字键提示（PR-4） */
+.candidate-panel { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:12px 18px 0; animation: fade-in .3s ease both; }
+.candidate-panel .candidate-caption { color: var(--muted,#98a2b3); font-size:13px; }
+.candidate-chip { display:inline-flex; align-items:center; gap:8px; background:#1a2030; color:var(--fg); border:1px solid #2c3448; border-radius:999px; padding:7px 14px; font:inherit; font-size:13px; cursor:pointer; transition:border-color .15s, background .15s; }
+.candidate-chip:hover:not(:disabled) { border-color:var(--accent); background:#1f2740; }
+.candidate-chip:disabled { opacity:.5; cursor:default; }
+.candidate-chip.kind-move { border-color:#31507a; }
+.candidate-chip.kind-talk { border-color:#3a4a6a; }
+.candidate-hint { font-family:inherit; font-size:11px; line-height:1; color:#08101f; background:var(--accent); border-radius:6px; padding:2px 5px; }
 
 /* ---------------------------------------------------------------- 通用按钮 */
 .btn { background:#232a3b; color:var(--fg); border:1px solid #303952; border-radius:8px; padding:7px 14px; cursor:pointer; font-size:13px; }
@@ -675,7 +680,7 @@ dl { margin:0; } .row { display:flex; justify-content:space-between; font-size:1
 .card-face { width:26px; height:26px; border-radius:50%; object-fit:cover; vertical-align:-7px; margin-right:7px; border:1px solid #ffffff26; }
 .dock-bar .dock-fold { margin-left:auto; padding:2px 9px; }
 .dialog-dock .log { flex:1; overflow:auto; padding:12px clamp(16px,5vw,64px); }
-.dialog-dock .suggestions { padding:8px 18px 0; }
+.dialog-dock .candidate-panel { padding:8px 18px 0; }
 .dialog-dock .composer { padding:10px 18px 14px; }
 .dialog-dock.talking .composer input { border-color:#3a4a6a; }
 

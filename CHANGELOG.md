@@ -5,7 +5,89 @@
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）。
 
 
-## 未发布 — dev/v2 运行质量批（issue #130 子项 #131–#137，CONTRACT 3.7.0）
+## 未发布 — 开放 issue 收口批（整体 PR，分支 `fix/all-open-issues`；CONTRACT 3.7.0 → 3.8.0）
+
+> 把四个开放 PR（#124 引擎 / #125 后端 / #126 前端 / #127 UI）按分类合入本分支，并把各 issue 的遗留缺口补齐到「真实链路可用」。覆盖 #76 #90 #94 #95 #96 #97 #98 #99 #100 #104 #105 #106 #122 #128 #130 #138 #139 #140 #146；#84（真实部署冒烟）需目标机实测，保持开放。`apiVersion` / `SCHEMA_VERSION` 不变；`PROMPT_VERSION` 不变。
+
+### 引擎（packages/、content/、契约文档）
+- **结算前置条件 `expectAttrs`（#138，PR #124）**：`ApplyOptions.expectAttrs`（`AttrExpectation[]`，可选）在 `apply` 前逐条比对当前快照 `{entityId, key, expected: AttrValue|null}`（`null` = 该属性必须不存在）；任一失配整批拒绝 `E_PRECONDITION`，不试算、不落库、不消耗回合预算；顺序为先 `expectedSeq` 后本项；只承诺标量精确相等，不做深比较。空数组/未传时行为与 3.7.0 完全一致。**本批已接生产调用方**：`packages/engine/src/attr-expect.ts` 的 `expectAttrsFor(state, ops)` 只对 `attr.delta`/`attr.set` 产条件并按 `entityId+key` 去重，`Turn.applyBatch` 主批与记忆被拒重提批、v2 `commitStep` 都显式传入；`packages/engine/src/turn.expect-wiring.test.ts` 与 `conversation.test.ts` 断言真实 apply 入口带条件，`arbiter.expect.test.ts` 覆盖失配不耗预算 / 首失配整批拒 / 同房间并发串行 / 重启后按持久化值校验四问。`CONTRACT_VERSION` → 3.8.0（docs/03 §2.3、§10.28）。
+- **后台任务协作式中止（#140）**：`canonize.retireRoom(roomId, {signal})`、`GossipHost.step(roomId, {signal})` 在候选循环、judge 前、落库前设检查点；`CanonizeReport.aborted` 标记中止，gossip 用既有 `gossip.dropped{reason:"aborted"}`，不新增事件类型/op。已落库批次不回滚。
+- **密谋导演（#96/#128）**：`discoveryProposals(ctx, plot, kind, {attitudeAttr?})` 改为显式传键（引擎无 `moduleState` 写入口，旧写法永远读不到值），未传键不产 `attr.delta`；新增 `content/modules/investigate/`（`investigate.probe`，态度键来自 `data/config.json`），是 `activePlots`/`discoveryProposals` 的首个生产调用方。
+- **存档导出/导入 fixture 修正（#99）**：`save-archive.test.ts` 的样例事件从 `turn.commit`（SSE 事件，从不落盘）改为真实的 `turn.committed` marker，并新增「导入 → 新 `FileStore` 实例读回 → `parseCommitEvidence`」探针；docs/02 §7.0 记录该约束。
+- **#146 小项**：`llm.traceId` 优先 `x-ds-trace-id`；`fitMemoryContent` 导出后 `ownSpeechLines` 与落库同一截断口径去重；docs/03 的 `routes.ts` 行号锚点改为函数名锚点。
+
+### 后端（apps/server）
+- **夜间密谋编排（#128）**：`map.tick()` 仅在真正进入夜间那一拍跑 `runNightPlot`：用进入夜间前的在场存活 NPC（≥2），`DialogueHost.open("npc.plot") → step → close`，提案单独第二批 `arbiter.apply(..., cause.type="dialogue")`，fail-soft；不碰 #38 的 `time.advance` 原子批；同夜重复 tick 不重复落账。`plot-night.route.test.ts` 用 `app.inject` 验证真实 `plot.upserted`/`memory.written`(private)/`attr.changed` 与 LLM 抛错时 tick 仍 ok。
+- **后台任务账本与接管（#140，PR #125）**：`JobLedger` + `BackgroundCycle`（同房间单飞、generation 令牌、stall 看门狗强制接管、`takeovers`/`watchdogFires`/`terminalPersistFailures` 遥测、启动 `reconcileBackgroundJobs` 对账）；`bootstrap.ts` 两个扫描定时器仍走 `scanRoomJobs` 逐房隔离，并把 `{signal}` 传进任务体。`save-durability.test.ts` 的后台扫描用例改为串行触发（单飞锁下两种扫描不再并发），验收目标不变。
+- **#146-1 结算断言**：`conversation.route.test.ts` 新增审核 blocked → `unconfirmed`、`maxAutoRounds:0` 的 auto 回合 → `failed` 两例。
+- 复核已落地项：#90 会话快照被 `openOrReuse` 真正复用、#104 `/conversation` 共用 `TurnLedger` 且淘汰先 `host.close`、#105 地图草案共用 admin gate、#122 索引重建 merge 单调 + `.bak`、#100 历史上限可配（`GALGAME_HISTORY_LIMIT_MAX`）、#98 多槽存档、#95/#94/#97 验收。
+
+### 前端（apps/web，PR #126）
+- 客户端前台恢复与三态探测：`conversation-api.ts` 的 `detectConversation`/`convModeAfterProbe`/`runConversationAuto`/`runConversationUtterance`，`App.tsx` 恢复时 `loadRoomThenReset` + `holdResumedBusy`；docs/09 §10。#106 MINOR 项复核已落地（URL `encodeURIComponent`、快照 tmp 名带 pid、SSE 15s 心跳）。
+
+### UI（apps/web 候选面板，PR #127 + #139）
+- 候选行动面板 + 数字键 1–6 快选（输入框内不抢键）。**#139**：建议改为 `{text, kind}` 由来源侧给出（出口→`move`、在场 NPC→`talk`、`openings.json` 作者标注），删除中文前缀启发式；旧字符串仍可读，回退 `action`；`kind` 只影响分组/配色。docs/03 §5.2.6 登记形状与兼容策略。
+
+### 验证（本分支实跑）
+- `npm run typecheck` → 0 错；`npx vitest run` → **120 文件 / 945 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过。
+- 未做：#84 的 compose/Nginx TLS/证书/备份恢复目标机冒烟（`deploy:smoke` 只覆盖应用层局部链路）。
+
+### 审阅修复（PR #147 全量审阅的 P2/P3）
+- **P2-1 delta 假接线**：`discoveryProposals` opts 增加 `delta?: number`，investigate 模块传 `config.delta`；测试断言 `delta === configJson.delta`。`kindFrom` 的中文关键词同步挪进 `config.json` 的 `kindPatterns`（数据驱动，参照 §4.7）。
+- **P2-2 接管后写隔离**：`canonize.publish.ts` 与 `canonize.tombstone` 的 `arbiter.apply` 补 `expectedSeq`（load 到的 seq）；新增竞态用例（load 与 apply 之间世界房被推进 → 整批 `E_SEQ_GAP`，无交错写入）；docs/09 §9 写明「generation 只保锁/账本，world 写隔离靠检查点 + expectedSeq」。
+- **P3**：docs/03 `AttrExpectation` 注释 3.7.0→3.8.0；v2 `StoreRetry` 带上 `expectAttrs`（重试批与首批同口径）；`conversation-api.ts` 三态注释修正；`npc.plot.ts` 拆出 `npc.plot.discovery.ts`（262+92 行）、`background-cycle.ts` 拆出 `background-cycle.types.ts`（279+76 行），均 ≤300 行且重导出保持调用路径。
+
+### 审阅修复第二轮（PR #147 被 revert 后重提：huaaaji 全量审阅 P0/P1/P2/P3）
+
+> 背景：PR #147 合并后被发现 1 个 P0（夜间密谋秘密从玩家出口泄露）与 3 个 P1，已 revert；本批在 `fix/pr147-review` 逐条修复后重提。审阅原文要点：测试全绿≠功能正确，夜间链路只读 EventLog、不断言 HTTP 响应体。
+
+- **P0 出口裁秘密**：新增 `apps/server/src/outbound-secrets.ts`，`/state`、`/events`、`POST /map/tick` 响应与 v1 `turn.patch` 的 SSE 全部过同一投影——`plot.upserted` 走引擎 `stripPlotSecrets`（`SECRET_PLOT_KEYS` 扩到含 `goal`，并与 dev/v2 共用同一份字段清单）；`memory.written` 只留 `public` 或 `ownerId===viewer`（viewer 由登录账号绑定解析，不信 query）；`/events` 的 `lastSeq` 取裁剪后最后一条。`plot-night.route.test.ts` 直接断言三处**响应体字符串**不含 `forbidReveal`/`leakPoints`/秘密原文，并反向断言 plot 的 `id/actors/status` 仍在（不是整条删掉蒙测试）。docs/04 §3.2 补出口口径。
+- **P1-1 私忆 id 跨夜碰撞**：夜间 `cause.seq` 不再是常量 0，`memoryId` 因此跨夜唯一；用真实 5 次 tick 走完一天再进第二夜，断言两夜 4 条 `memoryId` 互不相同。
+- **P1-2 夜间私忆没进索引**：`runNightPlot` 落库后逐条 `memory.ingest`，tick 后立刻可从 `MemoryIndex.all(roomId)` 召回（不再等下一回合或重启）。
+- **P1-3 第 7 夜起永久失效**：`MapService.closablePlots` 在 active 配额将满时把**往夜**剧情 `plot.upsert(status:"resolved")` 与本次提案同批提交；没有可结案的往夜剧情时跳过本夜密谋并 `console.warn`（不再白调 LLM、也不静默失败）。investigate 侧补 `status:"leaked"` 收口（见 P2-4）。
+- **P2-1 并发 `/map/tick`**：房间级串行队列（同一房间的 tick 排队、不同房间并行），入夜判定与 `expectedSeq` 都在锁内取值；`Promise.all([tick(),tick()])` 只产生 1 条 `plot.upserted`、只推进一天。
+- **P2-2 canonize 的 `expectedSeq` 是虚假保证**：`basedOnSeq` 在任务开始 `load` 时捕获、每次成功 apply 后推进；`E_SEQ_GAP` 有界重试（≤2）只对未 abort 的活动任务生效，被 stall 接管的僵尸任务体遇到 `E_SEQ_GAP` 直接记错跳过，绝不重新 load 新 seq 插到新世代之后；tombstone 走同一 helper。竞态用例改为在 apply 入口注入 + abort signal，并新增僵尸任务体用例（apply 只 1 次、无交错写入）。
+- **P2-3 后台对账逐房隔离**：`JobLedger` 按文件名校验 `roomId`（缺/错按坏行跳过并 warn），`reconcileBackgroundJobs` 逐房 try/catch，单房抛错只计入新字段 `JobReconcileSummary.skipped`，其余房间照常对账；测试覆盖缺 `roomId`、错放 `roomId` 不跨房写、整房抛错。
+- **P2-4 investigate 无幂等**：probe 先用 fact 实体的 `tags` 记已查 leak 下标（同批 atomic 提交，`{plot}_{actor}` 隔离多人），重复调查不再写证据、不再 `attr.delta`，仍 `ok:true` 并给「已查过」fact；全部查完时产出 `plot.upsert(status:"leaked")`。选 fact 标记而非 `x.*` 属性：不占 `xWritesPerTurn`、不额外产生 `attr.changed`、随存档落盘可跨重启判重。
+- **P2-5 前台恢复挂死**：新增 `timeout.ts`（`TimeoutError`/`ROOM_LOAD_DEADLINE_MS=8s`/`createDeadline`），`fetchState`/`fetchHistory`/`resume` 全链路透传 `signal`，超时给可重试提示并归还 `busyHold`；`room-enter` 加 `isLoading` 守卫避免迟到数据 reset 新房间；`dispose` 中止在途请求。
+- **P2-6 auto 超限 notice 被当未确认**：`conversation.notice` 增加可选机器字段 `reason:"autoLimit"`（3.8.0，docs/03 §5.3 登记），客户端优先按 `reason` 判定已结算，文本匹配只作老服务端兜底——notice 文案来自 `content/v2/conversation-policy.json`（可改语言），不能作为协议。
+- **P2-7 v2 下没有动态候选**：`playedTurns` 同时数 v1 `lines` 与 v2 `convLines`；v2 有 `view.position` 用服务端位置，否则从 `state.room.scene.presentIds` 推导在场 NPC 生成候选（`exits` 不编造）。
+- **P3 收口**：`types.ts`/docs/03 的「与 3.6.0 一致」改回基线 3.7.0；docs/09 的 `#124 合入后为 3.7.0` 改为以 `version.ts` 为准，stallMs 口径统一为「配置下限 1000ms、构造参数下限 1ms（测试用）」；`CanonizeReport.aborted` 登记进 docs/03 且中止报告的 `candidates` 不再恒 0；`manifest.limits` 由宿主强制执行（`limitProposals`：`proposalsPerTurn` 截断 + warn 含 `E_OVER_LIMIT`，`maxArrayItems` 截数组 args；map 的声明上限按「每 NPC 一条 move」调到 64）；`isConversationAvailable` 接回探测路径；`ViewPatch.lists` 补进 docs/03 并注明前端未消费。
+
+### 验证（第二轮审阅修复后实跑）
+- `npx tsc --noEmit` → 0 错；`npx vitest run` → **123 文件 / 978 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过（`index-A8yziaL-.js` 387.81 kB）。
+
+### 审阅修复第三轮（PR #149 审阅：3×P0 / 1×P1 / 7×P2 / P3）
+
+> 背景：第二轮重提后 huaaaji 打回，指出「秘密出口还漏了三处，tick 的 `expectedSeq` 取值时机仍会让旧快照覆盖并发写」。本轮把**所有**玩家可达出口收进同一投影，并用「把修复还原后测试必须失败」的反向验证确认回归测试不是空转。
+
+- **P0-1 `/map/travel` 的 Turn 事件**：`TravelResult.events` 里的 `turn.patch` 带着整份 `WorldState`（含 `plots`），旧代码只 `maskTurnEvents` 遮人名。现在 `MapService.outbound()` 对 `events` 逐条过 `projectTurnEventForPlayer`（travel 与 tick 共用）。
+- **P0-2 `turn.patch.ops`**：v1 `/turns` 的 SSE 只裁了 `state`，`ops` 原样下发——含 NPC 私有 `memory.write`、`status:"tombstoned"` 的旧工作记忆正文、investigate 查完时的 `plot.upsert`（args 带 `forbidReveal`/`leakPoints`）。现在 `projectTurnEventForPlayer` 同时重建 `state` 与 `ops`（复用 dev/v2 的 `projectProposals`：非 public 的 `memory.write` 整条丢弃、`plot.upsert` 剥 GM args）。
+- **P0-3 `memory.tombstoned.payload.reason`**：撤回事件的 `reason` 就是被撤回记忆的正文（`arbiter.ops.ts` 写入），玩家侧只留 `memoryId`/`supersedes`。
+- **P1 tick 与并发写**：`expectedSeq` 改为在**取快照之前**捕获（原先在 `modules.tick`/`dryRun` 之后取值），tick 期间 `turns` 提交的 `scene.set` 不再被旧快照覆盖；并发场景由 `modules.tick` 内真实 `arbiter.apply` 模拟，断言 tick 返回 `E_SEQ_GAP` 且最终位置是并发那次写入。
+- **P2-1 v2 前台恢复清空会话行**：`room-local-state` 新增 `convLines` 捕获/回填（同房 resumed 保留，换房/新开局清空），`room-enter` 的 capture→reset→restore 顺序有集成用例。
+- **P2-2 v2 候选不完整**：`positionFromState` 不再硬写 `exits:[]`——从 `state.links` 推导双向 `located_in`（两端都是活跃 loc），在场者只认 `kind==="npc" && status==="active"`；新增 `candidatePosition` 在服务端 `pos` 为空时回落到 state 投影（travel 后的旧 pos 不再让候选整块消失）。
+- **P2-3 canonize 重试窗口**：`applyWithSeqRetry` 在循环顶部与 `await store.load(...)` 之后都检查 `signal.aborted`（abort 可能发生在 load 内部），中止时返回内部哨兵 `E_ABORTED`，`publishCandidates` 记为 `skipped:aborted` 并出 `aborted` 报告——不再以新 seq 插到新世代之后。测试用受控 promise 把 abort 精确投在重试窗口内。
+- **P2-4 tombstone 错误语义**：撤回改用 `tombstoneWithReason`；并发冲突 `E_SEQ_GAP` → `503 retryable`（此前一律报 409 `E_MEMORY_IMMUTABLE`，运维看到 409 不会重试），真不可变仍 409。取码顺序统一为批次级 `error` 优先。
+- **P2-5 `manifest.limits.maxArrayItems` 在 intent/tool 路径失效**：`limitOutcome` 曾用「长度没变就返回原 out」判断，数组被裁剪时长度不变 → 裁剪被丢弃；现在一律以 `limitProposals` 结果为返回来源，intent/tool/tick 三条路径都有用例。
+- **P2-6 auto 超限 notice**：客户端只认服务端机器字段 `reason:"autoLimit"`，删除英文文案兜底死代码（服务端文案来自 `content/v2/conversation-policy.json`，可改语言）。
+- **P2-7 blocked auto 回合重试**：`retrySubmission(last)` 保留 `auto` 标记，重试走真正的自主轮，不再被空输入守卫吃掉。
+- **P3**：`/map/tick` 的 viewer 改按登录账号解析（联机房不再用「1 号玩家」替别人过滤私忆）；v2 `playedTurns` 只数已提交的自身 utterance；候选位置按 `kind` 过滤（不再生成「和地点说话」）；`http.ts` 的 `TimeoutError` import 移到文件顶部；新增 `/turns`、`/map/travel`、`/events` 的响应体回归断言与 tombstone 503/409 路由用例。
+
+### 验证（第三轮审阅修复后实跑）
+- `npx tsc --noEmit` → 0 错；`npx vitest run` → **124 文件 / 994 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过（`index-CMLyLKtQ.js` 388.62 kB）。
+- 反向验证：把 `expectedSeq` 取值挪回旧位置 → 并发用例失败；把 outbound 投影还原 → 三处 P0 用例失败（证明断言真的盯着出口，而不是只读 EventLog）。
+
+### 审阅修复第四轮（PR #149 复审剩余 2×P2 + P3）
+
+- **P2-1 v2 前台恢复重放开场 / `playedTurns` 归零**：新增 `shouldReplayOpening({restoredLineCount, keptConvLines})` 与 `playedTurnsOf(convMode, lines, convLines)` 两个纯函数——v2 房间没有 v1 history，但本地保留了 `convLines` 时不再重放「身份 → 正文」；回合数改数 `convLines` 的玩家行（`convView` 会被 reset，数它必归零）。三条用例覆盖「保留会话行 / v1 有 history / 真新开局」。
+- **P2-2 v2 travel 后候选停在旧地点**：`candidatePosition` 先比 `pos.locId` 与 `state.room.scene.locId`——不在同一场景就以 state 投影为准（`enterScene` 只改 `locId`，旧 `actors/exits` 是上个地点的）；同场景且非空仍用服务端 `pos`。
+- **P3 重启后首拍 tick 假 `E_SEQ_GAP`**：`seqOf` 改为 `await store.load(roomId)`（`seq()` 在未载入时只会给 0）；夜间第二批同样走它。新增「新 store 实例只持有磁盘事件 → 直接 tick」探针，反向验证：改回 `seq()` 即失败（seq 停在 0）。
+
+### 验证（第四轮复审修复后实跑）
+- `npx tsc --noEmit` → 0；`npx vitest run` → **124 文件 / 1000 例**全过；`npm run check:contract` → 8/8（3.8.0）；`npm run build:web` → `index-XOequiWb.js` 388.79 kB（gzip 121.13 kB）。
+
+## 3.7.0（2026-11-21，PR #144）— dev/v2 运行质量批（issue #130 子项 #131–#137，CONTRACT 3.6.2 → 3.7.0）
 
 ### 新增
 - **提示词上下文重构（#131）**：NPC 提示词固定为「你 / 在场者 / 当前场景 / 记忆 / 更早的对话 / 这一轮」；投递行区分「→ 你」与「你是旁听」，模式用中文 label；`Delivery.target` 让投递语义可还原；自己的话也进历史；窗口从全局 64 条改为每会话最近 6 轮 + 1800 字硬上限。`CONVERSATION_PROMPT_VERSION` → `2026-11-21.1`。

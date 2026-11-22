@@ -344,12 +344,15 @@ it("故障房间不会中断永久记忆和私信的后台扫描", async () => {
   const gossip = vi.spyOn(GossipHost.prototype, "step");
   try {
     expect(await deps.map.tick(faulty, { advance: true })).toMatchObject({ ok: false, code: "E_STORE_FAULT" });
+    // PR #125 起同一房间同一时刻只跑一种后台任务（单飞锁），两种扫描不再并发。
+    // 因此分别触发两个定时器，并在下一次触发前等前一个任务释放锁——验收目标不变：
+    // 坏档房间被跳过、健康房间两种扫描都跑过、且都只针对健康房间。
     callbacks.get(60_000)!();
+    // #140：任务体现在还带 {signal}，只断言房间与 signal 的存在，不断言 AbortSignal 内部结构
+    await vi.waitFor(() => expect(canonize.mock.calls.map((c) => c[0])).toEqual([healthy]));
+    await vi.waitFor(() => expect(deps.background.isBusy(healthy)).toBe(false));
     callbacks.get(200)!();
-    await vi.waitFor(() => {
-      expect(canonize.mock.calls).toEqual([[healthy]]);
-      expect(gossip.mock.calls).toEqual([[healthy]]);
-    });
+    await vi.waitFor(() => expect(gossip.mock.calls.map((c) => c[0])).toEqual([healthy]));
   } finally {
     canonize.mockRestore();
     gossip.mockRestore();

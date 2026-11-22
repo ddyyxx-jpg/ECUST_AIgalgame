@@ -15,6 +15,7 @@ import type {
   ApplyMode,
   ApplyOptions,
   ApplyResult,
+  AttrExpectation,
   Envelope,
   OpName,
   Proposal,
@@ -157,6 +158,27 @@ export class DefaultArbiter {
     this.budgets.delete(turnKey);
   }
 
+  /**
+   * 结算前置条件（3.8.0）：逐条比对当前快照，返回首条失配的可读原因，全部满足返回 null。
+   * expected===null 表示属性必须不存在；实体或属性不存在时实际值视为 undefined。
+   * AttrValue 只有 number/string/boolean，用 === 精确比较（契约只承诺标量相等，不承诺深比较）。
+   * 并发安全由 exclusive 串行链保证：本检查在链内读取快照；测试用双 expectAttrs 覆盖（后一个请求按前一个提交后的值必然失配）。
+   */
+  private firstAttrMismatch(expect: AttrExpectation[] | undefined, state: WorldState): string | null {
+    if (!expect || expect.length === 0) return null;
+    for (const e of expect) {
+      const actual = state.entities[e.entityId]?.attrs[e.key];
+      const present = actual !== undefined;
+      const matched = e.expected === null ? !present : present && actual === e.expected;
+      if (!matched) {
+        const wanted = e.expected === null ? "不存在" : JSON.stringify(e.expected);
+        const got = present ? JSON.stringify(actual) : "不存在";
+        return `属性 ${e.entityId}.${e.key} 期望 ${wanted}，实际 ${got}`;
+      }
+    }
+    return null;
+  }
+
   /** 只校验不落库、不消耗回合预算：给 Turn 做"先 dryRun 再 apply"的两段式，也方便单元测试 */
   async dryRun(roomId: RoomId, ops: Proposal[]): Promise<ValidationResult> {
     const seq = await this.store.load(roomId); // 先载入：文件实现未载入时 seq 是 0
@@ -185,6 +207,16 @@ export class DefaultArbiter {
       }
 
       const state = await this.store.snapshot(roomId);
+
+      // 前置条件守卫：先 seq 后 attrs；失配时根本不进入 simulate，不动预算、不 append（严格 atomic）
+      const mismatch = this.firstAttrMismatch(opts.expectAttrs, state);
+      if (mismatch !== null) {
+        return {
+          ok: false, mode, seq: seqBefore, applied: [], rejected: [], events: [],
+          error: { code: "E_PRECONDITION", message: mismatch },
+        };
+      }
+
       const turnKey = cause.causedBy ?? cause.id;
       const budget = this.budgetOf(turnKey, opts.turnBudget);
       // 失败回滚时预算也要回滚，否则一条被拒的提案会白吃掉本回合额度

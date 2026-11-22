@@ -281,7 +281,7 @@ export class ConversationHostV2 implements ConversationTurnV2 {
       let applied = pending.applied;
       if (pending.retry) {
         applied = await this.deps.arbiter.apply(pending.roomId, pending.retry.ops, pending.retry.cause, {
-          expectedSeq: pending.retry.expectedSeq, captureState: true,
+          expectedSeq: pending.retry.expectedSeq, captureState: true, expectAttrs: pending.retry.expectAttrs,
         });
         if (!applied.ok) {
           const retryable = applied.error?.code === "E_STORE_FAULT";
@@ -326,7 +326,8 @@ export class ConversationHostV2 implements ConversationTurnV2 {
     // #136：玩家沉默期的 NPC-NPC 自主推进，最多 maxAutoRounds 轮
     if (input.auto) {
       if (!input.utterance && (s.autoRounds ?? 0) >= this.deps.policy.maxAutoRounds) {
-        return [{ type: "conversation.notice", text: this.deps.policy.messages.autoLimit }];
+        // reason 是机器可读标记：notice 文案来自 content 配置（可改语言），客户端不能靠文本匹配
+        return [{ type: "conversation.notice", text: this.deps.policy.messages.autoLimit, reason: "autoLimit" }];
       }
     }
     // ④ 只把本会话到期的 phase 事件塞进本回合返回流
