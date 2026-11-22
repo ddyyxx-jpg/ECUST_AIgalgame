@@ -5,6 +5,33 @@
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）→ `v0.6.0` dev/v2 群聊 + 开放 issue 收口 + 像素 UI（PR #144 / #149 / #148，CONTRACT 3.6.2 → 3.8.0）。
 
 
+## 未发布 — #151 复审两条 P1（`busy` 时自动进出室内）
+
+> 仅前端表现层：不改契约、不新增 op、不动服务端；`CONTRACT_VERSION` 3.8.0 不变。
+
+### 修复
+- **P1-1 回合 streaming 中走到点位会发 travel**：`CampusMap` 的 160ms probe 原来只看距离，不看 `busy`（`busy` 只用于按钮 disabled），且 `busy` 是 props、interval 闭包读不到最新值。现在 probe 同步 `busyRef`，自动进入 / 自动 travel 都过新的纯函数 `stepEntryDwell` / `decideTravel`（`travelIntent` 只做纯谓词）：`busy` 期间不累计入口 dwell、不发 `travel`；回合结束后仍站在入口会重新数满 1.5 秒再进一次。
+- **P1-2 室内站出口时回合没结束就切回大地图**：`InteriorMap` 的出口 dwell 同样加 `busy` 门禁（`stepExitDwell`）：`busy` 时清零计时、不触发 `onExit`；回合结束后重新数满 1.5 秒才退出一次。
+
+### 复审补充（PR #152 复审 P3-2）
+- 场景级自动 travel 原先只在「刚进入点位范围」那一拍评估：回合 streaming 中蹭进范围、回合结束后原地不动，就再也不会自动到达（入口 dwell 却会重新计时，两条路行为不一致）。现在被 busy 挡下的点位记入 `pendingTravelRef`，回合结束后仍站在旁边补发一次；判定抽成 `decideTravel`（`skip` / `defer` / `go`），`travelIntent` 退化成纯谓词参与判定。
+- 传送失败仍是「离开再靠近才重试」——不会原地每 160ms 重发。
+
+### 复审补充之二（PR #152 定向复审）
+- `decideTravel` 返回 `skip` 时清掉同点位的 `pendingTravelRef`：否则「busy 时 defer 了 A → 手动 travel 到 A → 又走到 B 但仍站在 A 点位旁」会补发一次回 A。
+- 删除被 `decideTravel` 取代的 `shouldAutoTravel`（生产已无调用），`travelIntent` 保留为纯谓词。
+- `skip` 清待补点位也抽成纯函数 `nextPending(prev, sceneId, decision)`（`defer` 记下 / `go` 清空 / `skip` 只在同点位时清）：组件不再自己写分支，「手动到达待补点位后走到别处不回弹」有单测覆盖。
+- 复审暴露的共性问题（闭包读 props、副作用逻辑不可测、多出口只修一个、非阻断项不落单、PR 描述落后）已写进 `AGENTS.md` §13。
+
+### 测试
+- 新增 `apps/web/src/map-autoenter.test.ts`（18 例）：busy 时站满不触发、busy 结束后重新计时并只触发一次、离开范围重新武装、同场景/已 travel 不重复发；`decideTravel` 的 `defer → go` 补发、pending 命中别的点位不发；`nextPending` 的四条落账分支（含 skip 清 pending）。
+- 这两段逻辑原先埋在 rAF/interval 闭包里只能靠真人走查，抽成纯函数后可在 node 断言。
+- #151 的其余非阻断项（`ENTER_DIST` 手感、`CandidatePanel` waiting 态、`pathfind`/`interior` 零单测、字体授权、资产体积、CSS 作用域）与本节新增的人工走查清单已落进 #150。
+
+### 验证
+- `npm run typecheck` 0；`npx vitest run` **125 文件 / 1018 例**全过；`npm run check:contract` 8/8（3.8.0）；`npm run build:web` 通过（`index-emAcvymE.js` 408.19 kB，gzip 127.75 kB）。
+
+
 ## v0.6.0 — 2026-11-22 像素风 UI + 开放 issue 收口 + dev/v2 群聊（PR #144 / #148 / #149；合入 main `657d6c5`；CONTRACT 3.6.2 → 3.8.0）
 
 > 本版把三段工作一起发版：**像素风 UI / 室内二级地图 / NPC 寻路**（#148）、**开放 issue 收口批**（#149，含夜间密谋秘密出口的 P0 修复与 19 个 issue 收口）、**dev/v2 群聊运行质量批**（#144，CONTRACT 3.7.0，细节见下方 3.7.0 段——它是本版第一个纳入 tag 的契约版本）。

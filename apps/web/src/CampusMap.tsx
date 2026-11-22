@@ -17,6 +17,7 @@ import type { MapScene, MapView } from "./api.ts";
 import { fetchGallery, muttersByNpcId } from "./api-gallery.ts";
 import type { GalleryNpc } from "./api-gallery.ts";
 import { interiorFor } from "./interior.ts";
+import { decideTravel, nextPending, stepEntryDwell } from "./map-autoenter.ts";
 
 const W = 6000;
 const H = 4500;
@@ -182,6 +183,11 @@ export default function CampusMap({
   const collisionRef = useRef<CollisionData | null>(null);
   const onEnterInteriorRef = useRef(onEnterInterior);
   onEnterInteriorRef.current = onEnterInterior;
+  // probe 跑在 interval 里，闭包里读不到最新的 props.busy（回合 streaming 期间不能偷偷 travel）
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  /** busy 期间蹭到的新点位：回合结束后补发一次自动到达 */
+  const pendingTravelRef = useRef("");
   /** 进室内：靠近入口满 0.5 秒自动进入；先离开一次范围才会再次触发（防止刚出来又被吸进去） */
   const ENTRY_DWELL_MS = 1500;
   const entryArmedRef = useRef(false);
@@ -466,34 +472,22 @@ export default function CampusMap({
         }
       };
 
-      if (!bestEntry) {
-        // 离开所有入口范围：重新武装，下次靠近才会触发
-        entryArmedRef.current = true;
-        dwell.id = "";
-        dwell.since = 0;
-        dwell.fired = false;
-        paintRing(null, 0);
-      } else if (!entryArmedRef.current) {
-        // 在范围内但还没武装：只有当人真的离开过才恢复（防止原地反复进出）
-        dwell.id = bestEntry.id;
-        dwell.since = 0;
-        dwell.fired = false;
-        paintRing(null, 0);
-      } else if (dwell.id !== bestEntry.id) {
-        dwell.id = bestEntry.id;
-        dwell.since = nowMs;
-        dwell.fired = false;
-        paintRing(bestEntry.id, 0);
-      } else {
-        const pct = Math.min(1, (nowMs - dwell.since) / ENTRY_DWELL_MS);
-        paintRing(bestEntry.id, pct);
-        if (!dwell.fired && pct >= 1) {
-          dwell.fired = true;
-          entryArmedRef.current = false;
-          paintRing(null, 0);
-          onEnterRef.current(bestEntry.id);
-          onEnterInteriorRef.current?.(bestEntry.id);
-        }
+      const step = stepEntryDwell({
+        busy: busyRef.current,
+        armed: entryArmedRef.current,
+        dwell,
+        bestEntryId: bestEntry?.id ?? null,
+        now: nowMs,
+        dwellMs: ENTRY_DWELL_MS,
+      });
+      dwell.id = step.dwell.id;
+      dwell.since = step.dwell.since;
+      dwell.fired = step.dwell.fired;
+      entryArmedRef.current = step.armed;
+      paintRing(step.fire ? null : (bestEntry?.id ?? null), step.pct);
+      if (step.fire && bestEntry) {
+        onEnterRef.current(bestEntry.id);
+        onEnterInteriorRef.current?.(bestEntry.id);
       }
 
       let bestScene: MapScene | null = null;
@@ -507,24 +501,43 @@ export default function CampusMap({
         }
       }
       const sceneKey = bestScene?.id ?? "";
-      if (sceneKey !== nearSceneRef.current) {
+      const enteredRange = sceneKey !== nearSceneRef.current;
+      if (enteredRange) {
         nearSceneRef.current = sceneKey;
         setNearScene(bestScene);
-        if (bestScene && bestScene.id !== live.player.locId && enteredRef.current !== bestScene.id) {
-          enteredRef.current = bestScene.id;
-          // 传送失败就把"已进入"标记清掉，让人还能再试一次，而不是永远卡在门口
-          const pending = onEnterRef.current(bestScene.id);
-          if (pending && typeof (pending as Promise<unknown>).then === "function") {
-            (pending as Promise<{ ok: boolean }>)
-              .then((r) => {
-                if (!r || !r.ok) enteredRef.current = "";
-              })
-              .catch(() => {
-                enteredRef.current = "";
-              });
-          }
+      }
+      const goTravel = (scene: MapScene) => {
+        enteredRef.current = scene.id;
+        pendingTravelRef.current = "";
+        // 传送失败就把"已进入"标记清掉，让人还能再试一次，而不是永远卡在门口
+        const pending = onEnterRef.current(scene.id);
+        if (pending && typeof (pending as Promise<unknown>).then === "function") {
+          (pending as Promise<{ ok: boolean }>)
+            .then((r) => {
+              if (!r || !r.ok) enteredRef.current = "";
+            })
+            .catch(() => {
+              enteredRef.current = "";
+            });
         }
-        if (!bestScene) enteredRef.current = "";
+      };
+      if (!bestScene) {
+        enteredRef.current = "";
+        pendingTravelRef.current = "";
+      } else {
+        const decision = decideTravel({
+          busy: busyRef.current,
+          enteredRange,
+          pendingId: pendingTravelRef.current,
+          sceneId: bestScene.id,
+          playerLocId: live.player.locId,
+          enteredId: enteredRef.current,
+        });
+        // 回合 streaming：不发请求，但记住这个点位；回合结束后仍站在旁边就补一次（与入口 dwell 对齐）。
+        // 待补的落账交给 nextPending（纯函数，单测覆盖）：defer 记下、go 清空、skip 只在同点位时清，
+        // 避免「手动 travel 到待补点位后又走到别处」被"补发"回旧场景。
+        pendingTravelRef.current = nextPending(pendingTravelRef.current, bestScene.id, decision);
+        if (decision === "go") goTravel(bestScene);
       }
 
       let bestNpc: { id: string; name: string } | null = null;
