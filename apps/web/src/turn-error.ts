@@ -15,7 +15,7 @@ const FRIENDLY: Record<string, string> = {
   E_RATE_LIMITED: "请求太频繁了，稍等一下再重试。",
   E_UPSTREAM: "模型服务暂时不可用，可以重试。",
   E_STORE_FAULT: "服务端写状态失败，可以重试（同一回合不会重复扣费）。",
-  E_TURN_BUSY: "上一回合还没结束，稍等你再试。",
+  E_TURN_BUSY: "房间正忙（回合或时间推进进行中），请稍后重试。",
 };
 
 export function explainTurnError(code: string, message?: string, retryable?: boolean): string {

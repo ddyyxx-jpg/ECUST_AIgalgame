@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Proposal } from "../../../packages/shared/src/contract/types.ts";
-import { projectProposalsForPlayer } from "./outbound-secrets.ts";
+import { projectProposalsForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
 
 describe("projectProposalsForPlayer", () => {
   it("整条丢掉引擎内部属性写入，保留普通属性与公开记忆", () => {
@@ -23,5 +23,23 @@ describe("projectProposalsForPlayer", () => {
     const out = projectProposalsForPlayer(proposals);
     expect(out).toHaveLength(1);
     expect(out[0]?.args).toEqual({ entityId: "npc_1", status: "active" });
+  });
+});
+
+describe("projectTurnEventForPlayer", () => {
+  it("v1 turn.patch 的 state 与 ops 都剥掉 sim_lease", () => {
+    const ev = {
+      type: "turn.patch",
+      state: {
+        entities: { npc_1: { id: "npc_1", kind: "npc", attrs: { sim_lease: "LEAK" } } },
+        plots: [],
+      },
+      ops: [
+        { op: "attr.set", args: { entityId: "npc_1", key: "sim_lease", value: "LEAK" }, reason: "x", by: "tick" },
+      ],
+    };
+    const out = projectTurnEventForPlayer(ev);
+    expect(JSON.stringify(out)).not.toContain("sim_lease");
+    expect(out.ops).toEqual([]);
   });
 });

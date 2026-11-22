@@ -125,7 +125,7 @@ export function projectTurnEventForPlayer<T extends { type: string }>(ev: T): T 
   const next: Record<string, unknown> = { ...(ev as unknown as Record<string, unknown>) };
   if (patch.state) next.state = projectStateForPlayer(patch.state);
   // ops 里有 NPC 私忆、撤回正文与 plot 的 GM args；客户端不用它，统一按玩家视角重建
-  if (Array.isArray(patch.ops)) next.ops = projectProposals(patch.ops);
+  if (Array.isArray(patch.ops)) next.ops = projectProposalsForPlayer(patch.ops);
   return next as T;
 }
 
