@@ -60,6 +60,9 @@ export class SimClock {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    // 进程关停时清掉“卡死房间”快照；底层 tick 若还在写由进程退出兜底，
+    // 不能把上一轮的锁状态留给下一次启动/健康检查。
+    this.stuckSince.clear();
   }
 
   /** 当前仍被卡死 tick 占用的房间与已锁时长，供运维告警/健康检查读取。 */

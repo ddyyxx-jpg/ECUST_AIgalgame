@@ -640,7 +640,15 @@ export class MapService {
         lines.push(...step.utterances.map((u) => u.text));
         done = step.done;
       }
-      await this.deps.dialogue.close(session.id, "scene dialogue");
+      const summary = await this.deps.dialogue.close(session.id, "scene dialogue");
+      // 场景对话是只读路径：导演可能把记忆/关系提案攒在 summary.proposals 里，
+      // 这里没有 Arbiter 批次，静默丢弃会让“对话产生了效果”变成不可观测。
+      // 保持只读语义，但把丢弃显式记录；将来要落库必须走回合提交并加房间锁。
+      if (summary.proposals.length > 0) {
+        console.warn(
+          `[map] 场景对话 ${sceneId}/${dialogueId} 产生 ${summary.proposals.length} 条提案，当前只读路径不落库（如需生效请改走回合 Arbiter）`,
+        );
+      }
       // 还不认识（不知道名字）：先补一句"陌生人"开场，NPC 不会假装熟络，
       // 而是问怎么称呼；玩家随后在对话流里自述名字，由 introduce 模块落 knows_name 与记忆。
       const opener = knowsNameOf(npc) ? [] : [`（他看了你一眼，显然不认识你）「同学，你是？怎么称呼？」`];
