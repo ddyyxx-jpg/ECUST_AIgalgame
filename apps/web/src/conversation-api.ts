@@ -25,36 +25,19 @@ export function conversationModesPath(roomId: string): string {
   return `/api/v1/rooms/${encodeURIComponent(roomId)}/conversation/modes`;
 }
 
-/** 只有 2xx 算「v2 可用」；404/405 明确非 v2，其余状态由 detectConversation 返回 null 保持现模式（见下）。 */
+/** 只有 2xx 算「v2 可用」；404/405/401/403/5xx 都退回 v1（保守，宁可不接也不坏老流程）。 */
 export function isConversationAvailable(status: number): boolean {
   return status >= 200 && status < 300;
 }
 
-/**
- * 探测 v2 会话端点，返回三态（PR #126 三轮复审必做 1）：
- * - true：2xx，v2 可用；
- * - false：404/405，端点明确不存在，明确非 v2；
- * - null：无法判定（网络异常、5xx、401/403 等）——调用方必须保持现有模式，
- *   不能因为一次抖动把已探测/已恢复的 v2 房间误打回 v1。
- */
-export async function detectConversation(roomId: string, signal?: AbortSignal): Promise<boolean | null> {
+/** 探测失败不是错误：老服务端就该没有这个端点，返回 false 让 App 用 v1。 */
+export async function detectConversation(roomId: string, signal?: AbortSignal): Promise<boolean> {
   try {
     const r = await apiFetch(conversationProbePath(roomId), signal ? { signal } : undefined);
-    if (r.status >= 200 && r.status < 300) return true;
-    if (r.status === 404 || r.status === 405) return false;
-    return null;
+    return isConversationAvailable(r.status);
   } catch {
-    return null;
+    return false;
   }
-}
-
-/**
- * 探测结果 → 要切换的模式；null = 保持现有模式。
- * 单独成纯函数，是为了让「探测失败不误伤 v2」这条调用点语义可被测试钉住。
- */
-export function convModeAfterProbe(probe: boolean | null): "v1" | "v2" | null {
-  if (probe === null) return null;
-  return probe ? "v2" : "v1";
 }
 
 /** 说话类型清单的一条（与 GET /conversation/modes 的返回结构对齐）。 */

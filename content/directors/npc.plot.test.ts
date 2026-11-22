@@ -139,7 +139,7 @@ describe("npc.plot 导演（真实链路 + 结构化断言）", () => {
     expect(llm.calls).toBe(1);
   });
 
-  it("discoveryProposals：按 leakPoints 出 evidence；未传态度键不出 attr.delta", () => {
+  it("discoveryProposals：按 leakPoints 出 evidence；态度键未接线时不出 attr.delta", () => {
     const plot = { goal: "g", actors: [...ACTORS], leakPoints: ["线索一", "线索二"], forbidReveal: SECRET };
     const unwired = discoveryProposals(makeCtx(), plot, "observe");
     expect(unwired.ok).toBe(true);
@@ -152,12 +152,13 @@ describe("npc.plot 导演（真实链路 + 结构化断言）", () => {
     expect(unwired.proposals.some((p) => p.op === "attr.delta")).toBe(false);
     expect(unwired.ui?.lists?.[0]?.items).toHaveLength(2);
 
-    // 显式传入内容层配置的属性键：每名密谋参与者一条 attr.delta（I2：键来自调用方）。
-    const key = "guard";
-    const wired = discoveryProposals(makeCtx(), plot, "ask", { attitudeAttr: key });
+    // 接线后按 moduleState 键生效，不硬编码属性名（I2）；这里仅验证 gated 行为。
+    const state = makeRoom();
+    state.moduleState["npc.plot.attitudeAttr"] = "guard";
+    const wired = discoveryProposals(makeCtx({ state }), plot, "ask");
     expect(wired.proposals.filter((p) => p.op === "attr.delta")).toHaveLength(2);
     for (const d of wired.proposals.filter((p) => p.op === "attr.delta")) {
-      expect(d.args).toMatchObject({ key, delta: 8 });
+      expect(d.args).toMatchObject({ key: "guard", delta: 8 });
     }
   });
 

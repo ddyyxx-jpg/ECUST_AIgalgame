@@ -85,16 +85,5 @@ export interface CanonizeReport {
   errors: string[];
   /** 当日已写（含本次） */
   writtenToday: number;
-  /**
-   * 协作式中止标记：调用方传入的 signal 已 abort 时为 true。
-   * 此时 written 只含中止前已由 Arbiter 落库的批次，不做回滚。
-   * 不传 signal 时该字段不会出现，旧调用方行为完全不变。
-   */
-  aborted?: true;
-}
-
-/** 协作式取消参数：不给 signal 时行为与旧签名完全一致 */
-export interface CanonizeRunOptions {
-  signal?: AbortSignal;
 }
 

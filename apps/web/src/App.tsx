@@ -12,7 +12,6 @@ import { makeTurnHandlers } from "./turn-handlers.ts";
 import AuthScreen from "./AuthScreen.tsx";
 import type { SaveEntry } from "./api.ts";
 import ChatPanel from "./ChatPanel.tsx";
-import { fullScreenOverlayOpen } from "./candidate-keys.ts";
 import DraftsPanel from "./DraftsPanel.tsx";
 import InboxPanel from "./InboxPanel.tsx";
 import GalleryPanel from "./GalleryPanel.tsx";
@@ -24,16 +23,12 @@ import { turnSuggestions } from "./suggestions.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
 import { shouldDropRetryOnMove } from "./turn-error.ts";
-import { createSessionResync, type SessionResync } from "./session-wiring.ts";
-import { loadRoomThenReset } from "./room-enter.ts";
-import { holdResumedBusy } from "./resumed-busy.ts";
-import { keepRoomLocalState, restoreRoomLocalState, type RoomLocalState } from "./room-local-state.ts";
 import { fetchRoomEvents } from "./events-replay.ts";
 import { npcLocIdFromLinks, targetStillInScene } from "./npc-presence.ts";
 import { phaseLabel } from "./ui.ts";
 import type { Line, LineKind } from "./ui.ts";
 import type { ConversationEvent } from "../../../packages/shared/src/contract/v2.ts";
-import { convModeAfterProbe, detectConversation, fetchUtteranceModes, runConversationAuto, runConversationTurn, runConversationUtterance } from "./conversation-api.ts";
+import { detectConversation, fetchUtteranceModes, runConversationAuto, runConversationTurn, runConversationUtterance } from "./conversation-api.ts";
 import type { UtteranceDraft, UtteranceModeInfo } from "./conversation-api.ts";
 import { DEFAULT_LISTEN_TIMEOUT_MS, initialConversationView, isListeningExpired, linesFromView, pendingLinesFor, reduceConversationView } from "./conversation-view.ts";
 import type { ConversationView } from "./conversation-view.ts";
@@ -74,9 +69,6 @@ export default function App() {
   const [debugPass, setDebugPass] = useState("");
   const [debugErr, setDebugErr] = useState("");
   const [roomId, setRoomId] = useState<string>("");
-  /** 每次渲染同步：enterRoom 是 useCallback，异步流程里要判断「当前画面属于哪个房间」 */
-  const roomIdRef = useRef("");
-  roomIdRef.current = roomId;
   /** 当前房间的玩家角色 id：由服务端签发（建房返回值 / 房间成员表），不在前端猜 */
   const [actorId, setActorId] = useState<string>("");
   const [savedRoomId, setSavedRoomId] = useState<string>("");
@@ -93,9 +85,6 @@ export default function App() {
    * v2 事件行单独存在 convLines，渲染时接在 v1 历史之后——老流程一行不改。
    */
   const [convMode, setConvMode] = useState<"v1" | "v2">("v1");
-  /** resetRoomUi 会把 convMode 置 v1；同房间重进房要恢复已探测的值（PR #126 P2） */
-  const convModeRef = useRef<"v1" | "v2">("v1");
-  convModeRef.current = convMode;
   const [convLines, setConvLines] = useState<Line[]>([]);
   /** v2 说话类型清单（GET /conversation/modes）；空数组 = 老流程或取清单失败 */
   const [v2Modes, setV2Modes] = useState<UtteranceModeInfo[]>([]);
@@ -106,12 +95,7 @@ export default function App() {
   const stateRef = useRef<WorldState | null>(null);
   stateRef.current = state;
   const [input, setInput] = useState("");
-  /** 草稿：enterRoom 在 reset 前捕获、成功后恢复（PR #126 P2），异步流程里读最新值 */
-  const inputRef = useRef("");
-  inputRef.current = input;
   const [busy, setBusy] = useState(false);
-  /** PR-3 前台恢复接线实例（effect 中创建）；enterRoom 成功时用它回写上次同步时刻 */
-  const resyncRef = useRef<SessionResync | null>(null);
   /** v2 回合的乐观玩家行：点发送到 committed 之间先浅色显示，引擎把本人 delivery 投回来就清掉 */
   const [pendingLines, setPendingLines] = useState<{ kind: LineKind; text: string }[]>([]);
   const [err, setErr] = useState<string>("");
@@ -119,11 +103,7 @@ export default function App() {
   const [errRetryable, setErrRetryable] = useState(false);
   /** 流结束但没有 commit/error：重试前必须先向服务端核对（不盲目重发） */
   const [unconfirmed, setUnconfirmed] = useState<{ clientTurnId: string } | null>(null);
-  /**
-   * #87：/events 回放降级提示（actorId 传错 → 不渲染私信）；空字符串 = 不显示。
-   * PR-3：前台恢复失败也复用这条提示位——失败同样计入一次同步（session-wiring 在发起前
-   * 就刷新了同步时刻），但不会 reset，所以旧画面、草稿与可重试状态都保留。
-   */
+  /** #87：/events 回放降级提示（actorId 传错 → 不渲染私信）；空字符串 = 不显示 */
   const [eventsNotice, setEventsNotice] = useState<string>("");
   /** 最近一次玩家行动：重试时原样再发，不重复打印玩家行 */
   const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null; utterance?: UtteranceDraft } | null>(null);
@@ -332,162 +312,83 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
   }, []);
 
   /**
-   * 进入一个已存在的房间：**先把数据拉全，成功后才 reset 并切换 UI**。
-   * PR #126 P1-2：旧实现第一行 resetRoomUi() 会清 state/lines/input，resumed 拉取失败时
-   * 画面被清空、草稿丢失；现在失败直接抛给调用方（前台恢复走 onNotice），旧画面、草稿与
-   * 可重试状态都保持原样。首次进房/普通换房同样走这条路径，只是没有旧画面可保。
-   * 「reset 必须在两次 fetch 之后」由 room-enter.ts 的 loadRoomThenReset 保证并被测试钉死。
+   * 进入一个已存在的房间：先作废上一局的在途请求并清画面，再拉权威状态与历史。
+   * 开场只由前端渲染（不在前端推演世界）；之后玩家输入与叙事接在它下面。
    */
   const enterRoom = useCallback(
     async (id: string, opts: { resumed?: boolean; scenarioId?: string; actorId?: string } = {}) => {
       const token = scopeRef.current.renew();
       const current = () => scopeRef.current.isCurrent(token.version);
-      // resumed 期间禁止新回合（PR #126 复审 P2）：前台恢复会先拉数据后 reset，若这段窗口
-      // 里允许玩家发回合，新回合可能被返回的旧快照/历史覆盖，或 resetRoomUi 把 busy 清零。
-      // 接线的前置条件保证进入时 busy=false；占位与归还交给 holdResumedBusy——两次重进房
-      // 重叠时只有最新调用有权归还，旧调用的 finally 不会提前放开新调用的 busy（三轮 P3）。
-      const busyHold = holdResumedBusy({ resumed: opts.resumed === true, setBusy, isCurrent: current });
+      resetRoomUi();
+      const snapshot = await fetchState(id);
+      if (!current()) return;
+      // actorId 的优先级：调用方（建房/存档）→ 房间成员表 → 旧房间兼容值。
+      const memberActorId = snapshot.room.members.find((m) => m.role === "player")?.actorId;
+      const candidates = [opts.actorId, memberActorId].filter((v): v is string => typeof v === "string" && v.length > 0);
+      const resolvedActorId = candidates.find((v) => snapshot.entities[v]) ?? candidates[0] ?? LEGACY_ACTOR_ID;
+      const fallback = scenarios[0] ?? null;
+      let sc: Scenario | null = fallback;
       try {
-        // 续玩时读历史失败则留在标题页/旧画面，保留存档与当前状态供玩家重试。
-        const fetchHistoryOrFallback = async (): Promise<HistoryPage> => {
-          try {
-            return await fetchHistory(id);
-          } catch (e) {
-            if (!current()) return { history: [], lastCommittedSeq: 0, hasEarlier: false };
-            if (isUnauthorized(e)) throw e;
-            if (opts.resumed) throw new Error("对话历史暂不可用，请稍后重试", { cause: e });
-            return { history: [], lastCommittedSeq: 0, hasEarlier: false };
-          }
-        };
-        const loaded = await loadRoomThenReset<WorldState, HistoryPage, {
-          snapshot: WorldState;
-          page: HistoryPage;
-          sc: Scenario | null;
-          resolvedActorId: string;
-          local: RoomLocalState;
-        }>({
-          fetchState: () => fetchState(id),
-          fetchHistory: fetchHistoryOrFallback,
-          isCurrent: current,
-          // capture 在 reset 之前执行：数据已齐、请求仍有效，才解析 actor/剧本并读取要跨
-          // 重进房保留的本地状态（草稿/convMode）。reset 之后这些旧 state 就没了。
-          capture: (snapshot, page) => {
-            // actorId 的优先级：调用方（建房/存档）→ 房间成员表 → 旧房间兼容值。
-            const memberActorId = snapshot.room.members.find((m) => m.role === "player")?.actorId;
-            const candidates = [opts.actorId, memberActorId].filter((v): v is string => typeof v === "string" && v.length > 0);
-            const resolvedActorId = candidates.find((v) => snapshot.entities[v]) ?? candidates[0] ?? LEGACY_ACTOR_ID;
-            const fallback = scenarios[0] ?? null;
-            let sc: Scenario | null = fallback;
-            try {
-              const stored = localStorage.getItem(scenarioKey(id)) ?? "";
-              const wanted = opts.scenarioId ?? stored;
-              sc = scenarios.find((s) => s.id === wanted) ?? fallback;
-              if (sc) localStorage.setItem(scenarioKey(id), sc.id);
-              if (roomKey) localStorage.setItem(roomKey, id);
-              setSavedRoomId(id);
-            } catch {
-              // 隐私模式读不了/写不了本地记录：用调用方给的或默认开局，不影响本局
-              sc = opts.scenarioId ? scenarios.find((s) => s.id === opts.scenarioId) ?? fallback : fallback;
-            }
-            // 同房间重进房才保留草稿/convMode；换房/新开局清空。规则抽在
-            // room-local-state.ts 的纯函数里，删掉保留逻辑测试会红（三轮必做 2）。
-            const local = keepRoomLocalState({
-              resumed: opts.resumed === true,
-              targetRoomId: id,
-              currentRoomId: roomIdRef.current,
-              currentDraft: inputRef.current,
-              currentConvMode: convModeRef.current,
-            });
-            return { snapshot, page, sc, resolvedActorId, local };
-          },
-          reset: resetRoomUi,
-          restore: (entry) => {
-            const local = restoreRoomLocalState(entry.local);
-            if (local.input !== null) setInput(local.input);
-            if (local.convMode !== null) setConvMode(local.convMode);
-            const restored = restoreConversation(entry.page.history, entry.sc, opts.resumed === true, () => ++lineId);
-            if (restored.lines.length > 0) {
-              setLines(restored.lines);
-            } else {
-              // 开场 = 对话流的第一屏：身份 → 正文。没有预设剧本时只留一行提示，不编造内容。
-              setLines([]);
-              getTw().enqueue(restored.opening);
-            }
-            setEarlier({ before: entry.page.earlierCursor ?? earlierCursor(entry.page.history), hasEarlier: entry.page.hasEarlier, loading: false });
-            setScenario(entry.sc);
-            setState(entry.snapshot);
-            setActorId(entry.resolvedActorId);
-            setRoomId(id);
-            setTab("chat");
-            setScreen("game");
-          },
-        });
-        if (!loaded) return;
-        // 成功进房 = 已同步（复审 P2）：否则 lastSyncAt 停在 0，刚进房就切后台 6s 回来
-        // 会被判成「很久没同步」而立即全量重拉。
-        resyncRef.current?.markSynced();
-        // v2 服务端（issue #89）探测：404/405 明确非 v2 才切 v1；网络抖动/5xx（null）
-        // 保持 restore 出来的模式，避免把 v2 房间误打回 v1（PR #126 三轮必做 1）。
-        // 探测放在 UI 呈现之后，不阻塞进房；切房/登出由 current() 拦掉。
-        void detectConversation(id, token.signal).then((probe) => {
-          if (!current()) return;
-          const nextMode = convModeAfterProbe(probe);
-          if (nextMode !== null) setConvMode(nextMode);
-          if (probe === true) void fetchUtteranceModes(id, token.signal).then((modes) => { if (current()) setV2Modes(modes); });
-        });
-
-        // #87：历史事件回放不阻塞进房。带本人 actorId 请求；若被 403 判为传错，
-        // fetchRoomEvents 会无 actorId 重拉一次，只关私信并把提示带回来（不判死事件流）。
-        void fetchRoomEvents(id, { actorId: loaded.resolvedActorId })
-          .then((outcome) => {
-            if (current()) setEventsNotice(outcome.notice ?? "");
-          })
-          .catch(() => {
-            // 纯函数决策不抛；这里只兜意外，绝不让一次回放失败影响进房
-          });
-      } finally {
-        busyHold.release();
+        const stored = localStorage.getItem(scenarioKey(id)) ?? "";
+        const wanted = opts.scenarioId ?? stored;
+        sc = scenarios.find((s) => s.id === wanted) ?? fallback;
+        if (sc) localStorage.setItem(scenarioKey(id), sc.id);
+        if (roomKey) localStorage.setItem(roomKey, id);
+        setSavedRoomId(id);
+      } catch {
+        // 隐私模式读不了/写不了本地记录：用调用方给的或默认开局，不影响本局
+        sc = opts.scenarioId ? scenarios.find((s) => s.id === opts.scenarioId) ?? fallback : fallback;
       }
+
+      // 续玩时读历史失败则留在标题页，保留存档供玩家重试。
+      let page: HistoryPage = { history: [], lastCommittedSeq: 0, hasEarlier: false };
+      try {
+        page = await fetchHistory(id);
+      } catch (e) {
+        if (!current()) return;
+        if (isUnauthorized(e)) throw e;
+        if (opts.resumed) throw new Error("对话历史暂不可用，请稍后重试", { cause: e });
+      }
+      if (!current()) return;
+      const tw = getTw();
+      tw.reset();
+      lastFacts.current = "";
+      const restored = restoreConversation(page.history, sc, opts.resumed === true, () => ++lineId);
+      if (restored.lines.length > 0) {
+        setLines(restored.lines);
+      } else {
+        // 开场 = 对话流的第一屏：身份 → 正文。没有预设剧本时只留一行提示，不编造内容。
+        setLines([]);
+        tw.enqueue(restored.opening);
+      }
+
+      setEarlier({ before: page.earlierCursor ?? earlierCursor(page.history), hasEarlier: page.hasEarlier, loading: false });
+      setScenario(sc);
+      setState(snapshot);
+      setActorId(resolvedActorId);
+      setRoomId(id);
+      setTab("chat");
+      setScreen("game");
+      // v2 服务端（issue #89）探测：探不到 /conversation 就保持 v1 /turns，老流程零回归。
+      // 探测放在 UI 呈现之后，不阻塞进房；失败/切房都会由 current() 拦掉。
+      void detectConversation(id, token.signal).then((v2) => {
+        if (!current()) return;
+        setConvMode(v2 ? "v2" : "v1");
+        if (v2) void fetchUtteranceModes(id, token.signal).then((modes) => { if (current()) setV2Modes(modes); });
+      });
+
+      // #87：历史事件回放不阻塞进房。带本人 actorId 请求；若被 403 判为传错，
+      // fetchRoomEvents 会无 actorId 重拉一次，只关私信并把提示带回来（不判死事件流）。
+      void fetchRoomEvents(id, { actorId: resolvedActorId })
+        .then((outcome) => {
+          if (current()) setEventsNotice(outcome.notice ?? "");
+        })
+        .catch(() => {
+          // 纯函数决策不抛；这里只兜意外，绝不让一次回放失败影响进房
+        });
     },
     [roomKey, scenarios, resetRoomUi],
   );
-
-  /**
-   * PR-3 客户端轻唤醒：合盖/切后台/断网再回来时 SSE 可能已经断了，画面停在旧状态。
-   * 服务端没有 plot.ping 发射点，所以只信「回到前台 / 网络恢复」这类本地信号。
-   * 接线（事件注册、离开时长、节流、防重入、失败提示）全部在 session-wiring.ts，
-   * 用 fake 事件源可在 node 里测；这里只注入真实 DOM 与最新 React 状态。
-   *
-   * 实例只建一次，deps 用 ref 读最新值：若把 busy/input 放进依赖，每次按键都会重建
-   * 实例，隐藏起点与同步时刻随之丢失。
-   */
-  const resyncLive = useRef({ screen, roomId, busy, enterRoom, fail });
-  resyncLive.current = { screen, roomId, busy, enterRoom, fail };
-  useEffect(() => {
-    const resync = createSessionResync({
-      now: () => Date.now(),
-      on: (target, type, handler) => {
-        const el: EventTarget = target === "document" ? document : window;
-        el.addEventListener(type, handler);
-        return () => el.removeEventListener(type, handler);
-      },
-      isVisible: () => document.visibilityState === "visible",
-      isOnline: () => navigator.onLine,
-      screen: () => resyncLive.current.screen,
-      roomId: () => resyncLive.current.roomId,
-      busy: () => resyncLive.current.busy,
-      enterRoom: (id) => resyncLive.current.enterRoom(id, { resumed: true }),
-      // 失败也计一次同步（接线在发起前已刷新同步时刻）；提示复用 eventsNotice 降级提示位。
-      // enterRoom 先拉数据后 reset，失败时旧画面、草稿与可重试状态原样保留。
-      onNotice: (e) => setEventsNotice(resyncLive.current.fail(e)),
-    });
-    // 实例放 ref：enterRoom 成功后要 markSynced；直接进 effect 依赖会形成循环重建。
-    resyncRef.current = resync;
-    return () => {
-      resync.dispose();
-      if (resyncRef.current === resync) resyncRef.current = null;
-    };
-  }, []);
 
   const startNew = useCallback(
     async (scenarioId: string) => {
@@ -890,8 +791,7 @@ await runTurn(
   /** 发新回合（快捷建议把 `raw` 传进来就等于说出这句话，不必先填输入框） */
   const send = useCallback(
     (raw?: string, targetNpc?: { id: string; name: string } | null) => {
-      // 返回 Promise：ChatPanel 的数字键快选据此在回合结束 / 守卫提前返回后解除自锁
-      return dispatchTurn(raw ?? input, targetNpc ?? null, true);
+      void dispatchTurn(raw ?? input, targetNpc ?? null, true);
     },
     [dispatchTurn, input],
   );
@@ -1191,17 +1091,13 @@ await runTurn(
             lines={convMode === "v2" ? [...lines, ...convLines] : lines}
             typing={typing}
             busy={busy}
-            // 已知两个全屏遮罩（地图 MapOverlay / 局内调试面板 DebugPanel）不会卸载 ChatPanel：
-            // 打开时数字键快选必须停用，否则会穿透真发回合（PR #127 P1）。
-            // 门控判定是显式登记的两个来源，纯函数有单测；传参正确性由 typecheck 保证。
-            overlayOpen={fullScreenOverlayOpen({ mapOpen, debugPanelOpen: Boolean(debugToken && roomId) })}
             err={err}
             input={input}
             onInput={setInput}
             onSend={(target) => void send(undefined, target)}
             // 每回合结束（字打完、且不在等回复）都给建议；等回复时先收起，免得发旧选项
             suggestions={!busy && sceneSettled ? nextActions : []}
-            onPick={(text, target) => send(text, target)}
+            onPick={(text, target) => void send(text, target)}
             onRetry={retry}
             retryable={errRetryable}
             waitingForInterjection={convMode === "v2" && waitingInterjection}

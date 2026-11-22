@@ -40,11 +40,6 @@
       "name": "map.look",
       "module": "map",
       "examples": ["看看地图", "这个场景有什么"]
-    },
-    {
-      "name": "investigate.probe",
-      "module": "investigate",
-      "examples": ["调查线索", "查看线索", "搜查现场", "盘问在场的人", "probe the clues"]
     }
   ]
 }

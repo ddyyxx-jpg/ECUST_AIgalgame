@@ -50,7 +50,15 @@ const PairSchema = z.object({
     .max(6),
 });
 
-import type { NormalizedPlot } from "./npc.plot.discovery.ts";
+interface NormalizedPlot {
+  goal: string;
+  actors: ActorId[];
+  leakPoints: string[];
+  forbidReveal: string;
+  risk?: number;
+  tone?: string;
+  leverage?: string;
+}
 
 /** LLM 返回 json:true 时优先用结构化字段；否则从 raw 里剥围栏再 JSON.parse。 */
 function parseJson(raw: string, jsonField: unknown): unknown {
@@ -188,8 +196,67 @@ export function conspiracyProposals(plot: NormalizedPlot): Proposal[] {
   return proposals;
 }
 
-// 调查入口拆到 npc.plot.discovery.ts（§6 文件 ≤300 行）；这里重导出保持既有调用路径。
-export { activePlots, discoveryProposals } from "./npc.plot.discovery.ts";
+/** 玩家次日调查：按 leakPoints 产出 evidence 记忆 + 可问问题 + NPC 态度变化。 */
+export function discoveryProposals(ctx: ModuleContext, plot: NormalizedPlot, kind: "observe" | "search" | "ask"): ModuleOutcome {
+  const proposals: Proposal[] = [];
+  const questions: { key: string; text: string; meta?: unknown }[] = [];
+  plot.leakPoints.forEach((leak, i) => {
+    const safe = scrub(plot.forbidReveal, leak);
+    if (!safe) return;
+    questions.push({ key: `clue_${i}`, text: `关于「${safe}」，我能问点什么？`, meta: { leakPoint: safe, kind } });
+    proposals.push({
+      op: "memory.write",
+      args: {
+        ownerId: ctx.actorId,
+        content: `调查记录（${kind}）：注意到「${safe}」，似乎与今晚在场者的私下谈话有关；真相尚不可确认。`,
+        tags: ["evidence", "密谋", kind],
+        salience: 5,
+        visibility: "private",
+        about: plot.actors,
+      },
+      reason: "玩家按 leakPoint 获得的证据记忆（只给线索，不给结论）",
+      by: "npc.plot",
+    });
+  });
+  // NPC 态度变化可见：给每名密谋参与者叠加可配置的戒备属性（键来自模块数据，不硬编码属性名）。
+  // TODO(#96 端到端接线，独立 issue)：moduleState["npc.plot.attitudeAttr"] 目前没有任何写入方——
+  // 13 个 op 原语里没有 moduleState.set，turn/map.tick 也不写这个键；本函数又没有调用方。
+  // 在"夜间 tick 触发 npc.plot + 写 attitude 键 + 调用 discoveryProposals"接线落地前，
+  // 下面的 attr.delta 永远被跳过。保持 gated 而不硬编码 "guard"（I2），接线后无需改这里。
+  const attitudeKey = typeof ctx.state.moduleState["npc.plot.attitudeAttr"] === "string"
+    ? (ctx.state.moduleState["npc.plot.attitudeAttr"] as string)
+    : undefined;
+  if (attitudeKey) {
+    for (const actor of plot.actors) {
+      proposals.push({
+        op: "attr.delta",
+        args: { entityId: actor, key: attitudeKey, delta: 8 },
+        reason: "密谋次日 NPC 态度变化（戒备上升，玩家可从面板/语气看出）",
+        by: "npc.plot",
+      });
+    }
+  }
+  return {
+    ok: proposals.length > 0,
+    proposals,
+    facts: questions.length > 0 ? [`你注意到几处可疑线索（${kind}），可以据此追问。`] : [],
+    ui: { lists: [{ id: "clue.questions", title: "可追问的线索", items: questions }] },
+  };
+}
+
+/** 供模块宿主复用的"从状态里找出已落账密谋"入口（不改 op 闭集）。 */
+export function activePlots(ctx: ModuleContext): NormalizedPlot[] {
+  return ctx.state.plots
+    .filter((p) => p.status === "active" && p.leakPoints && p.leakPoints.length > 0)
+    .map((p) => ({
+      goal: p.goal,
+      actors: p.actors as ActorId[],
+      leakPoints: p.leakPoints ?? [],
+      forbidReveal: p.forbidReveal ?? "",
+      ...(p.risk !== undefined ? { risk: p.risk } : {}),
+      ...(p.tone !== undefined ? { tone: p.tone } : {}),
+    }));
+}
 
 const director: DialogueDirector = {
   id: "npc.plot",

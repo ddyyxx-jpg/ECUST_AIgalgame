@@ -101,9 +101,8 @@ export class OpenAiCompatClient implements LlmPort {
       if (res.status === 429) {
         throw new LlmError("E_RATE_LIMITED", `LLM 限流（HTTP 429）：${await snippet(res)}`);
       }
-      // 响应头优先：拿它串日志比 payload.id 可靠。DeepSeek 侧的 x-ds-trace-id 排第一——
-      // 排障要找的是上游那次请求（#146）：两者同时存在时以 DeepSeek trace 为准，x-request-id 只做兜底。
-      headerTraceId = res.headers.get("x-ds-trace-id") ?? res.headers.get("x-request-id")
+      // 响应头优先：网关会回 x-request-id / DeepSeek 的 x-ds-trace-id，拿它串日志比 payload.id 可靠
+      headerTraceId = res.headers.get("x-request-id") ?? res.headers.get("x-ds-trace-id")
         ?? res.headers.get("x-trace-id") ?? res.headers.get("trace-id") ?? undefined;
       if (!res.ok) {
         // 非 2xx 统一归入可重试的格式错误：网关层没有更细的错误码（见 03 §7）

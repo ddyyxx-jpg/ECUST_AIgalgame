@@ -281,7 +281,7 @@ export class ConversationHostV2 implements ConversationTurnV2 {
       let applied = pending.applied;
       if (pending.retry) {
         applied = await this.deps.arbiter.apply(pending.roomId, pending.retry.ops, pending.retry.cause, {
-          expectedSeq: pending.retry.expectedSeq, captureState: true, expectAttrs: pending.retry.expectAttrs,
+          expectedSeq: pending.retry.expectedSeq, captureState: true,
         });
         if (!applied.ok) {
           const retryable = applied.error?.code === "E_STORE_FAULT";
