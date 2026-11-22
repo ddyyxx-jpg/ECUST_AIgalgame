@@ -733,7 +733,7 @@ export interface ViewPosition {
 
 export interface ViewPatch {
   /** 面板数据：读 registry 渲染，不是硬编码字段 */
-  panels?: Record<string, { label: string; value: AttrValue; unit?: string }[]>;
+  panels?: Record<string, { key?: string; label: string; value: AttrValue; unit?: string }[]>;
   position?: ViewPosition;
   /** 结构化列表（商店、任务、对话记录…） */
   lists?: { id: string; title: string; items: { key: string; text: string; meta?: unknown }[] }[];

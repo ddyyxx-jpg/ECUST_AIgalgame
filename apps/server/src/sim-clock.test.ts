@@ -112,6 +112,24 @@ describe("SimClock（D22 自动推进）", () => {
     await first;
   });
 
+  it("底层 tick 永挂时 2×timeout 强制释放房间锁，避免永久 409", async () => {
+    let holds = 0;
+    const warnings: string[] = [];
+    const clock = new SimClock({
+      store: storeOf({ r1: 0 }),
+      map: { tick: () => new Promise(() => {}) },
+      policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 },
+      roomTimeoutMs: 5,
+      acquire: () => { holds += 1; return () => { holds -= 1; }; },
+      warn: (m) => warnings.push(m),
+    });
+    await clock.beat();
+    expect(holds).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(holds).toBe(0);
+    expect(warnings.join("\n")).toContain("强制释放房间锁");
+  });
+
   it("超时只停止等待：底层未结束时后续拍跳过同一房间，且锁不提前释放", async () => {
     let calls = 0;
     let holds = 0;

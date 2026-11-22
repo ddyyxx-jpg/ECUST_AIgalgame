@@ -21,13 +21,13 @@
 - **对话打断 NPC 动作（D22）**：`/conversation` 的 target/interject 或 v1 `/turns` 的 `targetNpcId` 命中正在行动的 NPC 时，服务端把 `sim_lease` 冻结为 `{action:"talk",resume:原租约}`（空闲 NPC 也写 talk，防止对话途中被自动 tick 起新动作）；map tick 跳过 talk，回合结束（含异常）恢复原租约并继续剩余占用；talk 跨 phase 视为过期清空，并带 `expiresAt` 超时兜底（默认 12 tick），避免崩溃后永久冻结。
 
 ### 验证
-- `npm run typecheck` 0 错；`npx vitest run` 133 文件/1081 例全过；`npm run check:contract` 8/8。
+- `npm run typecheck` 0 错；`npx vitest run` 133 文件/1084 例全过；`npm run check:contract` 8/8。
 - 新增 `turn.action-points.test.ts`（含 FileStore 重启探针）、`sim-clock.test.ts`、`sim.policy.test.ts`，map 模块补租约/停留/跨 phase/超时用例，对话路由补数组 target、v1 `/turns` 与恢复失败不冒充已恢复的用例。
 
 ### 已知边界
 - `travel` 可达性预检改用 `content/modules/map/path.ts` 的同一套 BFS（多跳合法）：不可达在回合前直接 `E_NOT_ADJACENT`，不跑 Turn、不扣行动点；“可达但模块没走动”的异常路径会提交并扣点，随后按前后快照差额退还并仍返回 `E_NOT_ADJACENT`。
 - 旧存档没有 `action_points` 时不强制扣点；自动时钟默认关闭，需在 `content/sim/policy.json` 显式开启。
-- 房间活动锁覆盖 `/turns`、`/conversation`、自动时钟与地图 HTTP 写入口；直接调用 `MapService.tick` 的运维/测试脚本仍不在锁内（服务层是可信调用）。
+- 房间活动锁覆盖 `/turns`、`/conversation`、自动时钟与地图 HTTP 写入口；直接调用 `MapService.tick` 的运维/测试脚本仍不在锁内（服务层是可信调用）。底层 tick 超过 2×超时仍不 settle 时强制释放锁并告警，避免房间永久 409。
 - 单房间 tick 超过 30s 时只停止等待、不取消底层执行；在该 Promise settle 前，同房间的后续拍会跳过，避免重复排队。
 
 ## 未发布 — #151 复审两条 P1（`busy` 时自动进出室内）

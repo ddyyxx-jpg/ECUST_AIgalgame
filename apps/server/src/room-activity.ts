@@ -43,6 +43,7 @@ export class RoomActivity {
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
+    if (signal?.aborted) throw new RoomBusyError(roomId, `房间 ${roomId} 等待已取消`);
     return this.enter(roomId);
   }
 

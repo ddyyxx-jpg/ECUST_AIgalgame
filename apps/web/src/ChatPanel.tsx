@@ -268,7 +268,6 @@ const PHASE_META: Record<string, { name: string; icon: string; color: string }> 
   evening: { name: "傍晚", icon: "◐", color: "#ff8f63" },
   night: { name: "夜里", icon: "☾", color: "#7ea6ff" },
 };
-const stats = hudStats(Object.values(panels ?? {})[0] ?? []);
 
   // 室内视图：当前场景是否挂了室内地图，以及馆内的 NPC（位置按索引落到馆内座位点）
   const insideInterior = inside ? interiorFor(inside) : null;
@@ -281,6 +280,9 @@ const stats = hudStats(Object.values(panels ?? {})[0] ?? []);
 
   // v2 demo：当前说话类型与本地校验（规则对齐引擎 delivery.ts，避免用户第一次点就吃 E_SCHEMA_INVALID）
   const v2Active = Boolean(v2Modes && v2Modes.length > 0 && onSendUtterance);
+  const panelRows = Object.values(panels ?? {})[0] ?? [];
+  // 行动点目前只覆盖 v1 /turns；v2 群聊模式显示 6/6 会骗人，直接隐藏。
+  const stats = hudStats(v2Active ? panelRows.filter((r) => r.key !== "action_points") : panelRows);
   const currentMode = v2Modes?.find((m) => m.id === mode);
   const draft = {
     mode,

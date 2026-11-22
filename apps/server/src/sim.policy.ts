@@ -15,14 +15,14 @@ const PolicySchema = z.object({
     perTurn: z.number().int().min(0).max(6),
     max: z.number().int().min(0).max(99),
     refillOnPhaseAdvance: z.boolean().optional(),
-  }).optional(),
+  }).strict().optional(),
   clock: z.object({
     enabled: z.boolean().optional(),
     intervalMs: z.number().int().min(1_000).max(3_600_000),
     ticksPerBeat: z.number().int().min(1).max(8),
     /** 0 = 不设上限；>0 时 tick 到达上限就停下等玩家推进时段（D22：自动推进不切 phase） */
     maxTick: z.number().int().min(0).max(24),
-  }).optional(),
+  }).strict().optional(),
   /** talk 租约最多冻结多少个 tick（防进程崩溃后永久冻结）；默认 12 */
   talkLeaseTicks: z.number().int().min(1).max(1440).optional(),
   /** NPC 自由活动决策：默认关闭；开启后每拍最多 maxPerBeat 个 NPC 调模型 */
@@ -32,8 +32,8 @@ const PolicySchema = z.object({
     intervalTicks: z.number().int().min(1).max(48).optional(),
     hourlyCalls: z.number().int().min(1).max(120).optional(),
     maxOptions: z.number().int().min(2).max(6).optional(),
-  }).optional(),
-}).passthrough();
+  }).strict().optional(),
+}).strict();
 
 export interface SimClockPolicy {
   enabled: boolean;

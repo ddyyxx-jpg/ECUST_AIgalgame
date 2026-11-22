@@ -53,6 +53,14 @@ describe("loadSimPolicy", () => {
     });
   });
 
+  it("拼错键不再被 passthrough 静默吞掉", async () => {
+    const dir = await contentWith({
+      actionPoints: { enabled: true, attr: "action_points", perTurn: 1, max: 6 },
+      talkLeaseTick: 12,
+    });
+    expect(await loadSimPolicy(dir)).toBeUndefined();
+  });
+
   it("缺文件/坏 JSON/行动点关闭都返回 undefined", async () => {
     const empty = await mkdtemp(path.join(tmpdir(), "galgame-sim-empty-"));
     expect(await loadSimPolicy(empty)).toBeUndefined();
