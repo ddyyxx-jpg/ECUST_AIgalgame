@@ -5,6 +5,22 @@
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）→ `v0.6.0` dev/v2 群聊 + 开放 issue 收口 + 像素 UI（PR #144 / #149 / #148，CONTRACT 3.6.2 → 3.8.0）。
 
 
+## 未发布 — #151 复审两条 P1（`busy` 时自动进出室内）
+
+> 仅前端表现层：不改契约、不新增 op、不动服务端；`CONTRACT_VERSION` 3.8.0 不变。
+
+### 修复
+- **P1-1 回合 streaming 中走到点位会发 travel**：`CampusMap` 的 160ms probe 原来只看距离，不看 `busy`（`busy` 只用于按钮 disabled），且 `busy` 是 props、interval 闭包读不到最新值。现在 probe 同步 `busyRef`，自动进入 / 自动 travel 都过新的纯函数 `stepEntryDwell` / `shouldAutoTravel`：`busy` 期间不累计入口 dwell、不发 `travel`；回合结束后仍站在入口会重新数满 1.5 秒再进一次。
+- **P1-2 室内站出口时回合没结束就切回大地图**：`InteriorMap` 的出口 dwell 同样加 `busy` 门禁（`stepExitDwell`）：`busy` 时清零计时、不触发 `onExit`；回合结束后重新数满 1.5 秒才退出一次。
+
+### 测试
+- 新增 `apps/web/src/map-autoenter.test.ts`（9 例）：busy 时站满不触发、busy 结束后重新计时并只触发一次、离开范围重新武装、同场景/已 travel 不重复发。
+- 这两段逻辑原先埋在 rAF/interval 闭包里只能靠真人走查，抽成纯函数后可在 node 断言。
+
+### 验证
+- `npm run typecheck` 0；`npx vitest run` **125 文件 / 1009 例**全过；`npm run check:contract` 8/8（3.8.0）。
+
+
 ## v0.6.0 — 2026-11-22 像素风 UI + 开放 issue 收口 + dev/v2 群聊（PR #144 / #148 / #149；合入 main `657d6c5`；CONTRACT 3.6.2 → 3.8.0）
 
 > 本版把三段工作一起发版：**像素风 UI / 室内二级地图 / NPC 寻路**（#148）、**开放 issue 收口批**（#149，含夜间密谋秘密出口的 P0 修复与 19 个 issue 收口）、**dev/v2 群聊运行质量批**（#144，CONTRACT 3.7.0，细节见下方 3.7.0 段——它是本版第一个纳入 tag 的契约版本）。
