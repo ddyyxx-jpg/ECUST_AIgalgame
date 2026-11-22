@@ -38,12 +38,24 @@ export function setVisitorId(id: string | null): void {
   visitorId = id;
 }
 
+import { TimeoutError } from "./timeout.ts";
+
 type ApiInit = Omit<RequestInit, "headers"> & { headers?: Record<string, string> };
 
-/** 所有请求统一入口：同源 Cookie（CSRF 靠浏览器自动带 Origin）+ 访客头 */
+/**
+ * 所有请求统一入口：同源 Cookie（CSRF 靠浏览器自动带 Origin）+ 访客头。
+ * signal 直接透传给 fetch（ApiInit 本来就是 RequestInit 的子集）：进房整体 deadline
+ * 超时/切房时中止底层请求，避免半开连接把 busy 永久挂住；旧调用不传 signal 行为不变。
+ * fetch 在 abort 时不同运行时抛的对象不一致，若 deadline 已因超时 abort，统一换成
+ * TimeoutError，让 UI 能给出「装载超时，请重试」而不是含糊的网络异常。
+ */
 export function apiFetch(path: string, init?: ApiInit): Promise<Response> {
   const headers = { ...(visitorId ? { "x-user-id": visitorId } : {}), ...init?.headers };
-  return fetch(path, { credentials: "same-origin", ...init, headers });
+  return fetch(path, { credentials: "same-origin", ...init, headers, ...(init?.signal ? { signal: init.signal } : {}) }).catch((e: unknown) => {
+    const signal = init?.signal;
+    if (signal?.aborted && signal.reason instanceof TimeoutError) throw signal.reason;
+    throw e;
+  });
 }
 
 /** 非 2xx 响应 → HttpError：尽量解析 `{code,message}`，解析不了只留状态信息 */
@@ -121,5 +133,6 @@ export function httpFailMessage(e: unknown): string {
   }
   if (e instanceof GameError) return `${e.code}: ${e.message}`;
   if (e instanceof TypeError) return "网络异常，请检查连接后重试";
+  if (e instanceof Error && e.name === "TimeoutError") return e.message || "装载超时，请重试";
   return e instanceof Error ? e.message : String(e);
 }

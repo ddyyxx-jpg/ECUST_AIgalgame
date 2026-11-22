@@ -3,6 +3,7 @@ import {
   conversationModesPath,
   conversationProbePath,
   conversationTurnPath,
+  convModeAfterProbe,
   detectConversation,
   dispatchConversationEvent,
   fetchUtteranceModes,
@@ -42,15 +43,27 @@ describe("feature detect（纯判定 + 探测退化）", () => {
     expect(conversationModesPath("room_1")).toBe("/api/v1/rooms/room_1/conversation/modes");
   });
 
-  it("探测 404 → false；200 → true；fetch 抛错也当 false（不打断进房）", async () => {
+  it("探测三态：2xx→true；404/405→false（明确非 v2）；网络异常/5xx/401→null（无法判定）", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(null, { status: 404 }))
       .mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 405 }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
       .mockRejectedValueOnce(new TypeError("offline"));
     vi.stubGlobal("fetch", fetchMock);
-    expect(await detectConversation("r1")).toBe(false);
     expect(await detectConversation("r1")).toBe(true);
     expect(await detectConversation("r1")).toBe(false);
+    expect(await detectConversation("r1")).toBe(false);
+    expect(await detectConversation("r1")).toBeNull();
+    expect(await detectConversation("r1")).toBeNull();
+    expect(await detectConversation("r1")).toBeNull();
+  });
+
+  it("convModeAfterProbe：null 保持现有模式，不把 v2 误打回 v1", () => {
+    expect(convModeAfterProbe(true)).toBe("v2");
+    expect(convModeAfterProbe(false)).toBe("v1");
+    expect(convModeAfterProbe(null)).toBeNull();
   });
 });
 
@@ -217,5 +230,55 @@ describe("runConversationAuto（#136 自主轮 POST body）", () => {
     await runConversationAuto("r1", "plr", "ct-auto", {});
     expect(url).toBe("/api/v1/rooms/r1/conversation");
     expect(body).toEqual({ actorId: "plr", clientTurnId: "ct-auto", auto: true });
+  });
+
+  it("P2-6：auto 超限 notice 视为已结算，不触发 onUnconfirmed（服务端 ledger 已 failed）", async () => {
+    const unconfirmed = vi.fn();
+    const events: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse([
+          'event: conversation.notice\ndata: {"type":"conversation.notice","text":"auto rounds exhausted; waiting for player"}\n\n',
+        ]),
+      ),
+    );
+    await runConversationAuto("r1", "plr", "ct-auto-limit", {
+      onEvent: (ev) => events.push(ev.type),
+      onUnconfirmed: unconfirmed,
+    });
+    expect(events).toEqual(["conversation.notice"]);
+    expect(unconfirmed).not.toHaveBeenCalled();
+  });
+
+  it("P2-6：中文 autoLimit 文案靠 reason 判定结算（不依赖文本）", async () => {
+    const unconfirmed = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse([
+          'event: conversation.notice\ndata: {"type":"conversation.notice","text":"自主推进已达上限，等玩家说话","reason":"autoLimit"}\n\n',
+        ]),
+      ),
+    );
+    await runConversationAuto("r1", "plr", "ct-auto-limit-cn", { onUnconfirmed: unconfirmed });
+    expect(unconfirmed).not.toHaveBeenCalled();
+  });
+
+  it("P2-6：审核 blocked notice 仍触发 onUnconfirmed；普通回合的 autoLimit 文案也不吞", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        sseResponse(['event: conversation.notice\ndata: {"type":"conversation.notice","text":"内容未通过审核，请修改后重试"}\n\n']),
+      )
+      .mockResolvedValueOnce(
+        sseResponse(['event: conversation.notice\ndata: {"type":"conversation.notice","text":"auto rounds exhausted; waiting for player"}\n\n']),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const blocked = vi.fn();
+    await runConversationAuto("r1", "plr", "ct-blocked", { onUnconfirmed: blocked });
+    expect(blocked).toHaveBeenCalledTimes(1);
+    const ordinary = vi.fn();
+    await runConversationTurn("r1", "plr", "你好", "ct-ordinary", { onUnconfirmed: ordinary });
+    expect(ordinary).toHaveBeenCalledTimes(1);
   });
 });

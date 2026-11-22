@@ -65,8 +65,9 @@ export interface TurnStreamHandlers {
   onUnconfirmed?: (clientTurnId: string) => void;
 }
 
-export async function fetchState(roomId: string): Promise<WorldState> {
-  const r = await apiFetch(`/api/v1/rooms/${roomId}/state`);
+/** @param signal 进房整体 deadline / 切房作废时中止底层 fetch；不传则保持旧行为 */
+export async function fetchState(roomId: string, signal?: AbortSignal): Promise<WorldState> {
+  const r = await apiFetch(`/api/v1/rooms/${roomId}/state`, signal ? { signal } : undefined);
   if (!r.ok) {
     if (r.status === 404) throw new GameError("E_ROOM_NOT_FOUND", "房间不存在或事件日志不可读");
     throw await httpErrorFrom(r, "state");
@@ -181,9 +182,10 @@ export function buildHistoryQuery(cursor: HistoryCursor = {}): string {
   return q.toString();
 }
 
-/** 已提交回合历史：默认恢复最新片段；`before` 向更早翻页（docs/03 §5.2.9） */
-export async function fetchHistory(roomId: string, cursor: HistoryCursor = {}): Promise<HistoryPage> {
-  const r = await apiFetch(`/api/v1/rooms/${roomId}/history?${buildHistoryQuery(cursor)}`);
+/** 已提交回合历史：默认恢复最新片段；`before` 向更早翻页（docs/03 §5.2.9）
+ *  @param signal 与 fetchState 共享进房 deadline，避免历史请求半开挂住 busy */
+export async function fetchHistory(roomId: string, cursor: HistoryCursor = {}, signal?: AbortSignal): Promise<HistoryPage> {
+  const r = await apiFetch(`/api/v1/rooms/${roomId}/history?${buildHistoryQuery(cursor)}`, signal ? { signal } : undefined);
   if (r.status === 404) throw new GameError("E_ROOM_NOT_FOUND", "房间不存在或没有可恢复的历史");
   if (!r.ok) throw await httpErrorFrom(r, "history");
   const d = (await r.json()) as Partial<HistoryPage> & { history?: HistoryLine[] };
