@@ -336,13 +336,56 @@ export class MapService {
     // 只看 turn 事件会把"没走动"当成到达。以移动后的权威位置做最终校验。
     const actorLoc = after.links.find((l) => l.kind === "located_in" && l.from === actor)?.to;
     if (after.room.scene.locId !== locId && actorLoc !== locId) {
-      return this.outbound(fail("E_NOT_ADJACENT", `从当前位置无法到达 ${locId}`), roomId, after);
+      // 相邻但模块没走动：Turn 已经提交并扣过点，这里把这次白扣退回去再报不可达。
+      const refunded = await this.refundTravelActionPoint(roomId, actor, state, after);
+      return this.outbound(fail("E_NOT_ADJACENT", `从当前位置无法到达 ${locId}`), roomId, refunded);
     }
     const map = await this.buildMapView(after, actor);
     const scene = this.buildSceneDetail(target, after, refs, npcLocations(after));
     // 出站脱敏（issue #53 成功 / #58 失败）：统一走 outbound，成功整包、失败只遮文本，
     // 与 /turns /events /state /history 同口径；用 after 快照省一次事件日志回放。
     return this.outbound<TravelResult>({ ok: true, scene, events, map }, roomId, after);
+  }
+
+  /**
+   * travel 异常路径退款：相邻但模块没产 move 时 Turn 已提交、行动点已扣。
+   * 只在"前后快照都证明扣过点"时退，避免旧存档/未启用行动点时凭空加属性。
+   * 用 expectedSeq 重试，失败只 warn，不改变 E_NOT_ADJACENT 的结论。
+   */
+  private async refundTravelActionPoint(
+    roomId: string,
+    actorId: string,
+    before: WorldState,
+    after: WorldState,
+  ): Promise<WorldState> {
+    const policy = this.deps.simPolicy;
+    if (!policy || policy.actionCostPerTurn <= 0) return after;
+    const key = policy.actionAttr;
+    const beforeValue = before.entities[actorId]?.attrs[key];
+    const afterValue = after.entities[actorId]?.attrs[key];
+    if (typeof beforeValue !== "number" || typeof afterValue !== "number" || afterValue >= beforeValue) return after;
+    const refund = Math.min(beforeValue - afterValue, policy.actionMax - afterValue);
+    if (refund <= 0) return after;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const state = attempt === 0 ? after : await this.deps.store.snapshot(roomId);
+      const current = state.entities[actorId]?.attrs[key];
+      if (typeof current !== "number") return state;
+      const value = Math.min(policy.actionMax, current + refund);
+      const seq = await this.seqOf(roomId);
+      const applied = await this.deps.arbiter.apply(
+        roomId,
+        [{ op: "attr.set", args: { entityId: actorId, key, value }, reason: "travel 未走动，退还行动点" }],
+        this.cause(roomId, "travel_refund"),
+        seq === undefined ? {} : { expectedSeq: seq },
+      ).catch((e: unknown) => {
+        console.warn(`[map] travel 退款写入异常：`, e instanceof Error ? e.message : e);
+        return undefined;
+      });
+      if (applied?.ok && applied.rejected.length === 0) return this.deps.store.snapshot(roomId);
+    }
+    console.warn(`[map] travel 退款失败（行动点可能仍被扣）`);
+    return after;
   }
 
   // -------------------------------------------------------------- 对话打断 NPC 动作（D22）

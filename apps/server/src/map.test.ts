@@ -436,6 +436,15 @@ describe("MapService · travel", () => {
     expect(f.store.state(ROOM_ID).room.scene.locId).toBe("loc_library");
   });
 
+  it("相邻但模块没走动：E_NOT_ADJACENT 且退还行动点", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 6 });
+    f.modules.noTravel = true;
+    const res = await f.service.travel(ROOM_ID, "plr_self", "loc_canteen");
+    expect(res).toMatchObject({ ok: false, code: "E_NOT_ADJACENT" });
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
+  });
+
   it("懒安装缺边可补齐（半安装自愈）", async () => {
     const f = await setup();
     const { locId } = await publishSample(f);
