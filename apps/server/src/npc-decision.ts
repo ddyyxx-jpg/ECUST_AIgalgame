@@ -263,13 +263,20 @@ export class NpcDecisionService {
     // 决策可能很慢；写入前重读一次，若玩家已经写了 talk 租约就放弃，避免覆盖对话冻结。
     const seq = this.deps.store.load ? await this.deps.store.load(roomId) : undefined;
     const latest = await this.deps.store.snapshot(roomId);
-    if (!emptyLease(latest.entities[npcId]?.attrs[LEASE])) return;
+    // 决策可能跨 phase：旧的菜单/位置已经过期，直接放弃，等下一拍重新决策。
+    if (latest.clock.phase !== state.clock.phase) {
+      this.warn(`[npc-decision] ${npcId} 决策跨 phase（${state.clock.phase}→${latest.clock.phase}），放弃本次写入`);
+      return;
+    }
+    const target = latest.entities[npcId];
+    if (target?.kind !== "npc" || target.status !== "active") return;
+    if (!emptyLease(target.attrs[LEASE])) return;
     // 目标不是当前地点时先写 move，下一次 map tick 会沿最短路移动并把租约改成 stay。
     const lease = {
-      action: option.locId === this.currentLoc(state, npcId) ? "stay" : "move",
+      action: option.locId === this.currentLoc(latest, npcId) ? "stay" : "move",
       target: option.locId,
       remaining: 2,
-      phase: state.clock.phase,
+      phase: latest.clock.phase,
     } satisfies { action: "stay" | "move"; target: string; remaining: number; phase: Phase };
     const cause: Envelope = {
       v: 1,

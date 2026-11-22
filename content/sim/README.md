@@ -51,8 +51,9 @@
 | `enabled` | 默认 `false`；开启后服务端每 `intervalMs` 对每个房间调一次 `MapService.tick({ticks: ticksPerBeat})` |
 | `intervalMs` | 真实时间间隔；太短会让 NPC 租约消耗过快，建议 ≥ 30000 |
 | `ticksPerBeat` | 每拍推进几个游戏 tick；必须是 1..8（与 `time.advance.ticks` 的 zod 上限一致） |
-| `talkLeaseTicks` | talk 租约最多冻结多少 tick（默认 12）；进程崩溃/恢复失败时到点自动作废，防 NPC 永久冻结 |
 | `maxTick` | 当前 phase 内最多推到第几 tick，到顶就停，等玩家 `advance`；`0` = 不设上限 |
+
+`talkLeaseTicks` 是**顶层字段**（与 `clock` / `actionPoints` / `decision` 同级，默认 12），不是 `clock` 内部字段；它控制 talk 租约最多冻结多少 tick，进程崩溃/恢复失败时到点自动作废，防 NPC 永久冻结。
 
 自动时钟**只推 tick，不切 phase**（D22）；`advance:true` 仍由玩家/前端显式触发，并回满行动点。`clock` 与 `actionPoints` 相互独立：只想跑时钟时，`actionPoints` 可以整段省略（行动点代价按 0 处理）。
 

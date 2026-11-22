@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hudStats } from "./hud-stats.ts";
+import { hudStats, isActionPointRow } from "./hud-stats.ts";
 
 describe("hudStats", () => {
   it("把行动点提到最前，并保留其余顺序", () => {
@@ -23,5 +23,13 @@ describe("hudStats", () => {
   it("没有行动点时原样截断", () => {
     const rows = Array.from({ length: 7 }, (_, i) => ({ label: `a${i}`, value: i }));
     expect(hudStats(rows).map((r) => r.label)).toEqual(["a0", "a1", "a2", "a3", "a4"]);
+  });
+});
+
+describe("isActionPointRow", () => {
+  it("新旧服务端都能识别：key 或中文 label 任一命中", () => {
+    expect(isActionPointRow({ key: "action_points", label: "AP", value: 6 })).toBe(true);
+    expect(isActionPointRow({ label: "行动点", value: 6 })).toBe(true);
+    expect(isActionPointRow({ label: "体力", value: 6 })).toBe(false);
   });
 });

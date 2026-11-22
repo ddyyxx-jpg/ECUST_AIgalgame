@@ -116,6 +116,27 @@ describe("NpcDecisionService", () => {
     expect(writes).toBe(0);
   });
 
+  it("慢决策跨 phase：放弃写入，不用旧 phase 的租约污染下一段", async () => {
+    let writes = 0;
+    const warnings: string[] = [];
+    const service = new NpcDecisionService({
+      store: {
+        load: async () => 7,
+        // run() 用的是传入的 morning 快照；applyLease 重读时已经到 noon。
+        snapshot: async () => ({ ...state(), clock: { day: 1, phase: "noon" as const, tick: 0 } }),
+      },
+      arbiter: { apply: async () => { writes += 1; return { ok: true }; } },
+      llm: {
+        chat: async () => ({ raw: '{"choice":2}', json: { choice: 2 }, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "fake", latencyMs: 1 }),
+      },
+      policy: { enabled: true, maxPerBeat: 1, intervalTicks: 1, hourlyCalls: 10, maxOptions: 4 },
+      warn: (m) => warnings.push(m),
+    });
+    await service.run("room_a", state());
+    expect(writes).toBe(0);
+    expect(warnings.join("\n")).toContain("决策跨 phase");
+  });
+
   it("关闭时不调模型、不写状态", async () => {
     let calls = 0;
     const service = new NpcDecisionService({

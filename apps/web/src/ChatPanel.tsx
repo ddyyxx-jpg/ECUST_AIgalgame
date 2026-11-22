@@ -6,7 +6,7 @@
  * 输入框的提示也跟着换 —— 但输入仍然是自然语言，不受对话对象限制。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { hudStats } from "./hud-stats.ts";
+import { hudStats, isActionPointRow } from "./hud-stats.ts";
 import type { ViewPatch, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import CampusMap from "./CampusMap.tsx";
 import CandidatePanel from "./CandidatePanel.tsx";
@@ -282,7 +282,7 @@ const PHASE_META: Record<string, { name: string; icon: string; color: string }> 
   const v2Active = Boolean(v2Modes && v2Modes.length > 0 && onSendUtterance);
   const panelRows = Object.values(panels ?? {})[0] ?? [];
   // 行动点目前只覆盖 v1 /turns；v2 群聊模式显示 6/6 会骗人，直接隐藏。
-  const stats = hudStats(v2Active ? panelRows.filter((r) => r.key !== "action_points") : panelRows);
+  const stats = hudStats(v2Active ? panelRows.filter((r) => !isActionPointRow(r)) : panelRows);
   const currentMode = v2Modes?.find((m) => m.id === mode);
   const draft = {
     mode,

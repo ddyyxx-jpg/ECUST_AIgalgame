@@ -270,11 +270,11 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
 
     const old = parseLease(npc.attrs[LEASE]);
     // 玩家对话中：冻结动作，不递减、不接新动作；对话结束由服务端恢复原租约。
-    // 跨 phase 的 talk 租约视为过期（对话进程崩溃/跨时段），清掉后按新 phase 重排。
+    // 跨 phase / 超时的 talk 租约视为过期：不先单独写一条清空，而是让本次重排的
+    // 新租约直接覆盖它，避免同一批出现“清空 + 新租约”两条 attr.set 噪声。
     if (old?.action === "talk") {
       const expired = old.expiresAt !== undefined && clockIndex(ctx.clock) > old.expiresAt;
       if (old.phase === phase && !expired) continue;
-      proposals.push(leaseProposal(npc.id, null, expired ? "对话租约超时作废" : "对话租约跨 phase 作废"));
     }
     // 租约优先于日程：NPC 自由活动/对话恢复可能把目标改到非日程地点。
     // 只要求目标仍是 live loc、phase 未变，避免旧存档/被删场景把 NPC 卡死。
@@ -311,8 +311,8 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
 
     const targetId = SCHEDULES.schedules[npcId]?.[phase];
     if (!targetId || !liveLoc(ctx, targetId)) {
-      // 非日程 NPC 没有可回的日程：租约消费完/过期后直接清空回到空闲。
-      if (old && old.action !== "talk") proposals.push(leaseProposal(npc.id, null, "无日程，结束租约"));
+      // 没有可回的日程：旧租约（含过期 talk）在这里统一清一次，避免残留。
+      if (old) proposals.push(leaseProposal(npc.id, null, "无日程，结束租约"));
       continue;
     }
 
@@ -322,7 +322,11 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
     }
 
     const path = bfs(adj, from, targetId);
-    if (!path || path.length < 2) continue; // 无路径：跳过该 NPC，不产错误
+    if (!path || path.length < 2) {
+      // 无路径：旧租约不能继续占着，否则会一直重试到租约过期。
+      if (old) proposals.push(leaseProposal(npc.id, null, "目的地不可达，结束租约"));
+      continue;
+    }
     // 先写租约，再写移动：末尾两条仍应是坐标，方便既有测试与前端按"最后一跳"定位
     proposals.push(leaseProposal(npcId, { action: "move", target: targetId, remaining: 1, phase }, `${npc.name}前往${nameOf(ctx, targetId)}`));
     for (const hop of path.slice(1)) {

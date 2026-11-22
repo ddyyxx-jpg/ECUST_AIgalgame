@@ -6,7 +6,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ActorId, Memory, MemoryRecord, Registry, RoomId, Store, Turn, TurnEvent, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import type { ConversationEvent, GossipEvent, MessageDigest, UtteranceModeDef } from "../../../packages/shared/src/contract/v2.ts";
-import { projectEventsForPlayer, playerOf, projectStateForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
+import { projectEventsForPlayer, projectProposalsForPlayer, playerOf, projectStateForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
 import { projectConversationEvents, saveSnapshot, sessionSnapshotPath, type ConversationHostV2 } from "../../../packages/engine/src/v2/index.ts";
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
@@ -857,7 +857,11 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         // BLOCKER-1：host.run 的事件是全量内部视图，下发前必须按已鉴权 viewer + 会话成员投影：
         // mental 永不下发，私聊只给目标本人，committed 的私忆/私有关系/GM 字段按可见性裁剪，最后再遮真名。
         const members = host.get(sessionId)?.participants ?? [actorId];
-        const visible = projectConversationEvents(out, actorId, members, deps.registry);
+        const visible = projectConversationEvents(out, actorId, members, deps.registry).map((ev) =>
+          ev.type === "conversation.committed"
+            ? { ...ev, proposals: projectProposalsForPlayer(ev.proposals) }
+            : ev,
+        );
         for (const ev of visible) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, placeholders));
       } catch (e) {
         const roomSyncFault = isRoomSyncFault(e);

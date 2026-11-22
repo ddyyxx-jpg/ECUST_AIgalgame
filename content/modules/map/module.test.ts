@@ -285,7 +285,8 @@ describe("tick（NPC 日程）", () => {
     state.links.push(located("npc_lin", "loc_library"));
     const out = await mod.tick!(ctxOf(state), "night");
     const leases = out.filter((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
-    expect(String(leases[0]!.args.value)).toBe("");
+    expect(leases).toHaveLength(1);
+    expect(JSON.parse(String(leases[0]!.args.value))).toMatchObject({ action: "move", target: "loc_dorm3", phase: "night" });
     expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
   });
 
@@ -300,8 +301,8 @@ describe("tick（NPC 日程）", () => {
     state.links.push(located("npc_lin", "loc_library"));
     const out = await mod.tick!(ctxOf(state), "night");
     const leases = out.filter((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
-    expect(String(leases[0]!.args.value)).toBe("");
-    expect(JSON.parse(String(leases.at(-1)!.args.value))).toMatchObject({ action: "move", target: "loc_dorm3", phase: "night" });
+    expect(leases).toHaveLength(1);
+    expect(JSON.parse(String(leases[0]!.args.value))).toMatchObject({ action: "move", target: "loc_dorm3", phase: "night" });
     expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
   });
 

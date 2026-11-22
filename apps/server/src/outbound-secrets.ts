@@ -17,6 +17,19 @@ import { projectProposals, stripPlotSecrets } from "../../../packages/engine/src
 const ENGINE_INTERNAL_ATTRS = ["sim_lease"] as const;
 const INTERNAL_ATTR_SET = new Set<string>(ENGINE_INTERNAL_ATTRS);
 
+/**
+ * Proposal 出站裁剪：先复用 v2 的私忆/plot 裁剪，再把引擎内部属性的写入整条丢掉。
+ * 用于 turn.patch.ops 与 conversation.committed.proposals 这类“回放提案”出口，
+ * 防止以后有人把 sim_lease 放进回合批次时从旁路泄露。
+ */
+export function projectProposalsForPlayer(proposals: readonly Proposal[]): Proposal[] {
+  return projectProposals(proposals).filter((p) => {
+    if (p.op !== "attr.set") return true;
+    const key = (p.args as { key?: unknown }).key;
+    return !(typeof key === "string" && INTERNAL_ATTR_SET.has(key));
+  });
+}
+
 /** 玩家能看到的 memory.written：public 广播，或自己的记忆；其余（private/secret）一律不下发 */
 function visibleMemory(env: Envelope, viewer: string | undefined): boolean {
   const payload = env.payload as { visibility?: unknown; ownerId?: unknown };
@@ -53,7 +66,7 @@ export function projectEventForPlayer(env: Envelope, viewer?: string): Envelope 
     const payload = env.payload as { state?: WorldState; ops?: readonly Proposal[] };
     const next: Record<string, unknown> = { ...payload };
     if (payload.state) next.state = projectStateForPlayer(payload.state);
-    if (Array.isArray(payload.ops)) next.ops = projectProposals(payload.ops);
+    if (Array.isArray(payload.ops)) next.ops = projectProposalsForPlayer(payload.ops);
     return { ...env, payload: next };
   }
   return env;
