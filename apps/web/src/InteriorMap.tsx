@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MapNpc } from "./api.ts";
 import type { InteriorMap } from "./interior.ts";
+import { stepExitDwell } from "./map-autoenter.ts";
 
 const SCALE = 0.85;
 const SPEED = 380;
@@ -65,6 +66,9 @@ export default function InteriorMap({
   const exitRingRef = useRef<SVGCircleElement | null>(null);
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+  // probe 的 interval 闭包拿不到最新 props.busy：回合 streaming 时不能把人退出室内
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
   // 四方向立绘
   const heroBase = heroSrc.endsWith("-down.png") ? heroSrc.slice(0, -"-down.png".length) : heroSrc.replace(/\.png$/, "");
@@ -213,35 +217,23 @@ export default function InteriorMap({
       const RING_LEN = 2 * Math.PI * 17;
       const ring = exitRingRef.current;
 
-      if (!near) {
-        exitArmedRef.current = true;
-        dw.since = 0;
-        dw.fired = false;
-        if (ring) {
-          ring.style.strokeDashoffset = String(RING_LEN);
-          ring.classList.remove("on");
-        }
-      } else if (!exitArmedRef.current) {
-        dw.since = 0;
-        dw.fired = false;
-        if (ring) {
-          ring.style.strokeDashoffset = String(RING_LEN);
-          ring.classList.remove("on");
-        }
-      } else if (!dw.since) {
-        dw.since = now;
-      } else {
-        const pct = Math.min(1, (now - dw.since) / EXIT_DWELL_MS);
-        if (ring) {
-          ring.style.strokeDashoffset = String(RING_LEN * (1 - pct));
-          ring.classList.toggle("on", pct > 0.01);
-        }
-        if (!dw.fired && pct >= 1) {
-          dw.fired = true;
-          exitArmedRef.current = false;
-          onExitRef.current();
-        }
+      const step = stepExitDwell({
+        busy: busyRef.current,
+        near,
+        armed: exitArmedRef.current,
+        since: dw.since,
+        fired: dw.fired,
+        now,
+        dwellMs: EXIT_DWELL_MS,
+      });
+      dw.since = step.since;
+      dw.fired = step.fired;
+      exitArmedRef.current = step.armed;
+      if (ring) {
+        ring.style.strokeDashoffset = String(RING_LEN * (1 - step.pct));
+        ring.classList.toggle("on", step.pct > 0.01);
       }
+      if (step.fire) onExitRef.current();
     };
     probe();
     const timer = window.setInterval(probe, PROBE_MS);
