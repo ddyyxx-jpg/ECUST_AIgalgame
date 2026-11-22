@@ -144,6 +144,22 @@ function refillActionPoints(state: WorldState, policy: SimPolicy, actorId?: stri
 
 const PHASES: readonly Phase[] = ["morning", "noon", "afternoon", "evening", "night"];
 const INSTALL_MAX_DEPTH = 8;
+/** NPC 动作租约键：registry 声明，必须与 content/modules/map/module.ts 的 LEASE 一致。 */
+const SIM_LEASE = "sim_lease";
+/** 与 content/modules/map/module.ts 的 clockIndex 同口径，只用于 talk 租约超时。 */
+function clockIndex(clock: { day: number; phase: Phase; tick: number }): number {
+  return clock.day * PHASES.length * 24 + PHASES.indexOf(clock.phase) * 24 + clock.tick;
+}
+/** 租约 JSON 的最小读取：只判断 action 与取回原始串，不在这里复制模块的全部状态机。 */
+function leaseObject(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  try {
+    const v: unknown = JSON.parse(raw);
+    return v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
 
 function nextPhase(phase: Phase): Phase {
   const index = PHASES.indexOf(phase);
@@ -314,6 +330,79 @@ export class MapService {
     // 出站脱敏（issue #53 成功 / #58 失败）：统一走 outbound，成功整包、失败只遮文本，
     // 与 /turns /events /state /history 同口径；用 after 快照省一次事件日志回放。
     return this.outbound<TravelResult>({ ok: true, scene, events, map }, roomId, after);
+  }
+
+  // -------------------------------------------------------------- 对话打断 NPC 动作（D22）
+  /**
+   * 玩家和 NPC 对话时冻结其动作租约：把当前租约包一层 action=talk，模块 tick 看到
+   * talk 就整段跳过（不递减、不接新动作）。原租约存在 resume 里，对话回合结束由
+   * resumeNpcAction 还原；写失败只 warn（对话本身不应因为租约写不进去而失败）。
+   */
+  async suspendNpcAction(roomId: string, npcId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const seq = await this.seqOf(roomId);
+      const state = await this.deps.store.snapshot(roomId);
+      const npc = state.entities[npcId];
+      if (npc?.kind !== "npc" || npc.status !== "active") return false;
+      const raw = npc.attrs[SIM_LEASE];
+      const original = leaseObject(raw);
+      if (original?.action === "talk") return true;
+      // 即使当前空闲也要写 talk：否则对话期间自动 tick 会给这个 NPC 起一个新动作。
+      const talk = {
+        action: "talk",
+        target: typeof original?.target === "string" ? original.target : "",
+        remaining: typeof original?.remaining === "number" ? original.remaining : 0,
+        phase: state.clock.phase,
+        resume: typeof raw === "string" ? raw : "",
+        expiresAt: clockIndex(state.clock) + (this.deps.simPolicy?.talkLeaseTicks ?? 12),
+      };
+      const applied = await this.deps.arbiter.apply(
+        roomId,
+        [{ op: "attr.set", args: { entityId: npcId, key: SIM_LEASE, value: JSON.stringify(talk) }, reason: "对话打断 NPC 动作" }],
+        this.cause(roomId, "dialogue"),
+        seq === undefined ? {} : { expectedSeq: seq },
+      ).catch((e: unknown) => {
+        console.warn(`[map] 冻结 NPC ${npcId} 的动作写入异常（对话继续）：`, e instanceof Error ? e.message : e);
+        return undefined;
+      });
+      if (applied && applied.ok && applied.rejected.length === 0) return true;
+    }
+    console.warn(`[map] 冻结 NPC ${npcId} 的动作失败（对话继续）`);
+    return false;
+  }
+
+  /** 对话回合结束：把 talk 租约换回原租约（phase 用当前值，保证剩余占用继续走完）。 */
+  async resumeNpcAction(roomId: string, npcId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const seq = await this.seqOf(roomId);
+      const state = await this.deps.store.snapshot(roomId);
+      const npc = state.entities[npcId];
+      if (npc?.kind !== "npc" || npc.status !== "active") return false;
+      const current = leaseObject(npc.attrs[SIM_LEASE]);
+      if (!current || current.action !== "talk") return false;
+      let value = "";
+      if (typeof current.resume === "string" && current.resume.trim() !== "") {
+        const original = leaseObject(current.resume);
+        if (original && (original.action === "move" || original.action === "stay")
+          && typeof original.target === "string" && typeof original.remaining === "number") {
+          value = JSON.stringify({ ...original, phase: state.clock.phase });
+        } else {
+          console.warn(`[map] NPC ${npcId} 的 talk.resume 无法解析，按空闲恢复`);
+        }
+      }
+      const applied = await this.deps.arbiter.apply(
+        roomId,
+        [{ op: "attr.set", args: { entityId: npcId, key: SIM_LEASE, value }, reason: "对话结束恢复 NPC 动作占用" }],
+        this.cause(roomId, "dialogue"),
+        seq === undefined ? {} : { expectedSeq: seq },
+      ).catch((e: unknown) => {
+        console.warn(`[map] 恢复 NPC ${npcId} 的动作写入异常（对话已结束）：`, e instanceof Error ? e.message : e);
+        return undefined;
+      });
+      if (applied && applied.ok && applied.rejected.length === 0) return true;
+    }
+    console.warn(`[map] 恢复 NPC ${npcId} 的动作失败（剩余占用可能丢失）`);
+    return false;
   }
 
   // -------------------------------------------------------------- tick（不经过 Turn / LLM）

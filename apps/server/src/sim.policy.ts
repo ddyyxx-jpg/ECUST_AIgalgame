@@ -22,6 +22,8 @@ const PolicySchema = z.object({
     /** 0 = 不设上限；>0 时 tick 到达上限就停下等玩家推进时段（D22：自动推进不切 phase） */
     maxTick: z.number().int().min(0).max(24),
   }).optional(),
+  /** talk 租约最多冻结多少个 tick（防进程崩溃后永久冻结）；默认 12 */
+  talkLeaseTicks: z.number().int().min(1).max(1440).optional(),
 }).passthrough();
 
 export interface SimClockPolicy {
@@ -42,6 +44,8 @@ export interface SimPolicy {
   refillOnPhaseAdvance: boolean;
   /** 自动时钟；未配置 = 不启动 */
   clock?: SimClockPolicy;
+  /** talk 租约超时（tick 数） */
+  talkLeaseTicks?: number;
 }
 
 /**
@@ -69,6 +73,7 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
         actionCostPerTurn: 0,
         actionMax: 0,
         refillOnPhaseAdvance: false,
+        talkLeaseTicks: parsed.data.talkLeaseTicks ?? 12,
         ...(clockPolicy ? { clock: clockPolicy } : {}),
       };
     }
@@ -77,6 +82,7 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
       actionCostPerTurn: ap.perTurn,
       actionMax: ap.max,
       refillOnPhaseAdvance: ap.refillOnPhaseAdvance ?? true,
+      talkLeaseTicks: parsed.data.talkLeaseTicks ?? 12,
       ...(clockPolicy ? { clock: clockPolicy } : {}),
     };
   } catch {

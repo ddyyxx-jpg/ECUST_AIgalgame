@@ -165,7 +165,7 @@
       "default": "",
       "visibility": "self",
       "display": { "label": "行动租约", "hidden": true },
-      "desc": "NPC 当前动作的租约（JSON 字符串：action/target/remaining/phase）；为空表示空闲。由 map 模块 tick 维护"
+      "desc": "NPC 当前动作的租约（JSON 字符串：action/target/remaining/phase；action 可为 move/stay/talk，talk 额外带 resume 原租约）；为空表示空闲。由 map 模块 tick 维护"
     }
   ]
 }

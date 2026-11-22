@@ -691,6 +691,30 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         const placeholder = unknownPlaceholders(access.state, deps.appearance).get(utteranceTarget.name);
         utterance.content = unmaskTargetPlaceholder(utterance.content, placeholder, utteranceTarget.name);
       }
+      // D22：玩家对话/插话的 NPC 若正在执行动作，本轮对话期间冻结其租约；
+      // 回合结束（含异常）恢复，剩余占用继续由 map tick 走完。target 与 interject
+      // 可能同时在场，两者都要冻结，否则被插话的 NPC 会在说话时继续走日程。
+      const talkNpcIds: string[] = [];
+      // 契约允许 target 是 string 或 string[]（多目标），两种形态都要冻结。
+      const targetIds = utterance?.target === undefined
+        ? []
+        : Array.isArray(utterance.target) ? utterance.target : [utterance.target];
+      for (const id of targetIds) {
+        if (typeof id !== "string") continue;
+        const targetEntity = access.state.entities[id];
+        if (targetEntity?.kind === "npc" && access.state.room.scene.presentIds.includes(id) && !talkNpcIds.includes(id)) {
+          talkNpcIds.push(id);
+        }
+      }
+      if (
+        body.interject
+        && access.state.entities[body.interject]?.kind === "npc"
+        && access.state.room.scene.presentIds.includes(body.interject)
+        && !talkNpcIds.includes(body.interject)
+      ) {
+        talkNpcIds.push(body.interject);
+      }
+      const suspendedNpcIds: string[] = [];
       let sessionId = "";
       let opened: ConversationEvent | undefined;
       const out: ConversationEvent[] = [];
@@ -704,6 +728,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
           const r = await openOrReuse(roomId, actorId, access.state);
           sessionId = r.sessionId;
           opened = r.opened;
+          for (const npcId of talkNpcIds) {
+            const frozen = await deps.map.suspendNpcAction(roomId, npcId);
+            if (frozen) suspendedNpcIds.push(npcId);
+          }
           for await (const ev of host.run(r.sessionId, {
             clientTurnId: body.clientTurnId,
             ...(utterance ? { utterance } : {}),
@@ -741,6 +769,26 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
           // #104：异常路径按失败回收额度（未 committed），与 v1 /turns 的 catch 同口径；重放命中不结算
           if (charged && turnScope && ledger) ledger.transition(turnScope, "failed");
           caught = e;
+        } finally {
+          if (suspendedNpcIds.length > 0) {
+            let restoredAll = true;
+            for (const npcId of suspendedNpcIds) {
+              if (!(await deps.map.resumeNpcAction(roomId, npcId))) {
+                restoredAll = false;
+                console.warn(`[conversation] NPC ${npcId} 动作租约恢复失败`);
+              }
+            }
+            // committed 事件里的 state 是回合中途快照，含 talk 租约；全部恢复成功后才替换，
+            // 避免把仍有冻结 NPC 的状态当成“已恢复”下发。用新事件对象替换，不能改 host 缓存里的同一对象。
+            if (restoredAll) {
+              const snapshot = structuredClone(await deps.store.snapshot(roomId));
+              const idx = out.findIndex((e) => e.type === "conversation.committed");
+              const commitEv = idx >= 0 ? out[idx] : undefined;
+              if (commitEv && commitEv.type === "conversation.committed") {
+                out[idx] = { ...commitEv, state: snapshot };
+              }
+            }
+          }
         }
       });
       if (denied) return reply;
@@ -968,6 +1016,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         target && target.kind === "npc" && targetPresent
           ? unmaskTargetPlaceholder(body.input, targetPlaceholder, target.name)
           : body.input;
+      // D22：v1 回退路径同样在对话回合内冻结目标 NPC 的动作租约。
+      const talkNpcId = target && target.kind === "npc" && targetPresent ? target.id : undefined;
+      let suspendedTalkNpcId: string | undefined;
+      if (talkNpcId && typeof deps.map.suspendNpcAction === "function") {
+        if (await deps.map.suspendNpcAction(roomId, talkNpcId)) suspendedTalkNpcId = talkNpcId;
+      }
       const it = deps.turn.run({
         roomId,
         actorId: body.actorId,
@@ -981,9 +1035,26 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       // 此时已经认识——遮住反而会出现"陌生人自我介绍"这种荒谬结果。
       // 所以先收齐事件，再用最终 patch 的 state 算一次名单，然后统一写出。
       const events: TurnEvent[] = [];
-      for await (const ev of it as AsyncIterable<TurnEvent>) {
-        events.push(ev);
-        if (ev.type === "turn.commit" || ev.type === "turn.error" || ev.type === "turn.rejected") break;
+      try {
+        for await (const ev of it as AsyncIterable<TurnEvent>) {
+          events.push(ev);
+          if (ev.type === "turn.commit" || ev.type === "turn.error" || ev.type === "turn.rejected") break;
+        }
+      } finally {
+        if (suspendedTalkNpcId && typeof deps.map.resumeNpcAction === "function") {
+          if (await deps.map.resumeNpcAction(roomId, suspendedTalkNpcId)) {
+            // turn.patch.state 是回合中途快照（含 talk 租约）；恢复后用最新状态替换。
+            // 替换成新事件对象，避免改到调用方缓存的事件对象。
+            const snapshot = structuredClone(await deps.store.snapshot(roomId));
+            const idx = events.findIndex((ev) => ev.type === "turn.patch");
+            const patch = idx >= 0 ? events[idx] : undefined;
+            if (patch && patch.type === "turn.patch") {
+              events[idx] = { ...patch, state: snapshot };
+            }
+          } else {
+            console.warn(`[turns] NPC ${suspendedTalkNpcId} 动作租约恢复失败`);
+          }
+        }
       }
       // 额度结算与事件流同源：只有真的提交了才记 committed，其余按失败/待核对处理
       committed = events.some((ev) => ev.type === "turn.commit");

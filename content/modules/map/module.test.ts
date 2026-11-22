@@ -239,6 +239,51 @@ describe("tick（NPC 日程）", () => {
     expect(movesOf(out, "npc_lin")).toEqual([]);
   });
 
+  it("talk 租约冻结动作：不递减、不重排、不移动（玩家对话打断）", async () => {
+    const state = buildRoom();
+    const npc = state.entities["npc_lin"]!;
+    npc.attrs.sim_lease = JSON.stringify({
+      action: "talk", target: "loc_canteen", remaining: 1, phase: "night",
+      resume: JSON.stringify({ action: "move", target: "loc_dorm3", remaining: 1, phase: "night" }),
+    });
+    state.links = state.links.filter((l) => !(l.kind === "located_in" && l.from === "npc_lin"));
+    state.links.push(located("npc_lin", "loc_library"));
+    const out = await mod.tick!(ctxOf(state), "night");
+    expect(movesOf(out, "npc_lin")).toEqual([]);
+    expect(out.some((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease")).toBe(false);
+  });
+
+  it("talk 超时：expiresAt 已过则清空并按当前 phase 重排（防进程崩溃永久冻结）", async () => {
+    const state = buildRoom();
+    const npc = state.entities["npc_lin"]!;
+    npc.attrs.sim_lease = JSON.stringify({
+      action: "talk", target: "loc_canteen", remaining: 1, phase: "night", expiresAt: 0,
+      resume: JSON.stringify({ action: "move", target: "loc_dorm3", remaining: 1, phase: "night" }),
+    });
+    state.links = state.links.filter((l) => !(l.kind === "located_in" && l.from === "npc_lin"));
+    state.links.push(located("npc_lin", "loc_library"));
+    const out = await mod.tick!(ctxOf(state), "night");
+    const leases = out.filter((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
+    expect(String(leases[0]!.args.value)).toBe("");
+    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
+  });
+
+  it("跨 phase 的 talk 租约视为过期：清空并按新 phase 重排", async () => {
+    const state = buildRoom();
+    const npc = state.entities["npc_lin"]!;
+    npc.attrs.sim_lease = JSON.stringify({
+      action: "talk", target: "loc_canteen", remaining: 1, phase: "evening",
+      resume: JSON.stringify({ action: "move", target: "loc_dorm3", remaining: 1, phase: "evening" }),
+    });
+    state.links = state.links.filter((l) => !(l.kind === "located_in" && l.from === "npc_lin"));
+    state.links.push(located("npc_lin", "loc_library"));
+    const out = await mod.tick!(ctxOf(state), "night");
+    const leases = out.filter((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
+    expect(String(leases[0]!.args.value)).toBe("");
+    expect(JSON.parse(String(leases.at(-1)!.args.value))).toMatchObject({ action: "move", target: "loc_dorm3", phase: "night" });
+    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
+  });
+
   it("坏租约 JSON 当空闲处理，不阻塞 NPC 重排", async () => {
     const state = buildRoom();
     state.entities["npc_lin"]!.attrs.sim_lease = "{not json";

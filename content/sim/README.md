@@ -45,6 +45,7 @@
 | `enabled` | 默认 `false`；开启后服务端每 `intervalMs` 对每个房间调一次 `MapService.tick({ticks: ticksPerBeat})` |
 | `intervalMs` | 真实时间间隔；太短会让 NPC 租约消耗过快，建议 ≥ 30000 |
 | `ticksPerBeat` | 每拍推进几个游戏 tick；必须是 1..8（与 `time.advance.ticks` 的 zod 上限一致） |
+| `talkLeaseTicks` | talk 租约最多冻结多少 tick（默认 12）；进程崩溃/恢复失败时到点自动作废，防 NPC 永久冻结 |
 | `maxTick` | 当前 phase 内最多推到第几 tick，到顶就停，等玩家 `advance`；`0` = 不设上限 |
 
 自动时钟**只推 tick，不切 phase**（D22）；`advance:true` 仍由玩家/前端显式触发，并回满行动点。`clock` 与 `actionPoints` 相互独立：只想跑时钟时，`actionPoints` 可以整段省略（行动点代价按 0 处理）。
@@ -54,13 +55,15 @@
 `content/registry/attrs.json` 的 `sim_lease` 是 NPC 身上的一条 JSON：
 
 ```json
-{ "action": "move|stay", "target": "loc_xxx", "remaining": 2, "phase": "noon" }
+{ "action": "move|stay|talk", "target": "loc_xxx", "remaining": 2, "phase": "noon", "resume": "..." }
 ```
 
 - `remaining > 1`：本 tick 只递减，不接新动作；
 - `remaining == 1`：本 tick 结束动作并清空；
 - 没有租约：按 `npc-schedules.json` 的当前 phase 目标，决定“走完整条最短路 + 占用 1 tick”或“原地停留 2 tick”；
-- phase 变了：旧租约作废，按新 phase 重排。
+- phase 变了：旧租约作废，按新 phase 重排；
+- `action:"talk"`：玩家对话中，map tick 整段跳过（不递减、不接新动作；空闲 NPC 也会写 talk，`resume` 为空）；`resume` 保存原租约（原 lease JSON 字符串），对话回合结束由服务端恢复；talk 跨 phase 视为过期，清空重排；另带 `expiresAt`（绝对 tick），到点即使没换 phase 也作废，兜底进程崩溃/恢复失败。
+- `sim_lease` 的 `visibility:self` + `hidden` 只影响 UI 与图鉴；`/state` 是权威原状态通道，仍会原样返回租约（含 `resume`）。不要把不该让客户端看到的机密写进租约。
 
 这样自动 tick 不会让 NPC 每拍重新决策，也不会在玩家对话中途开始新动作；玩家打断后，租约的剩余占用时间仍在，走完才接下一个动作。
 
@@ -68,7 +71,7 @@
 
 | 来源 | 机制 | 本仓库落点 | 状态 |
 |---|---|---|---|
-| WorldX | 动作租约（action lease） | `sim_lease` + map 模块 tick | 本 PR |
+| WorldX | 动作租约（action lease） | `sim_lease` + map 模块 tick；对话打断用 talk 冻结 | 已落地 |
 | WorldX | 感知投影 + 编号行动菜单 + 单选决策 | `content/modules/<sim>/perception.ts`、`menu.ts`，只产 Proposal | 下一步 |
 | WorldX | 记忆打分（相关/新近/重要/情绪）与反思回流 | 已有 `packages/engine` 记忆子系统，补决策侧召回 | 复用 |
 | SillyTavern | 角色卡 v2（description/personality/scenario/first_mes/mes_example） | `content/npcs/<id>.json`，由提示词组装器读取；现有 `scenarios/npcs.json` 只保留外观/展示字段 | 下一步 |

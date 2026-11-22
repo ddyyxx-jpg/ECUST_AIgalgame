@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "talkLeaseTicks": 12,
   "actionPoints": {
     "enabled": true,
     "attr": "action_points",

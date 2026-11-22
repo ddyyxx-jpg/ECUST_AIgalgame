@@ -17,12 +17,14 @@ describe("loadSimPolicy", () => {
       schemaVersion: 1,
       actionPoints: { enabled: true, attr: "action_points", perTurn: 1, max: 6 },
       clock: { enabled: true, intervalMs: 30000, ticksPerBeat: 2, maxTick: 20 },
+      talkLeaseTicks: 5,
     });
     const policy = await loadSimPolicy(dir);
     expect(policy).toMatchObject({
       actionAttr: "action_points",
       actionCostPerTurn: 1,
       actionMax: 6,
+      talkLeaseTicks: 5,
       clock: { enabled: true, intervalMs: 30000, ticksPerBeat: 2, maxTick: 20 },
     });
   });
@@ -34,6 +36,7 @@ describe("loadSimPolicy", () => {
       actionCostPerTurn: 0,
       actionMax: 0,
       refillOnPhaseAdvance: false,
+      talkLeaseTicks: 12,
       clock: { enabled: true },
     });
   });

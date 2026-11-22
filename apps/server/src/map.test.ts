@@ -35,6 +35,7 @@ const COORD_ATTRS: AttrDef[] = [
   { key: "coord_x", type: "number", scope: ["loc", "npc", "plr"], min: 0, max: 2000, default: 0, visibility: "public", display: { label: "X", hidden: true } },
   { key: "coord_y", type: "number", scope: ["loc", "npc", "plr"], min: 0, max: 2000, default: 0, visibility: "public", display: { label: "Y", hidden: true } },
   { key: "action_points", type: "number", scope: ["plr"], min: 0, max: 6, default: 6, visibility: "public", display: { label: "行动点" } },
+  { key: "sim_lease", type: "string", scope: ["npc"], default: "", visibility: "self", display: { label: "行动租约", hidden: true } },
 ];
 
 const WORLD = {
@@ -763,6 +764,45 @@ class UnloadedStore extends EventSourcedStore {
     return seq;
   }
 }
+
+describe("MapService · 对话冻结/恢复 NPC 动作（D22）", () => {
+  async function seedLease(f: Fixture, value: unknown): Promise<void> {
+    const cause: Envelope = {
+      v: 1, id: "evt_seed_lease", roomId: ROOM_ID, seq: f.store.seq(ROOM_ID) + 1, ts: 1,
+      actorId: "system", type: "room.bootstrap", payload: {},
+    };
+    const applied = await f.arbiter.apply(
+      ROOM_ID,
+      [{ op: "attr.set", args: { entityId: "npc_lin", key: "sim_lease", value: JSON.stringify(value) } }],
+      cause,
+    );
+    expect(applied.rejected).toEqual([]);
+  }
+
+  it("对话开始冻结为 talk 租约，结束后恢复原租约与剩余占用", async () => {
+    const f = await setup();
+    await seedLease(f, { action: "move", target: "loc_canteen", remaining: 2, phase: "morning" });
+    expect(await f.service.suspendNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    const frozen = JSON.parse(String(f.store.state(ROOM_ID).entities["npc_lin"]!.attrs.sim_lease));
+    expect(frozen).toMatchObject({ action: "talk", target: "loc_canteen", remaining: 2, phase: "morning" });
+    expect(JSON.parse(frozen.resume)).toMatchObject({ action: "move", target: "loc_canteen", remaining: 2 });
+    // 幂等：连续对话再次冻结不嵌套
+    expect(await f.service.suspendNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    expect(await f.service.resumeNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    const restored = JSON.parse(String(f.store.state(ROOM_ID).entities["npc_lin"]!.attrs.sim_lease));
+    expect(restored).toMatchObject({ action: "move", target: "loc_canteen", remaining: 2 });
+    expect(await f.service.resumeNpcAction(ROOM_ID, "npc_lin")).toBe(false);
+  });
+
+  it("空闲 NPC 也冻结为 talk，避免对话期间被自动 tick 起新动作；恢复后清空", async () => {
+    const f = await setup();
+    expect(await f.service.suspendNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    const frozen = JSON.parse(String(f.store.state(ROOM_ID).entities["npc_lin"]!.attrs.sim_lease));
+    expect(frozen).toMatchObject({ action: "talk", target: "", remaining: 0, phase: "morning", resume: "" });
+    expect(await f.service.resumeNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    expect(f.store.state(ROOM_ID).entities["npc_lin"]!.attrs.sim_lease).toBe("");
+  });
+});
 
 describe("MapService · tick 与并发写入（PR #149 审阅 P1）", () => {
   it("modules.tick 期间的并发写入不会被旧快照覆盖", async () => {
