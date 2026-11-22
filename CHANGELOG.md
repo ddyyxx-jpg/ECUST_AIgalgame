@@ -2,64 +2,70 @@
 
 按合并到 `main` 的日期记录。提交 sha 可在 `git log` 中查；跨系统协议版本以 `CONTRACT_VERSION` 为准（产品版本见 `package.json`，当前 0.0.1）。
 
-版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）。
+版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）→ `v0.6.0` dev/v2 群聊 + 开放 issue 收口 + 像素 UI（PR #144 / #149 / #148，CONTRACT 3.6.2 → 3.8.0）。
 
 
-## 未发布 — 像素风 UI / 室内二级地图 / NPC 寻路与作息（PR #148，分支 `feat/campus-2d`）
+## v0.6.0 — 2026-11-22 像素风 UI + 开放 issue 收口 + dev/v2 群聊（PR #144 / #148 / #149；合入 main `657d6c5`；CONTRACT 3.6.2 → 3.8.0）
+
+> 本版把三段工作一起发版：**像素风 UI / 室内二级地图 / NPC 寻路**（#148）、**开放 issue 收口批**（#149，含夜间密谋秘密出口的 P0 修复与 19 个 issue 收口）、**dev/v2 群聊运行质量批**（#144，CONTRACT 3.7.0，细节见下方 3.7.0 段——它是本版第一个纳入 tag 的契约版本）。
+> `apiVersion` 3 / `SCHEMA_VERSION` 2 不变；13 个 op 闭集不变；`PROMPT_VERSION` 不变。
+> 发布前最终验证（main `657d6c5`）：`typecheck` 0 错 / `vitest` 124 文件 1000 例 / `check:contract` 8/8（CONTRACT 3.8.0）/ `build:web` 通过。
+
+### 像素风 UI / 室内二级地图 / NPC 寻路（PR #148，分支 `feat/campus-2d`）
 
 > 以表现层为主：不改契约、不新增 op 原语；`CONTRACT_VERSION` / `PROMPT_VERSION` / `apiVersion` 均不变。
 > 例外是信息馆一处**数据语义变更**（见下），已在 PR 描述中单独标注。
 
-### 新增
+#### 新增
 - **像素风 UI**：`pixel-ui.css` / `pixel-game.css`，HUD 与对话区改为像素风；配套 `zpix.ttf`（授权见 `apps/web/public/fonts/ZPIX-NOTICE.txt`）。
 - **室内二级地图**：`InteriorMap.tsx` + `interior.ts`，图书馆/宿舍/食堂/实验楼等室内场景；进入只切渲染，不改世界状态里的 `locId`。
 - **NPC 寻路与作息**：`pathfind.ts`（A*，600×450 网格、10 世界单位/格）+ 场景内 NPC 按作息换位置。
 - **新校园底图**：`/map/campus-wide.jpg`（6000×4500）替换原 `/map/ecust-campus.jpg`。
 
-### 变更（数据 / 服务端语义，非纯美术）
+#### 变更（数据 / 服务端语义，非纯美术）
 - **`loc_info_hall`（信息馆）：`status: planned → built`**。`apps/server/src/map.ts` 对 `status !== "built"` 的点位返回 `E_FORBIDDEN`，改为 `built` 后该点位**可 travel、可进入室内**。
   同一批已把该点位的 `desc` / `tags` 从「图纸上的工地」改写为「已建成」，避免走进一个描述为工地的场所。
 
-### 修复
+#### 修复
 - **Windows 测试路径**：7 个 v2 测试文件把 `new URL(...).pathname` 换成 `fileURLToPath(...)`，修掉 Windows 下 `/D:/…` 被拼成 `D:\D:\…` 的 ENOENT。每文件 2+/1−，断言语义零变化。
 
-### 已知限制
+#### 已知限制
 - **前端不自动推进时间**：权威时间只由服务端推进（MapPanel「推进时段」或后续服务端定时），避免多 tab 叠加推进、以及挂机时白烧剧情成本（PR #148 审阅 P1-c）。
 - `zpix.ttf` 个人免费、商用需授权；商用前须取得授权或替换为可商用像素字体。
 
-## 未发布 — 开放 issue 收口批（整体 PR，分支 `fix/all-open-issues`；CONTRACT 3.7.0 → 3.8.0）
+### 开放 issue 收口批（PR #149，分支 `fix/pr147-review`；CONTRACT 3.7.0 → 3.8.0）
 
 > 把四个开放 PR（#124 引擎 / #125 后端 / #126 前端 / #127 UI）按分类合入本分支，并把各 issue 的遗留缺口补齐到「真实链路可用」。覆盖 #76 #90 #94 #95 #96 #97 #98 #99 #100 #104 #105 #106 #122 #128 #130 #138 #139 #140 #146；#84（真实部署冒烟）需目标机实测，保持开放。`apiVersion` / `SCHEMA_VERSION` 不变；`PROMPT_VERSION` 不变。
 
-### 引擎（packages/、content/、契约文档）
+#### 引擎（packages/、content/、契约文档）
 - **结算前置条件 `expectAttrs`（#138，PR #124）**：`ApplyOptions.expectAttrs`（`AttrExpectation[]`，可选）在 `apply` 前逐条比对当前快照 `{entityId, key, expected: AttrValue|null}`（`null` = 该属性必须不存在）；任一失配整批拒绝 `E_PRECONDITION`，不试算、不落库、不消耗回合预算；顺序为先 `expectedSeq` 后本项；只承诺标量精确相等，不做深比较。空数组/未传时行为与 3.7.0 完全一致。**本批已接生产调用方**：`packages/engine/src/attr-expect.ts` 的 `expectAttrsFor(state, ops)` 只对 `attr.delta`/`attr.set` 产条件并按 `entityId+key` 去重，`Turn.applyBatch` 主批与记忆被拒重提批、v2 `commitStep` 都显式传入；`packages/engine/src/turn.expect-wiring.test.ts` 与 `conversation.test.ts` 断言真实 apply 入口带条件，`arbiter.expect.test.ts` 覆盖失配不耗预算 / 首失配整批拒 / 同房间并发串行 / 重启后按持久化值校验四问。`CONTRACT_VERSION` → 3.8.0（docs/03 §2.3、§10.28）。
 - **后台任务协作式中止（#140）**：`canonize.retireRoom(roomId, {signal})`、`GossipHost.step(roomId, {signal})` 在候选循环、judge 前、落库前设检查点；`CanonizeReport.aborted` 标记中止，gossip 用既有 `gossip.dropped{reason:"aborted"}`，不新增事件类型/op。已落库批次不回滚。
 - **密谋导演（#96/#128）**：`discoveryProposals(ctx, plot, kind, {attitudeAttr?})` 改为显式传键（引擎无 `moduleState` 写入口，旧写法永远读不到值），未传键不产 `attr.delta`；新增 `content/modules/investigate/`（`investigate.probe`，态度键来自 `data/config.json`），是 `activePlots`/`discoveryProposals` 的首个生产调用方。
 - **存档导出/导入 fixture 修正（#99）**：`save-archive.test.ts` 的样例事件从 `turn.commit`（SSE 事件，从不落盘）改为真实的 `turn.committed` marker，并新增「导入 → 新 `FileStore` 实例读回 → `parseCommitEvidence`」探针；docs/02 §7.0 记录该约束。
 - **#146 小项**：`llm.traceId` 优先 `x-ds-trace-id`；`fitMemoryContent` 导出后 `ownSpeechLines` 与落库同一截断口径去重；docs/03 的 `routes.ts` 行号锚点改为函数名锚点。
 
-### 后端（apps/server）
+#### 后端（apps/server）
 - **夜间密谋编排（#128）**：`map.tick()` 仅在真正进入夜间那一拍跑 `runNightPlot`：用进入夜间前的在场存活 NPC（≥2），`DialogueHost.open("npc.plot") → step → close`，提案单独第二批 `arbiter.apply(..., cause.type="dialogue")`，fail-soft；不碰 #38 的 `time.advance` 原子批；同夜重复 tick 不重复落账。`plot-night.route.test.ts` 用 `app.inject` 验证真实 `plot.upserted`/`memory.written`(private)/`attr.changed` 与 LLM 抛错时 tick 仍 ok。
 - **后台任务账本与接管（#140，PR #125）**：`JobLedger` + `BackgroundCycle`（同房间单飞、generation 令牌、stall 看门狗强制接管、`takeovers`/`watchdogFires`/`terminalPersistFailures` 遥测、启动 `reconcileBackgroundJobs` 对账）；`bootstrap.ts` 两个扫描定时器仍走 `scanRoomJobs` 逐房隔离，并把 `{signal}` 传进任务体。`save-durability.test.ts` 的后台扫描用例改为串行触发（单飞锁下两种扫描不再并发），验收目标不变。
 - **#146-1 结算断言**：`conversation.route.test.ts` 新增审核 blocked → `unconfirmed`、`maxAutoRounds:0` 的 auto 回合 → `failed` 两例。
 - 复核已落地项：#90 会话快照被 `openOrReuse` 真正复用、#104 `/conversation` 共用 `TurnLedger` 且淘汰先 `host.close`、#105 地图草案共用 admin gate、#122 索引重建 merge 单调 + `.bak`、#100 历史上限可配（`GALGAME_HISTORY_LIMIT_MAX`）、#98 多槽存档、#95/#94/#97 验收。
 
-### 前端（apps/web，PR #126）
+#### 前端（apps/web，PR #126）
 - 客户端前台恢复与三态探测：`conversation-api.ts` 的 `detectConversation`/`convModeAfterProbe`/`runConversationAuto`/`runConversationUtterance`，`App.tsx` 恢复时 `loadRoomThenReset` + `holdResumedBusy`；docs/09 §10。#106 MINOR 项复核已落地（URL `encodeURIComponent`、快照 tmp 名带 pid、SSE 15s 心跳）。
 
-### UI（apps/web 候选面板，PR #127 + #139）
+#### UI（apps/web 候选面板，PR #127 + #139）
 - 候选行动面板 + 数字键 1–6 快选（输入框内不抢键）。**#139**：建议改为 `{text, kind}` 由来源侧给出（出口→`move`、在场 NPC→`talk`、`openings.json` 作者标注），删除中文前缀启发式；旧字符串仍可读，回退 `action`；`kind` 只影响分组/配色。docs/03 §5.2.6 登记形状与兼容策略。
 
-### 验证（本分支实跑）
+#### 验证（本分支实跑）
 - `npm run typecheck` → 0 错；`npx vitest run` → **120 文件 / 945 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过。
 - 未做：#84 的 compose/Nginx TLS/证书/备份恢复目标机冒烟（`deploy:smoke` 只覆盖应用层局部链路）。
 
-### 审阅修复（PR #147 全量审阅的 P2/P3）
+#### 审阅修复（PR #147 全量审阅的 P2/P3）
 - **P2-1 delta 假接线**：`discoveryProposals` opts 增加 `delta?: number`，investigate 模块传 `config.delta`；测试断言 `delta === configJson.delta`。`kindFrom` 的中文关键词同步挪进 `config.json` 的 `kindPatterns`（数据驱动，参照 §4.7）。
 - **P2-2 接管后写隔离**：`canonize.publish.ts` 与 `canonize.tombstone` 的 `arbiter.apply` 补 `expectedSeq`（load 到的 seq）；新增竞态用例（load 与 apply 之间世界房被推进 → 整批 `E_SEQ_GAP`，无交错写入）；docs/09 §9 写明「generation 只保锁/账本，world 写隔离靠检查点 + expectedSeq」。
 - **P3**：docs/03 `AttrExpectation` 注释 3.7.0→3.8.0；v2 `StoreRetry` 带上 `expectAttrs`（重试批与首批同口径）；`conversation-api.ts` 三态注释修正；`npc.plot.ts` 拆出 `npc.plot.discovery.ts`（262+92 行）、`background-cycle.ts` 拆出 `background-cycle.types.ts`（279+76 行），均 ≤300 行且重导出保持调用路径。
 
-### 审阅修复第二轮（PR #147 被 revert 后重提：huaaaji 全量审阅 P0/P1/P2/P3）
+#### 审阅修复第二轮（PR #147 被 revert 后重提：huaaaji 全量审阅 P0/P1/P2/P3）
 
 > 背景：PR #147 合并后被发现 1 个 P0（夜间密谋秘密从玩家出口泄露）与 3 个 P1，已 revert；本批在 `fix/pr147-review` 逐条修复后重提。审阅原文要点：测试全绿≠功能正确，夜间链路只读 EventLog、不断言 HTTP 响应体。
 
@@ -76,10 +82,10 @@
 - **P2-7 v2 下没有动态候选**：`playedTurns` 同时数 v1 `lines` 与 v2 `convLines`；v2 有 `view.position` 用服务端位置，否则从 `state.room.scene.presentIds` 推导在场 NPC 生成候选（`exits` 不编造）。
 - **P3 收口**：`types.ts`/docs/03 的「与 3.6.0 一致」改回基线 3.7.0；docs/09 的 `#124 合入后为 3.7.0` 改为以 `version.ts` 为准，stallMs 口径统一为「配置下限 1000ms、构造参数下限 1ms（测试用）」；`CanonizeReport.aborted` 登记进 docs/03 且中止报告的 `candidates` 不再恒 0；`manifest.limits` 由宿主强制执行（`limitProposals`：`proposalsPerTurn` 截断 + warn 含 `E_OVER_LIMIT`，`maxArrayItems` 截数组 args；map 的声明上限按「每 NPC 一条 move」调到 64）；`isConversationAvailable` 接回探测路径；`ViewPatch.lists` 补进 docs/03 并注明前端未消费。
 
-### 验证（第二轮审阅修复后实跑）
+#### 验证（第二轮审阅修复后实跑）
 - `npx tsc --noEmit` → 0 错；`npx vitest run` → **123 文件 / 978 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过（`index-A8yziaL-.js` 387.81 kB）。
 
-### 审阅修复第三轮（PR #149 审阅：3×P0 / 1×P1 / 7×P2 / P3）
+#### 审阅修复第三轮（PR #149 审阅：3×P0 / 1×P1 / 7×P2 / P3）
 
 > 背景：第二轮重提后 huaaaji 打回，指出「秘密出口还漏了三处，tick 的 `expectedSeq` 取值时机仍会让旧快照覆盖并发写」。本轮把**所有**玩家可达出口收进同一投影，并用「把修复还原后测试必须失败」的反向验证确认回归测试不是空转。
 
@@ -96,17 +102,17 @@
 - **P2-7 blocked auto 回合重试**：`retrySubmission(last)` 保留 `auto` 标记，重试走真正的自主轮，不再被空输入守卫吃掉。
 - **P3**：`/map/tick` 的 viewer 改按登录账号解析（联机房不再用「1 号玩家」替别人过滤私忆）；v2 `playedTurns` 只数已提交的自身 utterance；候选位置按 `kind` 过滤（不再生成「和地点说话」）；`http.ts` 的 `TimeoutError` import 移到文件顶部；新增 `/turns`、`/map/travel`、`/events` 的响应体回归断言与 tombstone 503/409 路由用例。
 
-### 验证（第三轮审阅修复后实跑）
+#### 验证（第三轮审阅修复后实跑）
 - `npx tsc --noEmit` → 0 错；`npx vitest run` → **124 文件 / 994 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过（`index-CMLyLKtQ.js` 388.62 kB）。
 - 反向验证：把 `expectedSeq` 取值挪回旧位置 → 并发用例失败；把 outbound 投影还原 → 三处 P0 用例失败（证明断言真的盯着出口，而不是只读 EventLog）。
 
-### 审阅修复第四轮（PR #149 复审剩余 2×P2 + P3）
+#### 审阅修复第四轮（PR #149 复审剩余 2×P2 + P3）
 
 - **P2-1 v2 前台恢复重放开场 / `playedTurns` 归零**：新增 `shouldReplayOpening({restoredLineCount, keptConvLines})` 与 `playedTurnsOf(convMode, lines, convLines)` 两个纯函数——v2 房间没有 v1 history，但本地保留了 `convLines` 时不再重放「身份 → 正文」；回合数改数 `convLines` 的玩家行（`convView` 会被 reset，数它必归零）。三条用例覆盖「保留会话行 / v1 有 history / 真新开局」。
 - **P2-2 v2 travel 后候选停在旧地点**：`candidatePosition` 先比 `pos.locId` 与 `state.room.scene.locId`——不在同一场景就以 state 投影为准（`enterScene` 只改 `locId`，旧 `actors/exits` 是上个地点的）；同场景且非空仍用服务端 `pos`。
 - **P3 重启后首拍 tick 假 `E_SEQ_GAP`**：`seqOf` 改为 `await store.load(roomId)`（`seq()` 在未载入时只会给 0）；夜间第二批同样走它。新增「新 store 实例只持有磁盘事件 → 直接 tick」探针，反向验证：改回 `seq()` 即失败（seq 停在 0）。
 
-### 验证（第四轮复审修复后实跑）
+#### 验证（第四轮复审修复后实跑）
 - `npx tsc --noEmit` → 0；`npx vitest run` → **124 文件 / 1000 例**全过；`npm run check:contract` → 8/8（3.8.0）；`npm run build:web` → `index-XOequiWb.js` 388.79 kB（gzip 121.13 kB）。
 
 ## 3.7.0（2026-11-21，PR #144）— dev/v2 运行质量批（issue #130 子项 #131–#137，CONTRACT 3.6.2 → 3.7.0）
@@ -176,7 +182,7 @@
 
 - 单进程单写者；不提供跨进程锁 / 租约（沿用 docs/10）。
 - 目录同步失败后的"待核对"标记只在进程内：重启不会消解可疑结果，须先人工核对存档。
-- 3.7.0 批（PR #144，issue #130 子项）已在 main，并单独记录在「未发布 — dev/v2 运行质量批」段；本段只覆盖 3.6.1 / 3.6.2，不重复记账。
+- 3.7.0 批（PR #144，issue #130 子项）已在 main，并记录在本文件下方 `## 3.7.0` 段（随 v0.6.0 一起发版）；本段只覆盖 3.6.1 / 3.6.2，不重复记账。
 - `turn.committed` 登记已在 v0.5.6 完成（`content/registry/events.json` 共 11 条；payload `{clientTurnId,turnId,actorId,committedSeq,narrative?,facts?,usage?}` 与 `packages/engine/src/turn.evidence.ts` 对齐），本 PR 只复核、未改动。
 
 ## v0.5.6（候选 tag，尚未打；发版时决定）— 2026-11-20 PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）
