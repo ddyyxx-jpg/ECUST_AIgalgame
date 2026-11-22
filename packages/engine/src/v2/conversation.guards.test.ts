@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 /** PR #51 review 回归：审核扩面 / 落盘重试 / zod 边界 / 数据驱动 / 幂等键 */
 import { describe, expect, it } from "vitest";
 import type { ConversationEvent, ConversationPolicy, ConversationSessionV2, Entity, Envelope, LlmPort, LlmResult, Utterance } from "../../../shared/src/index.ts";
@@ -15,7 +16,7 @@ import { NpcAgent, parseDecision } from "./npc-agent.ts";
 import { ConversationAudit } from "./audit.ts";
 import { ConversationHostV2 } from "./conversation.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
 const POLICY = `${ROOT}content/v2/conversation-policy.json`;
 const ROOM = "room_chat";

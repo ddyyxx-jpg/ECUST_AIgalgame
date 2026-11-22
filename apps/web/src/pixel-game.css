@@ -1,0 +1,478 @@
+/* ============================================================================
+   像素风 UI 皮肤 —— 游戏内部分
+   ---------------------------------------------------------------------------
+   把顶栏 / 标签页 / 输入区 / HUD / 走动提示统一到登录页那套明亮配色，
+   地图画面保持原样（写实 3D），靠 UI 的亮底深字和像素边框区分层次。
+   ========================================================================== */
+
+/* ---------------------------------------------------------------- 像素字体 */
+@font-face {
+  font-family: "Zpix";
+  src: url("/fonts/zpix.ttf") format("truetype");
+  font-display: swap;
+}
+
+/* 像素字体只在整数像素尺寸下清晰，正文统一用 12/14/16 这几档 */
+.app,
+.world-page {
+  --px-ink: #3d2f1a;
+  --px-ink-soft: #7d6a48;
+  --px-panel: #fffaee;
+  --px-panel-2: #f6e8c8;
+  --px-line: #6b4f2a;
+  --px-line-soft: #b09a70;
+  --px-accent: #e8843c;
+  --px-yellow: #ffcf5c;
+  --px-shadow: #0000002e;
+  font-family: "Zpix", "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: none;
+  font-smooth: never;
+}
+
+/* ---------------------------------------------------------------- 顶栏 */
+.app .topbar {
+  background: var(--px-panel);
+  border-bottom: 3px solid var(--px-line);
+  color: var(--px-ink);
+  /* 收窄：只留一格内边距，把高度让给地图 */
+  padding: 5px 12px;
+  gap: 10px;
+  min-height: 0;
+}
+.app .brand h1 {
+  color: #3d2f1a;      /* 12.4:1 */
+  font-size: 14px;
+}
+.app .brand {
+  gap: 6px;
+}
+.app .tabs {
+  gap: 4px;
+}
+.app .tab {
+  border: 2px solid transparent;
+  border-radius: 2px;
+  color: #5a4630;      /* 8.6:1，比原来的 #7d6a48 明显加深 */
+  background: transparent;
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.app .tab:hover {
+  color: #3d2f1a;
+  background: #fff2cd;
+}
+.app .tab.active {
+  background: var(--px-yellow);
+  border-color: var(--px-line);
+  color: #3f3113;
+  box-shadow: 2px 2px 0 var(--px-shadow);
+}
+.app .muted {
+  color: #6b5638 !important;
+}
+.app .brand,
+.app .topbar .clock {
+  color: #5a4630;
+  font-size: 12px;
+}
+/* 顶栏里的圆形/胶囊按钮也跟着缩 */
+.app .topbar .btn {
+  padding: 2px 9px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* 顶栏右侧那几个框（用户名·退出 / ← 标题 / ♪ 音效）：原来深底浅字，现在统一米底深字 */
+.app .topbar .btn,
+.app .topbar .btn.ghost {
+  background: var(--px-panel-2) !important;
+  border: 2px solid var(--px-line-soft) !important;
+  border-radius: 2px !important;
+  color: #4a3820 !important;
+  box-shadow: 2px 2px 0 var(--px-shadow);
+}
+.app .topbar .btn:hover:not(:disabled),
+.app .topbar .btn.ghost:hover:not(:disabled) {
+  background: #fff2cd !important;
+  border-color: var(--px-accent) !important;
+  color: #3d2f1a !important;
+}
+/* 音效关闭态：淡一些但仍然可读 */
+.app .topbar .sfx-toggle.off {
+  color: #7a6444 !important;
+  background: #f0e6cf !important;
+}
+
+/* ---------------------------------------------------------------- 输入区 */
+.composer {
+  background: var(--px-panel);
+  border-top: 3px solid var(--px-line);
+}
+.composer input,
+.composer textarea {
+  background: #fffdf6 !important;
+  border: 2px solid var(--px-line-soft) !important;
+  border-radius: 2px !important;
+  color: var(--px-ink) !important;
+  box-shadow: 0 2px 0 #00000010 inset;
+}
+.composer input::placeholder,
+.composer textarea::placeholder {
+  color: #b7a582;
+}
+.composer input:focus,
+.composer textarea:focus {
+  outline: none;
+  border-color: var(--px-accent) !important;
+  box-shadow: 0 0 0 2px #e8843c33;
+}
+.composer button {
+  background: var(--px-yellow);
+  color: #3f3113;
+  border: 2px solid var(--px-line);
+  border-radius: 2px;
+  box-shadow: 3px 3px 0 var(--px-shadow);
+  font-weight: 700;
+}
+.composer button:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--px-shadow);
+}
+
+
+/* ---------------------------------------------------------------- HUD 卡片 */
+.hud-place,
+.hud-clock,
+.hud-stat {
+  background: var(--px-panel) !important;
+  border: 2px solid var(--px-line) !important;
+  border-radius: 2px !important;
+  box-shadow: 3px 3px 0 var(--px-shadow);
+  backdrop-filter: none !important;
+  color: #3d2f1a;
+}
+.hud-place strong {
+  color: #3d2f1a;      /* 12.4:1 */
+}
+.hud-place span {
+  color: #5a4630;      /* 8.6:1，原来 #7d6a48 只有 5.0 */
+}
+.hud-clock b {
+  color: #3d2f1a;
+}
+/* 时段名原来用的是亮色（中午 #fff3c0），在米白底上几乎看不见，
+   改成深色版，色条仍按时段区分 */
+.hud-clock[data-phase="morning"]   { --pc-deep:#a06a00; }
+.hud-clock[data-phase="noon"]      { --pc-deep:#8a6a00; }
+.hud-clock[data-phase="afternoon"] { --pc-deep:#a85412; }
+.hud-clock[data-phase="evening"]   { --pc-deep:#8f3a12; }
+.hud-clock[data-phase="night"]     { --pc-deep:#2f4f8f; }
+.hud-clock span {
+  color: var(--pc-deep, #5a4630) !important;
+  font-weight: 600;
+}
+.hud-clock i {
+  color: var(--pc-deep, #5a4630) !important;
+}
+.hud-stat i {
+  color: #5a4630 !important;   /* 原来 #7d6a48 太淡 */
+}
+.hud-stat b {
+  color: #3d2f1a !important;
+}
+
+/* ---------------------------------------------------------------- 走动提示 */
+.campus-controls {
+  background: var(--px-panel) !important;
+  border: 2px solid var(--px-line) !important;
+  border-radius: 2px !important;
+  box-shadow: 3px 3px 0 var(--px-shadow);
+}
+.campus-key {
+  background: var(--px-panel-2) !important;
+  border: 2px solid var(--px-line-soft) !important;
+  border-radius: 2px !important;
+  color: var(--px-ink) !important;
+  box-shadow: 0 2px 0 #00000022;
+}
+.campus-hint {
+  color: var(--px-ink-soft) !important;
+}
+
+/* ---------------------------------------------------------------- 对话区 */
+/* 和顶栏、输入区同一张米白纸：上边一道深棕分隔线，和地图分成上下两块 */
+.world-page .log {
+  background: var(--px-panel);
+  border-top: 3px solid var(--px-line);
+  color: var(--px-ink);
+}
+.world-page .log .line {
+  color: var(--px-ink);
+}
+.world-page .log .line.player {
+  color: #b4611f;
+  font-weight: 600;
+}
+.world-page .log .line.system {
+  color: var(--px-ink-soft);
+}
+.world-page .log .line.npc {
+  color: var(--px-ink);
+}
+/* 对话里的名字/说话人标签 */
+.world-page .log strong,
+.world-page .log b {
+  color: #46351c;
+}
+.world-page .log .muted,
+.world-page .log .panel-note {
+  color: var(--px-ink-soft) !important;
+}
+/* 对话区的滚动条也换成木色 */
+.world-page .log::-webkit-scrollbar-thumb {
+  background: var(--px-line-soft);
+  border-radius: 0;
+}
+.world-page .log::-webkit-scrollbar-track {
+  background: var(--px-panel-2);
+}
+
+/* ---------------------------------------------------------------- 对话停靠面板 */
+/* 这一整块（自由行动栏 + 对话 + 建议 + 输入）是同一张米白纸 */
+.dialog-dock {
+  background: var(--px-panel) !important;
+  border-top: 3px solid var(--px-line) !important;
+  backdrop-filter: none !important;
+  color: var(--px-ink);
+}
+.dialog-dock .dock-bar {
+  background: var(--px-panel);
+  border-bottom: 2px solid var(--px-line-soft);
+  color: var(--px-ink);
+}
+.dialog-dock .dock-bar strong {
+  color: #9a4a12;
+}
+.dialog-dock .dock-bar .muted {
+  color: var(--px-ink-soft) !important;
+}
+.dialog-dock .dock-face {
+  border: 2px solid var(--px-line-soft);
+  border-radius: 2px;
+  background: var(--px-panel-2);
+}
+.dialog-dock .dock-bar .btn.ghost {
+  background: var(--px-panel-2);
+  border: 2px solid var(--px-line-soft);
+  border-radius: 2px;
+  color: var(--px-ink);
+}
+.dialog-dock .dock-bar .btn.ghost:hover:not(:disabled) {
+  background: #fff2cd;
+  border-color: var(--px-accent);
+}
+/* 跳过打字：奶白底方块 + 两个三角 */
+.dialog-dock .dock-bar .dock-fold {
+  background: #fff8e7 !important;          /* 奶白 */
+  border: 2px solid var(--px-line-soft) !important;
+  box-shadow: 2px 2px 0 var(--px-shadow) !important;
+  border-radius: 2px !important;
+  padding: 3px 8px !important;
+  color: #6b5638 !important;
+  line-height: 0;
+}
+.dialog-dock .dock-bar .dock-fold svg {
+  display: block;
+}
+.dialog-dock .dock-bar .dock-fold:hover:not(:disabled) {
+  background: #fff2cd !important;
+  border-color: var(--px-accent) !important;
+  color: #3d2f1a !important;
+}
+.dialog-dock .dock-bar .dock-fold:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--px-shadow) !important;
+}
+/* 这个面板里的 .log/.composer 已在别处统一，这里只补容器自身 */
+.dialog-dock .log {
+  background: var(--px-panel);
+}
+.dialog-dock.talking .composer input {
+  border-color: var(--px-accent) !important;
+}
+
+/* 全屏地图浮层（点小地图/「地图」展开的那层）：同样换米白 */
+.map-overlay {
+  background: #f2e2bd !important;
+  backdrop-filter: none !important;
+  color: var(--px-ink);
+}
+.map-overlay-bar {
+  background: var(--px-panel);
+  border-bottom: 3px solid var(--px-line) !important;
+  color: var(--px-ink);
+}
+.map-overlay-bar strong {
+  color: #46351c;
+}
+.map-overlay .muted,
+.map-overlay .panel-note {
+  color: var(--px-ink-soft) !important;
+}
+.map-overlay .btn {
+  background: var(--px-panel-2);
+  border: 2px solid var(--px-line);
+  border-radius: 2px;
+  color: var(--px-ink);
+  box-shadow: 2px 2px 0 var(--px-shadow);
+}
+.map-overlay .btn.primary {
+  background: var(--px-yellow);
+  color: #3f3113;
+}
+
+/* ---------------------------------------------------------------- 快捷建议 */
+/* 和对话区、输入区连成同一张米白纸，不再露出深色底 */
+.world-page .suggestions {
+  background: var(--px-panel);
+  padding: 10px 18px 4px;
+  color: var(--px-ink);
+}
+.world-page .suggestions .muted {
+  color: var(--px-ink-soft) !important;
+}
+.world-page .suggest-chip {
+  background: #fffdf6 !important;
+  border: 2px solid var(--px-line-soft) !important;
+  border-radius: 2px !important;
+  color: var(--px-ink) !important;
+  box-shadow: 2px 2px 0 var(--px-shadow);
+  font: inherit;
+  font-size: 13px;
+  transition: none;
+}
+.world-page .suggest-chip:hover:not(:disabled) {
+  background: #fff2cd !important;
+  border-color: var(--px-accent) !important;
+}
+.world-page .suggest-chip:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--px-shadow);
+}
+.world-page .suggest-chip:disabled {
+  opacity: 0.55;
+}
+
+/* ---------------------------------------------------------------- 旁栏 */
+/* 地图上的浮层：气泡、提示、出口、小地图，统一成米白卡片 */
+.world-page .sprite-name,
+.world-page .sprite-prompt,
+.world-page .world2d-tip,
+.world-page .exit-door {
+  background: var(--px-panel) !important;
+  border: 2px solid var(--px-line) !important;
+  border-radius: 2px !important;
+  color: var(--px-ink) !important;
+  box-shadow: 2px 2px 0 var(--px-shadow);
+  backdrop-filter: none !important;
+}
+.world-page .sprite-prompt {
+  background: var(--px-yellow) !important;
+  color: #3f3113 !important;
+}
+.world-page .exit-door:hover:not(:disabled) {
+  background: #fff2cd !important;
+  border-color: var(--px-accent) !important;
+}
+.world-page .exit-icon {
+  color: var(--px-ink) !important;
+  border: 2px solid var(--px-line-soft) !important;
+  border-radius: 2px !important;
+  background: var(--px-panel-2);
+}
+
+/* 小地图 */
+.world-page .mini-map {
+  background: var(--px-panel) !important;
+  border: 2px solid var(--px-line) !important;
+  border-radius: 2px !important;
+  box-shadow: 3px 3px 0 var(--px-shadow);
+}
+/* 「地图」二字的小标签：原来压在深色条上，现在换成米白匾 */
+.world-page .mini-map-hint {
+  background: var(--px-panel) !important;
+  border: 2px solid var(--px-line) !important;
+  border-radius: 2px !important;
+  color: var(--px-ink) !important;
+  padding: 0 6px;
+  letter-spacing: 0.04em;
+}
+/* 压在这张图上的深色渐隐也去掉，否则整块还是发暗 */
+.world-page .mini-map-veil {
+  background: linear-gradient(180deg, transparent 55%, #6b4f2a33 100%) !important;
+}
+
+/* 说话类型下拉：贴在输入框左边缘，和输入框同高同框 */
+.composer .v2-mode-select {
+  flex: 0 0 auto;
+  min-width: 96px;
+  background: var(--px-panel-2) !important;
+  border: 2px solid var(--px-line) !important;
+  border-radius: 2px !important;
+  color: var(--px-ink) !important;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--px-shadow);
+}
+.composer .v2-mode-select:focus {
+  outline: none;
+  border-color: var(--px-accent) !important;
+}
+.composer .v2-mode-select:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 伴随动作输入（需要时显示在输入框上方一行） */
+.v2-composer-opts {
+  padding: 8px 18px 0 !important;
+}
+.v2-action {
+  width: 100%;
+  background: #fffdf6 !important;
+  border: 2px solid var(--px-line-soft) !important;
+  border-radius: 2px !important;
+  color: var(--px-ink) !important;
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 13px;
+}
+.v2-action::placeholder {
+  color: #b7a582;
+}
+
+.side {
+  background: var(--px-panel);
+  border-right: 3px solid var(--px-line);
+  color: var(--px-ink);
+}
+.side .muted {
+  color: var(--px-ink-soft) !important;
+}
+
+/* 按钮统一硬边 */
+.world-page .btn,
+.side .btn {
+  border: 2px solid var(--px-line);
+  border-radius: 2px;
+  background: var(--px-panel-2);
+  color: var(--px-ink);
+  box-shadow: 2px 2px 0 var(--px-shadow);
+}
+.world-page .btn.primary,
+.side .btn.primary {
+  background: var(--px-yellow);
+  color: #3f3113;
+}

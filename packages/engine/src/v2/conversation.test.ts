@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ApplyOptions, ConversationEvent, Entity, Envelope, Proposal, RoomId, Utterance } from "../../../shared/src/index.ts";
 import { MockLlm } from "../../../llm/src/mock.ts";
@@ -22,7 +23,7 @@ class SpyArbiter extends DefaultArbiter {
   }
 }
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
 const POLICY = `${ROOT}content/v2/conversation-policy.json`;
 const ROOM = "room_chat";

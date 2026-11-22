@@ -1,0 +1,280 @@
+/* ============================================================================
+   像素风 UI 皮肤（登录 / 标题 / 角色选择）
+   ---------------------------------------------------------------------------
+   设计约束：
+   1. 只作用于 .auth-screen 和 .title-screen 两个容器，游戏内界面完全不受影响，
+      保证「明亮的像素菜单」和「暗色的校园画面」之间有明确区分度。
+   2. 星露谷那套语言：米黄底、深棕硬边、无模糊的硬投影、按下时整体位移。
+   3. 不用圆角（最多 2px），不用渐变做质感，靠色块和描边分层。
+   ========================================================================== */
+
+/* ---------------------------------------------------------------- 通用令牌 */
+.auth-screen,
+.title-screen {
+  color-scheme: light;
+  --px-ink: #3d2f1a;
+  --px-ink-soft: #7d6a48;
+  --px-panel: #fffaee;
+  --px-panel-2: #f6e8c8;
+  --px-line: #6b4f2a;
+  --px-line-soft: #b09a70;
+  --px-accent: #e8843c;
+  --px-green: #4f9c47;
+  --px-yellow: #ffcf5c;
+  --px-shadow: #0000002e;
+}
+
+/* 背景：米黄底 + 32px 方格纹，像一块草地/木板 */
+.auth-screen,
+.title-screen {
+  background-color: #f2e2bd;
+  background-image:
+    linear-gradient(#00000009 1px, transparent 1px),
+    linear-gradient(90deg, #00000009 1px, transparent 1px),
+    radial-gradient(900px 520px at 50% -8%, #fff6dc 0%, transparent 70%);
+  background-size: 32px 32px, 32px 32px, 100% 100%;
+  color: var(--px-ink);
+}
+
+/* 装饰性的光斑在浅色底上会糊，直接隐掉 */
+.auth-screen .auth-mark,
+.title-screen .title-grid {
+  display: none;
+}
+
+/* ---------------------------------------------------------------- 卡片外壳 */
+.auth-card,
+.title-card {
+  background: var(--px-panel);
+  border: 3px solid var(--px-line);
+  border-radius: 2px;
+  box-shadow:
+    0 0 0 3px #ffffffcc inset,
+    6px 6px 0 var(--px-shadow);
+  color: var(--px-ink);
+}
+
+/* 标题 */
+.auth-title,
+.title-name {
+  color: #46351c;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-shadow: 2px 2px 0 #ffffffcc;
+}
+.auth-title span,
+.title-name span {
+  color: var(--px-accent);
+  text-shadow: 2px 2px 0 #ffffffcc;
+}
+
+.auth-sub,
+.title-mark,
+.auth-note,
+.scenario-note {
+  color: var(--px-ink-soft) !important;
+}
+.title-mark {
+  letter-spacing: 0.18em;
+}
+/* 只收窄到这两个容器，别动游戏内的 .muted */
+.auth-screen .muted,
+.title-screen .muted,
+.auth-screen .panel-note,
+.title-screen .panel-note {
+  color: var(--px-ink-soft) !important;
+}
+
+/* ---------------------------------------------------------------- 表单控件 */
+.auth-screen .field > span {
+  color: var(--px-ink-soft) !important;
+}
+.auth-screen .field input,
+.auth-screen .slot-create input,
+.auth-screen .slot-create select {
+  background: #fffdf6;
+  border: 2px solid var(--px-line-soft);
+  border-radius: 2px;
+  color: var(--px-ink);
+  box-shadow: 0 2px 0 #00000010 inset;
+}
+.auth-screen .field input::placeholder {
+  color: #b7a582;
+}
+.auth-screen .field input:focus,
+.auth-screen .slot-create input:focus,
+.auth-screen .slot-create select:focus {
+  outline: none;
+  border-color: var(--px-accent);
+  box-shadow: 0 0 0 2px #e8843c33;
+}
+
+/* 标签页：做成两个方块按钮 */
+.auth-tabs {
+  background: var(--px-panel-2);
+  border: 2px solid var(--px-line);
+  border-radius: 2px;
+  gap: 4px;
+}
+.auth-tab {
+  border-radius: 2px;
+  color: var(--px-ink-soft);
+  font-weight: 600;
+}
+.auth-tab:hover {
+  color: var(--px-ink);
+}
+.auth-tab.active {
+  background: var(--px-yellow);
+  color: #4a3820;
+  box-shadow: 0 0 0 2px #6b4f2a inset;
+}
+
+/* 按钮：硬边 + 按下位移，不做圆角模糊 */
+.auth-screen .btn,
+.title-screen .btn {
+  border: 2px solid var(--px-line);
+  border-radius: 2px;
+  background: var(--px-panel);
+  color: var(--px-ink);
+  font-weight: 600;
+  box-shadow: 3px 3px 0 var(--px-shadow);
+  transition: none;
+}
+.auth-screen .btn.primary,
+.title-screen .btn.primary {
+  background: var(--px-yellow);
+  border-color: var(--px-line);
+  color: #40320f;
+}
+.auth-screen .btn.ghost,
+.title-screen .btn.ghost {
+  background: var(--px-panel-2);
+  color: var(--px-ink-soft);
+}
+.auth-screen .btn:hover:not(:disabled),
+.title-screen .btn:hover:not(:disabled) {
+  border-color: var(--px-accent);
+  background: #ffeec2;
+}
+.auth-screen .btn:active:not(:disabled),
+.title-screen .btn:active:not(:disabled) {
+  transform: translate(3px, 3px);
+  box-shadow: 0 0 0 var(--px-shadow);
+}
+.auth-screen .btn:disabled,
+.title-screen .btn:disabled {
+  opacity: 0.55;
+}
+
+/* 错误条：做成红底告示 */
+.auth-err {
+  background: #ffe0d6;
+  border: 2px solid #c0552f;
+  border-radius: 2px;
+  color: #8c2f12 !important;
+  box-shadow: 3px 3px 0 var(--px-shadow);
+}
+
+/* ---------------------------------------------------------------- 主菜单 */
+.title-btn {
+  background: var(--px-panel);
+  border: 2px solid var(--px-line-soft);
+  border-radius: 2px;
+  box-shadow: 3px 3px 0 var(--px-shadow);
+  color: var(--px-ink);
+  transition: none;
+}
+.title-btn:hover:not(:disabled) {
+  background: #fff2cd;
+  border-color: var(--px-accent);
+  transform: translateX(2px);
+}
+.title-btn.primary {
+  background: var(--px-yellow);
+  border-color: var(--px-line);
+}
+.title-btn.primary .t {
+  color: #3d2f1a;
+}
+.title-btn .k,
+.title-btn .h {
+  color: var(--px-ink-soft);
+}
+.title-btn.primary .k,
+.title-btn.primary .h {
+  color: #7a5f28;
+}
+.title-btn:active:not(:disabled) {
+  transform: translate(3px, 2px);
+  box-shadow: 0 0 0 var(--px-shadow);
+}
+
+/* 面板容器 */
+.title-screen .title-panel,
+.title-screen .choose-view {
+  background: var(--px-panel);
+  border: 2px solid var(--px-line-soft);
+  border-radius: 2px;
+  box-shadow: 3px 3px 0 var(--px-shadow);
+}
+
+/* ---------------------------------------------------------------- 角色卡 */
+.scenario-card {
+  background: var(--px-panel);
+  border: 2px solid var(--px-line-soft);
+  border-radius: 2px;
+  box-shadow: 3px 3px 0 var(--px-shadow);
+  color: var(--px-ink);
+  transition: none;
+}
+.scenario-card:hover:not(:disabled) {
+  background: #fff2cd;
+  border-color: var(--px-accent);
+  transform: translateY(-2px);
+}
+.scenario-card strong {
+  color: #46351c;
+}
+.scenario-card .muted {
+  color: var(--px-ink-soft) !important;
+}
+.scenario-tagline {
+  color: #6b5a3c !important;
+}
+/* 立绘框：256px 角色卡，按 1:2 显示保证像素点对齐 */
+.title-screen .scenario-face {
+  background: linear-gradient(180deg, #fff6da 0%, #f3e3bd 100%);
+  border: 2px solid var(--px-line-soft);
+  border-radius: 2px;
+  height: 168px;
+  display: grid;
+  place-items: center;
+}
+.title-screen .scenario-face img {
+  width: 128px !important;    /* 256 卡按 1/2 显示，像素网格正好对齐 */
+  height: 128px !important;
+  object-fit: contain !important;
+  object-position: center !important;
+  image-rendering: pixelated;
+  transform: none;
+  transition: none;
+}
+.title-screen .scenario-card:hover .scenario-face img {
+  transform: translateY(-2px);
+}
+
+/* 存档行 */
+.title-screen .save-row {
+  background: var(--px-panel);
+  border: 2px solid var(--px-line-soft);
+  border-radius: 2px;
+}
+.title-screen .save-room {
+  color: var(--px-ink-soft) !important;
+}
+
+/* 右上角账号 */
+.title-screen .title-auth {
+  color: var(--px-ink-soft);
+}

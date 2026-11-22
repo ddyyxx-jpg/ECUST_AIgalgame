@@ -5,6 +5,28 @@
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）。
 
 
+## 未发布 — 像素风 UI / 室内二级地图 / NPC 寻路与作息（PR #148，分支 `feat/campus-2d`）
+
+> 以表现层为主：不改契约、不新增 op 原语；`CONTRACT_VERSION` / `PROMPT_VERSION` / `apiVersion` 均不变。
+> 例外是信息馆一处**数据语义变更**（见下），已在 PR 描述中单独标注。
+
+### 新增
+- **像素风 UI**：`pixel-ui.css` / `pixel-game.css`，HUD 与对话区改为像素风；配套 `zpix.ttf`（授权见 `apps/web/public/fonts/ZPIX-NOTICE.txt`）。
+- **室内二级地图**：`InteriorMap.tsx` + `interior.ts`，图书馆/宿舍/食堂/实验楼等室内场景；进入只切渲染，不改世界状态里的 `locId`。
+- **NPC 寻路与作息**：`pathfind.ts`（A*，600×450 网格、10 世界单位/格）+ 场景内 NPC 按作息换位置。
+- **新校园底图**：`/map/campus-wide.jpg`（6000×4500）替换原 `/map/ecust-campus.jpg`。
+
+### 变更（数据 / 服务端语义，非纯美术）
+- **`loc_info_hall`（信息馆）：`status: planned → built`**。`apps/server/src/map.ts` 对 `status !== "built"` 的点位返回 `E_FORBIDDEN`，改为 `built` 后该点位**可 travel、可进入室内**。
+  同一批已把该点位的 `desc` / `tags` 从「图纸上的工地」改写为「已建成」，避免走进一个描述为工地的场所。
+
+### 修复
+- **Windows 测试路径**：7 个 v2 测试文件把 `new URL(...).pathname` 换成 `fileURLToPath(...)`，修掉 Windows 下 `/D:/…` 被拼成 `D:\D:\…` 的 ENOENT。每文件 2+/1−，断言语义零变化。
+
+### 已知限制
+- **前端不自动推进时间**：权威时间只由服务端推进（MapPanel「推进时段」或后续服务端定时），避免多 tab 叠加推进、以及挂机时白烧剧情成本（PR #148 审阅 P1-c）。
+- `zpix.ttf` 个人免费、商用需授权；商用前须取得授权或替换为可商用像素字体。
+
 ## 未发布 — 开放 issue 收口批（整体 PR，分支 `fix/all-open-issues`；CONTRACT 3.7.0 → 3.8.0）
 
 > 把四个开放 PR（#124 引擎 / #125 后端 / #126 前端 / #127 UI）按分类合入本分支，并把各 issue 的遗留缺口补齐到「真实链路可用」。覆盖 #76 #90 #94 #95 #96 #97 #98 #99 #100 #104 #105 #106 #122 #128 #130 #138 #139 #140 #146；#84（真实部署冒烟）需目标机实测，保持开放。`apiVersion` / `SCHEMA_VERSION` 不变；`PROMPT_VERSION` 不变。
