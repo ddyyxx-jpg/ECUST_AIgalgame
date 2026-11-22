@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Proposal } from "../../../packages/shared/src/contract/types.ts";
-import { projectProposalsForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
+import type { Envelope } from "../../../packages/shared/src/contract/types.ts";
+import { projectEventsForPlayer, projectProposalsForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
 
 describe("projectProposalsForPlayer", () => {
   it("整条丢掉引擎内部属性写入，保留普通属性与公开记忆", () => {
@@ -41,5 +42,29 @@ describe("projectTurnEventForPlayer", () => {
     const out = projectTurnEventForPlayer(ev);
     expect(JSON.stringify(out)).not.toContain("sim_lease");
     expect(out.ops).toEqual([]);
+  });
+});
+
+describe("projectEventsForPlayer", () => {
+  it("/events 的 turn.patch envelope 同样剥掉 state/ops 里的 sim_lease", () => {
+    const event = {
+      roomId: "r1",
+      seq: 3,
+      ts: "2026-11-22T00:00:00.000Z",
+      type: "turn.patch",
+      payload: {
+        state: {
+          entities: { npc_1: { id: "npc_1", kind: "npc", attrs: { sim_lease: "LEAK" } } },
+          plots: [],
+        },
+        ops: [
+          { op: "attr.set", args: { entityId: "npc_1", key: "sim_lease", value: "LEAK" }, reason: "x", by: "tick" },
+        ],
+      },
+    } as unknown as Envelope;
+    const out = projectEventsForPlayer([event]);
+    expect(out).toHaveLength(1);
+    expect(JSON.stringify(out)).not.toContain("sim_lease");
+    expect((out[0]?.payload as { ops?: unknown }).ops).toEqual([]);
   });
 });
