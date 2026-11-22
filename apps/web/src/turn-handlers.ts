@@ -49,7 +49,7 @@ export function makeTurnHandlers(d: TurnHandlerDeps): TurnStreamHandlers {
         d.expireSession();
         return;
       }
-      d.setErr(explainTurnError(code, message));
+      d.setErr(explainTurnError(code, message, retryable));
       d.setErrRetryable(isRetryableTurnError(code, retryable));
     },
     onUnconfirmed: (id) => {

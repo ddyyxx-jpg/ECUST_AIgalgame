@@ -38,6 +38,8 @@ import {
   loadGossipPolicy,
   loadConversationPolicy,
   loadModes,
+  loadSnapshot,
+  sessionSnapshotPath,
 } from "../../../packages/engine/src/v2/index.ts";
 import { DEFAULT_CONVERSATION_POLICY } from "../../../packages/shared/src/index.ts";
 import type { ServerConfig } from "./config.ts";
@@ -55,12 +57,15 @@ import { TurnLedger } from "./quota.ts";
 import { JobLedger } from "./job-ledger.ts";
 import { BackgroundCycle, type BackgroundTelemetry } from "./background-cycle.ts";
 import { AdminLog } from "./admin-log.ts";
-import { loadSceneDescs, offlineNarrative } from "./offline-narrator.ts";
+import { loadSceneDescs, offlineNarrative, resolveSceneDesc, sceneByName } from "./offline-narrator.ts";
 import { LlmSwitch } from "./llm-switch.ts";
 import { LlmSettings, loadPersistedLlmSettings } from "./settings.ts";
 import { appearanceById, loadScenarios } from "./scenarios.ts";
 import { createDebugGate } from "./debug.ts";
 import type { AppDeps } from "./routes.ts";
+import { isStoreFault } from "./store-fault.ts";
+import { prepareDurableDirectory } from "../../../packages/engine/src/store-write.ts";
+import { scanRoomJobs } from "./room-jobs.ts";
 
 interface CanonWorld {
   worldId: string;
@@ -122,6 +127,18 @@ export type App = AppDeps & {
   adminLog: AdminLog;
 };
 
+async function loadRoomForIndex(store: FileStore, roomId: string): Promise<boolean> {
+  try {
+    await store.load(roomId);
+    return true;
+  } catch (error) {
+    if (!isStoreFault(error)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[store] 房间 ${roomId} 暂不可读：${message}`);
+    return false;
+  }
+}
+
 /** 启动对账结果：只反映 job 投影，不写世界状态 */
 export interface JobReconcileSummary {
   /** 扫描到的真实房间数（来自 FileStore.listRooms()） */
@@ -132,34 +149,55 @@ export interface JobReconcileSummary {
   failed: number;
   /** prepared 条数：留 backlog，启动时**不自动重放**（重放需要人工/后续 backlog 决策） */
   runnable: number;
+  /** 读取/对账失败而跳过的房间数：坏档只影响本房，其余房间照常对账（PR #147 P2-3） */
+  skipped: number;
 }
+
+const RECONCILE_ROOM_WARN = "[background] reconcile 跳过房间";
 
 /**
  * 启动对账（PR-2）：进程重启后仍 inflight 的任务没人认领，按失败处理；
- * prepared 只计数留在 backlog，本轮不自动重放。单房读坏只影响该房（list 内部跳过坏行）。
+ * prepared 只计数留在 backlog，本轮不自动重放。
+ * 逐房 try/catch 隔离：单房坏档只影响该房，其余房间照常对账（PR #147 P2-3）。
  */
 export async function reconcileBackgroundJobs(
   jobLedger: JobLedger,
   store: { listRooms(): Promise<string[]> },
 ): Promise<JobReconcileSummary> {
-  const summary: JobReconcileSummary = { rooms: 0, orphaned: 0, failed: 0, runnable: 0 };
+  const summary: JobReconcileSummary = { rooms: 0, orphaned: 0, failed: 0, runnable: 0, skipped: 0 };
   for (const roomId of await store.listRooms()) {
     summary.rooms += 1;
-    const { runnable, orphaned } = await jobLedger.reconcile(roomId);
-    summary.orphaned += orphaned.length;
-    summary.runnable += runnable.length;
-    for (const job of orphaned) {
-      const next = await jobLedger.transition(roomId, job.id, {
-        status: "failed",
-        lastError: "进程重启时仍在 inflight，按失败处理",
-      });
-      if (next?.status === "failed") summary.failed += 1;
-    }
-    if (runnable.length > 0) {
-      console.info(`[background] ${roomId} 有 ${runnable.length} 个可重放任务（本轮不自动重放，留 backlog）`);
+    try {
+      await reconcileOneRoom(jobLedger, roomId, summary);
+    } catch (e) {
+      summary.skipped += 1;
+      console.warn(
+        `${RECONCILE_ROOM_WARN} ${roomId}：${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
   return summary;
+}
+
+/** 单个房间的对账；抛出的异常由 reconcileBackgroundJobs 逐房捕获，绝不外泄到整轮 */
+async function reconcileOneRoom(
+  jobLedger: JobLedger,
+  roomId: string,
+  summary: JobReconcileSummary,
+): Promise<void> {
+  const { runnable, orphaned } = await jobLedger.reconcile(roomId);
+  summary.orphaned += orphaned.length;
+  summary.runnable += runnable.length;
+  for (const job of orphaned) {
+    const next = await jobLedger.transition(roomId, job.id, {
+      status: "failed",
+      lastError: "进程重启时仍在 inflight，按失败处理",
+    });
+    if (next?.status === "failed") summary.failed += 1;
+  }
+  if (runnable.length > 0) {
+    console.info(`[background] ${roomId} 有 ${runnable.length} 个可重放任务（本轮不自动重放，留 backlog）`);
+  }
 }
 
 export async function createApp(cfg: ServerConfig): Promise<App> {
@@ -199,6 +237,9 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
 
   // 离线叙述用到的场景描述（内容数据，缺文件也不影响启动）
   const sceneDescs = await loadSceneDescs(path.join(contentDir, "modules", "map", "data", "world_map.json"));
+  // canon 名 → locId：地图点位与 canon 的**名字**并不一致（图书馆 vs 图文信息中心），
+  // 但 id 是对齐的；名字回退时先经 canon 解析成 id，避免 5 个地点全 miss（#134）。
+  const canonLocIdByName = new Map(canon.locs.map((loc) => [loc.name, loc.id]));
 
   // 模型端口用开关包一层：Turn/Map/Dialogue 都持有同一个 LlmSwitch，
   // 玩家在界面里提交 key 后，设置服务替换内部实现即可生效，不用重启。
@@ -292,7 +333,8 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   // 续玩（issue #7）：历史和存档索引都是"投影"，写失败不影响已提交的回合。
   // 历史挂在 Turn 外层（而不是 HTTP 路由里），这样 map.travel 这类内部回合也能被记录。
   const dataRoot = path.resolve(cfg.dataDir);
-  const history = new TurnHistory(path.join(dataRoot, "history"));
+  await prepareDurableDirectory(dataRoot);
+  const history = new TurnHistory(path.join(dataRoot, "history"), cfg.historyLimitMax ?? 200);
   const saves = new SaveIndex(path.join(dataRoot, "users"));
   const users = new AuthStore(path.join(dataRoot, "auth", "auth.json"));
   await users.load();
@@ -378,7 +420,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     defaultStallMs: cfg.backgroundStallMs,
   });
   // 启动对账：进程重启后仍 inflight 的没人认领，按失败处理；prepared 只计数留 backlog，不自动重放。
-  let jobReconcile: JobReconcileSummary = { rooms: 0, orphaned: 0, failed: 0, runnable: 0 };
+  let jobReconcile: JobReconcileSummary = { rooms: 0, orphaned: 0, failed: 0, runnable: 0, skipped: 0 };
   try {
     jobReconcile = await reconcileBackgroundJobs(jobLedger, store);
   } catch (e) {
@@ -390,41 +432,29 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   const scanMinutes = canonizeCfg?.scanMinutes ?? 0;
   if (canonizeCfg?.enabled !== false && scanMinutes > 0) {
     const timer = setInterval(() => {
-      void (async () => {
-        try {
-          for (const roomId of await store.listRooms()) {
-            if (roomId === worldRoom) continue;
-            await store.load(roomId);
-            // store.seq() 是 FileStore 的进程内快捷方式（上面刚 load 过）；换远程/异步存储时
-            // 应改用 await store.load(roomId) 的返回值，别依赖 seq() 的本地缓存。
-            await background.run(roomId, { kind: "canonize", basedOnSeq: store.seq(roomId) }, async ({ signal }) => {
-              if (signal.aborted) return;
-              await canonize.retireRoom(roomId);
-              return { retired: true };
-            });
-          }
-        } catch (e) {
-          console.warn("[canonize] 定时补扫失败：", e instanceof Error ? e.message : e);
-        }
-      })();
+      // 逐房隔离（#99/#123 坏档边界）：一个坏档只跳过它自己，不拖垮整轮补扫。
+      void scanRoomJobs(store, worldRoom, "canonize", async (roomId) => {
+        // store.seq() 是 FileStore 的进程内快捷方式（scanRoomJobs 已先 load）；换远程/异步存储时
+        // 应改用 await store.load(roomId) 的返回值，别依赖 seq() 的本地缓存。
+        await background.run(roomId, { kind: "canonize", basedOnSeq: store.seq(roomId) }, async ({ signal }) => {
+          // #140：把看门狗/关停的 signal 传进任务体，协作式检查点避免无意义地跑完整个补扫
+          if (signal.aborted) return;
+          const report = await canonize.retireRoom(roomId, { signal });
+          return { retired: !report.aborted, aborted: report.aborted === true };
+        });
+      });
     }, Math.max(1, scanMinutes) * 60_000);
     timer.unref?.();
   }
 
-  // ---------------------------------------------------------------- 启动重建记忆索引
-  // 事件日志是唯一真源，Memory 只是投影：不重建的话，重启后所有召回为 0（审阅 P0-1/P0-3）。
-  // 房间与世界层都要重建；世界层必须单独 rebuild，因为 Turn 只 sync 自己那个房间。
-  for (const roomId of await store.listRooms()) {
-    memory.rebuild(roomId, await store.events(roomId, 0));
-  }
-  await store.load(worldRoom);
-  memory.rebuild(worldRoom, await store.events(worldRoom, 0));
-
-
-  // ---------------------------------------------------------------- dev/v2 微信私信宿主
+  // 世界层和普通房间分别回放，避免单个坏档阻断其他房间启动。
   const messageIndex = new MessageIndex();
-  for (const roomId of await store.listRooms()) {
-    messageIndex.rebuild(roomId, await store.events(roomId, 0));
+  const roomIds = new Set([...(await store.listRooms()), worldRoom]);
+  for (const roomId of roomIds) {
+    if (!(await loadRoomForIndex(store, roomId))) continue;
+    const events = await store.events(roomId, 0);
+    memory.rebuild(roomId, events);
+    messageIndex.rebuild(roomId, events);
   }
   const contentRoot = path.resolve(cfg.contentDir);
   const gossipPolicy = await loadGossipPolicy(path.join(contentRoot, "v2", "gossip-policy.json"));
@@ -436,13 +466,14 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     policy: gossipPolicy, conversation: conversationPolicy, now,
     audit, auditPolicy, memory,
   });
-  // ---------------------------------------------------------------- dev/v2 群聊会话宿主（issue #89）
+  // ---------------------------------------------------------------- dev/v2 群聊会话宿主（issue #89/#90）
   // 场景文案来自 content/ 的地图数据 + 最近台词，不为氛围再开一次 LLM 调用；
-  // 真正的说话/心理由 NpcAgent 各自调 LLM。会话与幂等缓存都在 host 进程内（重启即新会话，见 docs/03 §5.2.11）。
+  // 真正的说话/心理由 NpcAgent 各自调 LLM。#90：会话从 data/rooms/<roomId>/conversation-sessions.json
+  // 恢复（独立文件、不进 EventLog）；坏档/缺档降级为新会话（旧会话 closed），不拖垮启动。
   const conversationModes = await loadModes(path.join(contentRoot, "v2", "utterance-modes.json"));
   const conversationScene: SceneAgentPort = {
-    async describe({ locName }) {
-      return locName ? (sceneDescs.get(locName) ?? "") : "";
+    async describe({ locId, locName }) {
+      return resolveSceneDesc(sceneDescs, canonLocIdByName, { locId, locName });
     },
     async summarize({ recent }) {
       return recent.slice(-3).join(" / ");
@@ -462,26 +493,55 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     now,
   });
 
+  // #90：启动时逐房间恢复会话快照；每个房间单独恢复，某房坏档只影响该房（fail-soft）。
+  for (const roomId of await store.listRooms()) {
+    try {
+      const loaded = await loadSnapshot(sessionSnapshotPath(dataRoot, roomId));
+      if (!loaded.ok) {
+        // 缺档对新房间是正常情况；其他损坏原因必须可见，不能静默降级（#123 P1-5）
+        if (loaded.reason !== "missing") {
+          console.warn(`[conversation] 房间 ${roomId} 会话快照不可用（${loaded.reason}），已降级为新会话`);
+        }
+        continue;
+      }
+      const restored = conversation.restoreSessions(loaded.snapshot, roomId);
+      if (restored.degraded) {
+        console.warn(`[conversation] 房间 ${roomId} 会话快照恢复降级（${restored.reason ?? "未知原因"}），已按空会话启动`);
+      }
+    } catch (e) {
+      // 快照是投影，坏档不该拖垮启动；缺失/坏档/版本不符都走「新会话 + 旧 closed」降级
+      console.warn(`[conversation] 恢复房间 ${roomId} 会话快照失败，已降级：`, e instanceof Error ? e.message : e);
+    }
+  }
+
   // 后台波次：玩家离线也能互相回消息。unref + try/catch，失败等下一轮（仿 canonize 补扫）
   const gossipScanMs = Number(process.env.GALGAME_GOSSIP_SCAN_MS ?? 30_000);
   if (gossipScanMs > 0) {
     const timer = setInterval(() => {
-      void (async () => {
-        try {
-          for (const roomId of await store.listRooms()) {
-            if (roomId === worldRoom) continue;
-            await store.load(roomId); // 同理，seq() 依赖这里先 load
-            await background.run(roomId, { kind: "gossip", basedOnSeq: store.seq(roomId) }, async ({ signal }) => {
-              if (signal.aborted) return;
-              await gossip.step(roomId);
-              return { stepped: true };
-            });
-          }
-        } catch (e) {
-          console.warn("[gossip] 定时波次失败：", e instanceof Error ? e.message : e);
-        }
-      })();
+      // 同上：坏档房间被单独跳过，健康房间照常推进波次。
+      void scanRoomJobs(store, worldRoom, "gossip", async (roomId) => {
+        await background.run(roomId, { kind: "gossip", basedOnSeq: store.seq(roomId) }, async ({ signal }) => {
+          // #140：把 signal 传进波次体；abort 后已落库的 gossip 消息不回滚
+          if (signal.aborted) return;
+          const events = await gossip.step(roomId, { signal });
+          return { stepped: !events.some((e) => e.type === "gossip.dropped" && e.reason === "aborted") };
+        });
+      });
     }, gossipScanMs);
+    timer.unref?.();
+  }
+
+  // #136：插话超时恢复（listening → speaking）。没这个 tick，玩家点了插话又不说话，
+  // 会话会一直卡在 listening；原来的 resumeExpired() 没有任何调用方。
+  const conversationTickMs = Number(process.env.GALGAME_CONVERSATION_TICK_MS ?? 5_000);
+  if (conversationTickMs > 0) {
+    const timer = setInterval(() => {
+      try {
+        conversation.resumeExpired(now());
+      } catch (e) {
+        console.warn("[conversation] 插话超时恢复失败：", e instanceof Error ? e.message : e);
+      }
+    }, conversationTickMs);
     timer.unref?.();
   }
 
@@ -493,6 +553,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     dialogue,
     llm,
     registry,
+    memory,
     contentDir,
     dataDir: path.resolve(cfg.dataDir),
     adminToken: cfg.adminToken,
@@ -510,6 +571,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     impressions,
     worldRoom,
     adminToken: cfg.adminToken,
+    historyLimitMax: cfg.historyLimitMax ?? 200,
     history,
     saves,
     auth,
@@ -525,6 +587,9 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
       get watchdogFires() {
         return background.telemetry.watchdogFires;
       },
+      get takeovers() {
+        return background.telemetry.takeovers;
+      },
     },
     adminLog,
     gossip: {
@@ -532,8 +597,8 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
       inbox: (roomId, to) => messageIndex.inbox(roomId, to),
       subscribe: (roomId, viewer, cb) => gossip.subscribe(roomId, viewer, cb),
     },
-    /** dev/v2 群聊回合宿主（HTTP 接线见 routes.ts；缺省 = 不注册端点） */
-    conversation: { host: conversation, modes: conversationModes },
+    /** dev/v2 群聊回合宿主（HTTP 接线见 routes.ts；#90 快照保存需要 dataDir 定位房间文件） */
+    conversation: { host: conversation, modes: conversationModes, dataDir: dataRoot },
     turn,
     map,
     settings,

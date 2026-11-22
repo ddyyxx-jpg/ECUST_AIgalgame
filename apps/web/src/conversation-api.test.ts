@@ -10,6 +10,7 @@ import {
   isConversationAvailable,
   runConversationTurn,
   runConversationUtterance,
+  runConversationAuto,
   validateUtteranceDraft,
 } from "./conversation-api.ts";
 import type { ConversationStreamHandlers } from "./conversation-api.ts";
@@ -211,5 +212,62 @@ describe("runConversationUtterance（规范端点 POST body 形状）", () => {
       utterance: { mode: "whisper", target: "npc_lin", content: "你叫什么", action: "凑近压低声音" },
     });
     expect((body.utterance as Record<string, unknown>).speaker).toBeUndefined();
+  });
+});
+
+describe("runConversationAuto（#136 自主轮 POST body）", () => {
+  it("POST /conversation，body 只有 actorId/clientTurnId/auto，不伪造 utterance", async () => {
+    let url = "";
+    let body: Record<string, unknown> = {};
+    const fetchMock = vi.fn(async (u: string, init: RequestInit) => {
+      url = u;
+      body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return sseResponse([
+        'event: conversation.committed\ndata: {"type":"conversation.committed","sessionId":"s","turn":2,"proposals":[],"state":{}}\n\n',
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await runConversationAuto("r1", "plr", "ct-auto", {});
+    expect(url).toBe("/api/v1/rooms/r1/conversation");
+    expect(body).toEqual({ actorId: "plr", clientTurnId: "ct-auto", auto: true });
+  });
+
+  it("P2-6：autoLimit reason 的 notice 视为已结算；不再按英文文案兜底", async () => {
+    const unconfirmed = vi.fn();
+    const events: string[] = [];
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(sseResponse([
+        'event: conversation.notice\ndata: {"type":"conversation.notice","text":"自主推进已达上限","reason":"autoLimit"}\n\n',
+      ]))
+      .mockResolvedValueOnce(sseResponse([
+        'event: conversation.notice\ndata: {"type":"conversation.notice","text":"auto rounds exhausted; waiting for player"}\n\n',
+      ]));
+    vi.stubGlobal("fetch", fetchMock);
+    await runConversationAuto("r1", "plr", "ct-auto-limit-cn", {
+      onEvent: (ev) => events.push(ev.type),
+      onUnconfirmed: unconfirmed,
+    });
+    expect(events).toEqual(["conversation.notice"]);
+    expect(unconfirmed).not.toHaveBeenCalled();
+    // 老英文文案但无 reason：服务端新路径不会再这样结算，按未确认处理，绝不放过 blocked 语义
+    await runConversationAuto("r1", "plr", "ct-auto-limit-en", { onUnconfirmed: unconfirmed });
+    expect(unconfirmed).toHaveBeenCalledTimes(1);
+  });
+
+  it("P2-6：审核 blocked notice 仍触发 onUnconfirmed；普通回合的 notice 也不吞", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        sseResponse(['event: conversation.notice\ndata: {"type":"conversation.notice","text":"内容未通过审核，请修改后重试"}\n\n']),
+      )
+      .mockResolvedValueOnce(
+        sseResponse(['event: conversation.notice\ndata: {"type":"conversation.notice","text":"普通提示，没有 autoLimit reason"}\n\n']),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const blocked = vi.fn();
+    await runConversationAuto("r1", "plr", "ct-blocked", { onUnconfirmed: blocked });
+    expect(blocked).toHaveBeenCalledTimes(1);
+    const ordinary = vi.fn();
+    await runConversationTurn("r1", "plr", "你好", "ct-ordinary", { onUnconfirmed: ordinary });
+    expect(ordinary).toHaveBeenCalledTimes(1);
   });
 });

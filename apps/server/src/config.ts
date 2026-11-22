@@ -44,6 +44,8 @@ export interface ServerConfig {
   publicOrigin?: string;
   /** 一次性重置凭证有效期（分钟），默认 15 */
   resetTtlMin?: number;
+  /** 单次历史/事件响应的最大行数（GALGAME_HISTORY_LIMIT_MAX，默认 200；更早的历史靠游标翻页） */
+  historyLimitMax?: number;
   /**
    * 调试面板口令（GALGAME_DEBUG_PASSPHRASE）。未配置 = 调试端点整体不注册。
    * 只从环境变量读，绝不写进代码/仓库；用于首页快捷键解锁只读调试视图。
@@ -56,6 +58,16 @@ export interface ServerConfig {
 function env(k: string, d: string): string {
   const v = process.env[k];
   return v && v.trim() ? v.trim() : d;
+}
+
+/**
+ * GALGAME_HISTORY_LIMIT_MAX：0 = 显式回退默认 200（老配置里写 0 表示不限制，
+ * 但这里不允许无限响应，按默认处理）；负数/NaN/Infinity 同样回退；小数向下取整，最小 1。
+ */
+function historyLimitMax(raw: string): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 200;
+  return Math.max(1, Math.floor(n));
 }
 
 /** 经验熵（bit）：把令牌当独立字符样本，挡住 "admin123" / 重复字符这类可猜口令 */
@@ -117,6 +129,7 @@ export function loadConfig(): ServerConfig {
     trustProxy: env("GALGAME_TRUST_PROXY", "0") === "1",
     publicOrigin: env("GALGAME_PUBLIC_ORIGIN", "") || undefined,
     resetTtlMin: Math.max(1, Number(env("GALGAME_RESET_TTL_MIN", "15")) || 15),
+    historyLimitMax: historyLimitMax(env("GALGAME_HISTORY_LIMIT_MAX", "200")),
     debugPassphrase: env("GALGAME_DEBUG_PASSPHRASE", "") || undefined,
     backgroundStallMs: Math.max(1000, Number(env("GALGAME_BG_STALL_MS", "120000")) || 120000),
     audit: {

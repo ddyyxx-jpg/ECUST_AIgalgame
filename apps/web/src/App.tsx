@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WorldState, ViewPatch } from "../../../packages/shared/src/contract/types.ts";
-import { LEGACY_ACTOR_ID, createSoloRoom, deleteSave, fetchHistory, fetchState, fetchTurnStatus, runTurn, travel } from "./api.ts";
+import { LEGACY_ACTOR_ID, createSoloRoom, createSlot, deleteSave, deleteSlot, fetchHistory, fetchState, fetchTurnStatus, runTurn, travel, updateSlot } from "./api.ts";
+import type { SaveSlot } from "./api.ts";
 import type { HistoryPage } from "./api.ts";
 import { GameError, HttpError, httpFailMessage, isUnauthorized, onUnauthorized } from "./http.ts";
 import { useAuth } from "./use-auth.ts";
@@ -19,20 +20,28 @@ import MapOverlay from "./MapOverlay.tsx";
 import TitleScreen from "./TitleScreen.tsx";
 import { fetchScenarios } from "./scenarios.ts";
 import type { Scenario } from "./scenarios.ts";
-import { turnSuggestions } from "./suggestions.ts";
+import { candidatePosition, positionFromState, turnSuggestions } from "./suggestions.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
-import { shouldDropRetryOnMove } from "./turn-error.ts";
+import { retrySubmission, shouldDropRetryOnMove } from "./turn-error.ts";
 import { createSessionResync, type SessionResync } from "./session-wiring.ts";
 import { loadRoomThenReset } from "./room-enter.ts";
+import { isTimeoutError } from "./timeout-error.ts";
+import { ROOM_LOAD_DEADLINE_MS, combineSignals, createDeadline, throwIfTimedOut } from "./timeout.ts";
 import { holdResumedBusy } from "./resumed-busy.ts";
-import { keepRoomLocalState, restoreRoomLocalState, type RoomLocalState } from "./room-local-state.ts";
+import {
+  keepRoomLocalState,
+  playedTurnsOf,
+  restoreRoomLocalState,
+  shouldReplayOpening,
+  type RoomLocalState,
+} from "./room-local-state.ts";
 import { fetchRoomEvents } from "./events-replay.ts";
 import { npcLocIdFromLinks, targetStillInScene } from "./npc-presence.ts";
 import { phaseLabel } from "./ui.ts";
 import type { Line, LineKind } from "./ui.ts";
 import type { ConversationEvent } from "../../../packages/shared/src/contract/v2.ts";
-import { convModeAfterProbe, detectConversation, fetchUtteranceModes, runConversationTurn, runConversationUtterance } from "./conversation-api.ts";
+import { convModeAfterProbe, detectConversation, fetchUtteranceModes, runConversationAuto, runConversationTurn, runConversationUtterance } from "./conversation-api.ts";
 import type { UtteranceDraft, UtteranceModeInfo } from "./conversation-api.ts";
 import { DEFAULT_LISTEN_TIMEOUT_MS, initialConversationView, isListeningExpired, linesFromView, pendingLinesFor, reduceConversationView } from "./conversation-view.ts";
 import type { ConversationView } from "./conversation-view.ts";
@@ -96,6 +105,9 @@ export default function App() {
   const convModeRef = useRef<"v1" | "v2">("v1");
   convModeRef.current = convMode;
   const [convLines, setConvLines] = useState<Line[]>([]);
+  /** reset 前的最新会话行：异步 capture 读 ref，避免闭包拿到过期 state */
+  const convLinesRef = useRef<Line[]>([]);
+  convLinesRef.current = convLines;
   /** v2 说话类型清单（GET /conversation/modes）；空数组 = 老流程或取清单失败 */
   const [v2Modes, setV2Modes] = useState<UtteranceModeInfo[]>([]);
   const convView = useRef<ConversationView>(initialConversationView());
@@ -125,7 +137,7 @@ export default function App() {
    */
   const [eventsNotice, setEventsNotice] = useState<string>("");
   /** 最近一次玩家行动：重试时原样再发，不重复打印玩家行 */
-  const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null; utterance?: UtteranceDraft } | null>(null);
+  const lastTurn = useRef<{ text: string; target: { id: string; name: string } | null; utterance?: UtteranceDraft; auto?: boolean } | null>(null);
   /** 断流前已收到的叙事/facts：核对到 committed 后只补历史里的差集，避免重复刷屏 */
   const pendingTurn = useRef<{ clientTurnId: string; narrative: string; facts: string[] } | null>(null);
   /** 全屏地图层：点对话页左上角的小地图打开 */
@@ -338,9 +350,15 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
    * 「reset 必须在两次 fetch 之后」由 room-enter.ts 的 loadRoomThenReset 保证并被测试钉死。
    */
   const enterRoom = useCallback(
-    async (id: string, opts: { resumed?: boolean; scenarioId?: string; actorId?: string } = {}) => {
+    async (id: string, opts: { resumed?: boolean; scenarioId?: string; actorId?: string; signal?: AbortSignal } = {}) => {
       const token = scopeRef.current.renew();
       const current = () => scopeRef.current.isCurrent(token.version);
+      // P2-5（PR #147）：state + history 共用一个 8s 整体 deadline；
+      // 任何一次 fetch 半开都不会把 resumed 的 busy 永久挂住。deadline 超时也中止底层 fetch。
+      // signal 合并 scope（切房/登出）与外部（前台恢复/注销）作废；旧请求 settle 时 isCurrent
+      // 防止清掉新房间 busy。
+      const deadline = createDeadline(ROOM_LOAD_DEADLINE_MS, combineSignals(token.signal, opts.signal));
+      const loading = () => !deadline.signal.aborted;
       // resumed 期间禁止新回合（PR #126 复审 P2）：前台恢复会先拉数据后 reset，若这段窗口
       // 里允许玩家发回合，新回合可能被返回的旧快照/历史覆盖，或 resetRoomUi 把 busy 清零。
       // 接线的前置条件保证进入时 busy=false；占位与归还交给 holdResumedBusy——两次重进房
@@ -350,9 +368,14 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
         // 续玩时读历史失败则留在标题页/旧画面，保留存档与当前状态供玩家重试。
         const fetchHistoryOrFallback = async (): Promise<HistoryPage> => {
           try {
-            return await fetchHistory(id);
+            return await fetchHistory(id, {}, deadline.signal);
           } catch (e) {
             if (!current()) return { history: [], lastCommittedSeq: 0, hasEarlier: false };
+            if (deadline.signal.aborted) {
+              // fetch 对 abort 的实现可能抛 DOMException；统一换成 TimeoutError 供 UI 分类
+              throwIfTimedOut(deadline.signal);
+              throw e;
+            }
             if (isUnauthorized(e)) throw e;
             if (opts.resumed) throw new Error("对话历史暂不可用，请稍后重试", { cause: e });
             return { history: [], lastCommittedSeq: 0, hasEarlier: false };
@@ -365,9 +388,10 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
           resolvedActorId: string;
           local: RoomLocalState;
         }>({
-          fetchState: () => fetchState(id),
+          fetchState: () => fetchState(id, deadline.signal),
           fetchHistory: fetchHistoryOrFallback,
           isCurrent: current,
+          isLoading: loading,
           // capture 在 reset 之前执行：数据已齐、请求仍有效，才解析 actor/剧本并读取要跨
           // 重进房保留的本地状态（草稿/convMode）。reset 之后这些旧 state 就没了。
           capture: (snapshot, page) => {
@@ -396,6 +420,7 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
               currentRoomId: roomIdRef.current,
               currentDraft: inputRef.current,
               currentConvMode: convModeRef.current,
+              currentConvLines: convModeRef.current === "v2" ? convLinesRef.current : null,
             });
             return { snapshot, page, sc, resolvedActorId, local };
           },
@@ -404,12 +429,17 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
             const local = restoreRoomLocalState(entry.local);
             if (local.input !== null) setInput(local.input);
             if (local.convMode !== null) setConvMode(local.convMode);
+            // P2-1：同一房间 resumed 时恢复 v2 会话行；换房/新开局走 resetRoomUi 的清空值。
+            // 历史里没有 v2 回合，恢复这些行才能避免重放开场、playedTurns 归零。
+            if (local.convLines !== null) setConvLines(local.convLines);
             const restored = restoreConversation(entry.page.history, entry.sc, opts.resumed === true, () => ++lineId);
-            if (restored.lines.length > 0) {
-              setLines(restored.lines);
-            } else {
-              // 开场 = 对话流的第一屏：身份 → 正文。没有预设剧本时只留一行提示，不编造内容。
-              setLines([]);
+            setLines(restored.lines);
+            // 开场 = 对话流的第一屏：身份 → 正文。v2 房间没有 v1 history，但本地保留了
+            // 会话行（entry.local.convLines），那不是新开局，不能再放一遍（PR #149 复审 P2-1）。
+            if (shouldReplayOpening({
+              restoredLineCount: restored.lines.length,
+              keptConvLines: entry.local.convLines?.length ?? 0,
+            })) {
               getTw().enqueue(restored.opening);
             }
             setEarlier({ before: entry.page.earlierCursor ?? earlierCursor(entry.page.history), hasEarlier: entry.page.hasEarlier, loading: false });
@@ -421,7 +451,12 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
             setScreen("game");
           },
         });
-        if (!loaded) return;
+        if (!loaded) {
+          throwIfTimedOut(deadline.signal);
+          return;
+        }
+        // 进房数据拉取超过 deadline：给可重试提示，旧画面/草稿保留，不在超时后 reset。
+        if (deadline.signal.aborted) throwIfTimedOut(deadline.signal);
         // 成功进房 = 已同步（复审 P2）：否则 lastSyncAt 停在 0，刚进房就切后台 6s 回来
         // 会被判成「很久没同步」而立即全量重拉。
         resyncRef.current?.markSynced();
@@ -445,6 +480,8 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
             // 纯函数决策不抛；这里只兜意外，绝不让一次回放失败影响进房
           });
       } finally {
+        // clear 只清定时器；切房/登出作废由 scope 处理，不会让旧请求清掉新房间的 busy。
+        deadline.clear();
         busyHold.release();
       }
     },
@@ -475,10 +512,17 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
       screen: () => resyncLive.current.screen,
       roomId: () => resyncLive.current.roomId,
       busy: () => resyncLive.current.busy,
-      enterRoom: (id) => resyncLive.current.enterRoom(id, { resumed: true }),
+      enterRoom: (id, signal) =>
+        resyncLive.current.enterRoom(id, { resumed: true, signal }),
       // 失败也计一次同步（接线在发起前已刷新同步时刻）；提示复用 eventsNotice 降级提示位。
       // enterRoom 先拉数据后 reset，失败时旧画面、草稿与可重试状态原样保留。
-      onNotice: (e) => setEventsNotice(resyncLive.current.fail(e)),
+      // P2-5：超时单独给可重试提示，别混成含糊的「网络异常」。
+      onNotice: (e) =>
+        setEventsNotice(
+          isTimeoutError(e)
+            ? `同步超时（${ROOM_LOAD_DEADLINE_MS / 1000}秒），可稍后重新回到本页重试`
+            : resyncLive.current.fail(e),
+        ),
     });
     // 实例放 ref：enterRoom 成功后要 markSynced；直接进 effect 依赖会形成循环重建。
     resyncRef.current = resync;
@@ -521,6 +565,9 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
         }
         setSavedRoomId("");
         setErr(`上次的房间已不可用（${fail(e)}），请新建一局`);
+      } else if (isTimeoutError(e)) {
+        // P2-5：整体 deadline 超时是可重试的弱网故障，给出明确提示（旧画面/存档不动）。
+        setErr(`装载超时（${ROOM_LOAD_DEADLINE_MS / 1000}秒），请检查网络后重试`);
       } else {
         setErr(`连接失败（${fail(e)}）；已保留上次记录，可稍后重试`);
       }
@@ -557,6 +604,49 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
         if (!ok) setErr("移除失败（索引未更新），请稍后重试");
       } catch (e) {
         setErr(`移除失败：${fail(e)}`);
+      }
+      await refreshSaves();
+    },
+    [refreshSaves, fail],
+  );
+
+  /** issue #98：命名槽最小交互——建/改名/删只动索引映射，房间与历史不动 */
+  const createNamedSlot = useCallback(
+    async (label: string, roomId: string) => {
+      try {
+        await createSlot(label, roomId);
+        setErr("");
+      } catch (e) {
+        setErr(`新建槽失败：${fail(e)}`);
+      }
+      await refreshSaves();
+    },
+    [refreshSaves, fail],
+  );
+
+  const renameNamedSlot = useCallback(
+    async (slot: SaveSlot) => {
+      const label = window.prompt("新的槽名（1–40 字）", slot.label);
+      if (!label || !label.trim() || label === slot.label) return;
+      try {
+        await updateSlot(slot.slotId, { label });
+        setErr("");
+      } catch (e) {
+        setErr(`改名失败：${fail(e)}`);
+      }
+      await refreshSaves();
+    },
+    [refreshSaves, fail],
+  );
+
+  const removeNamedSlot = useCallback(
+    async (slot: SaveSlot) => {
+      if (!window.confirm(`删除槽「${slot.label}」？房间与对话历史不会删除。`)) return;
+      try {
+        await deleteSlot(slot.slotId);
+        setErr("");
+      } catch (e) {
+        setErr(`删除槽失败：${fail(e)}`);
       }
       await refreshSaves();
     },
@@ -624,16 +714,16 @@ const token = scopeRef.current.current();
    * 与 v1 完全并行：convMode 不是 v2 时根本不会走到这里。
    */
   const dispatchConversationTurn = useCallback(
-    async (raw: string, targetNpc: { id: string; name: string } | null, echo: boolean, reuseId?: string, utterance?: UtteranceDraft) => {
+    async (raw: string, targetNpc: { id: string; name: string } | null, echo: boolean, reuseId?: string, utterance?: UtteranceDraft, auto = false) => {
       const base = raw.trim();
       // contentless 类型（如 signal）正文可空，只靠 action 表达；其余类型必须非空
-      if ((!base && !utterance) || busy || !roomId || !actorId) return;
+      if ((!base && !utterance && !auto) || busy || !roomId || !actorId) return;
       const token = scopeRef.current.current();
       const current = () => scopeRef.current.isCurrent(token.version);
       // 没有完整 utterance 时退回 #85 别名端点：它只收自然语言 input，目标靠 targetNpcId 传，
       // 所以这里保留「对<展示名>说：」的兜底拼法（服务端会先换回真名再喂模型）。
       const text = targetNpc ? `对${targetNpc.name}说：${base}` : base;
-      lastTurn.current = { text: base, target: targetNpc, ...(utterance ? { utterance } : {}) };
+      lastTurn.current = { text: base, target: targetNpc, ...(utterance ? { utterance } : {}), ...(auto ? { auto: true } : {}) };
       // 乐观行：玩家自己的 utterance 要等引擎投回（SSE 非流式），先本地显示浅色的。
       // 新一轮只在「本次派发之后追加的行」里查重（同一句两轮都发仍要显示）；
       // 重试复用同一 clientTurnId，扫全部已渲染行——真行已在就不挂，避免短暂重复。
@@ -703,7 +793,10 @@ const token = scopeRef.current.current();
         },
       };
       try {
-        if (utterance) {
+        if (auto) {
+          // #136：玩家不说话，让在场 NPC 自己聊一轮（受服务端 maxAutoRounds 限制）
+          await runConversationAuto(roomId, actorId, clientTurnId, handlers, token.signal);
+        } else if (utterance) {
           // demo：完整 utterance（mode/target/content/action）走规范端点
           await runConversationUtterance(roomId, actorId, utterance, clientTurnId, handlers, token.signal);
         } else {
@@ -739,6 +832,12 @@ const token = scopeRef.current.current();
     },
     [actorId, armListenTimer, busy, disarmListenTimer, expireSession, refreshSaves, refreshState, renderConv, roomId, v2Modes],
   );
+
+  /** #136：让在场 NPC 自己聊一轮（玩家不说话）；服务端按 maxAutoRounds 限流 */
+  const autoRound = useCallback(() => {
+    if (convMode !== "v2" || busy) return;
+    void dispatchConversationTurn("", null, false, undefined, undefined, true);
+  }, [busy, convMode, dispatchConversationTurn]);
 
   /** v2 demo：从 ChatPanel 的选择器提交一条完整 utterance（@谁 + 方式 + 说话/行动） */
   const sendV2Utterance = useCallback(
@@ -920,11 +1019,14 @@ await runTurn(
 
   /** 重试上一回合：失败（尤其 E_LLM_FORMAT）时对话区出现按钮，不自动重试 */
   const retry = useCallback(() => {
-    const last = lastTurn.current;
-    if (!last) return;
+    const submission = retrySubmission(lastTurn.current);
+    if (!submission) return;
+    const last = lastTurn.current!;
     if (convMode === "v2") {
-      // v2 按 clientTurnId 去重；未确认回合复用同一 ID，服务端已提交就直接回放结果
-      void dispatchConversationTurn(last.text, last.target, false, unconfirmed?.clientTurnId, last.utterance);
+      // P2-7：blocked auto 回合没有玩家输入，重试必须沿用提交的 auto 标记，
+      // 否则空文本会被 dispatch 守卫吃掉；空输入/并发守卫仍在 dispatch 内统一生效。
+      // v2 按 clientTurnId 去重；未确认回合复用同一 ID，服务端已提交就直接回放结果。
+      void dispatchConversationTurn(submission.text, last.target, false, unconfirmed?.clientTurnId, last.utterance, submission.auto);
       return;
     }
     // NPC 可能在回合之间换场景；重发前用当前状态再核一次在场，
@@ -1024,6 +1126,9 @@ await runTurn(
           savesState={savesState}
           onOpenSave={(save) => void openSave(save)}
           onDeleteSave={(save) => void removeSave(save)}
+          onCreateSlot={(label, roomId) => void createNamedSlot(label, roomId)}
+          onRenameSlot={(slot) => void renameNamedSlot(slot)}
+          onDeleteSlot={(slot) => void removeNamedSlot(slot)}
           savedRoomId={savedRoomId}
           busy={entering}
           err={err}
@@ -1060,10 +1165,23 @@ await runTurn(
   const typing = getTw().activeLine;
   /** 开场白打完了吗？建议按钮要等逐字动画收尾后再出现 */
   const sceneSettled = !getTw().typing;
-  /** 已经进行到第几回合（玩家开口次数） */
-  const playedTurns = lines.filter((l) => l.kind === "player").length;
-  /** 下一步能干什么：开局给剧本建议，之后按当前场景推导（出口 + 在场的人） */
-  const nextActions = playedTurns === 0 ? (scenario?.suggestions ?? []) : turnSuggestions(pos, playedTurns, actorId);
+  /**
+   * 已进行到第几回合：以**真实提交的玩家行为**为准。
+   * v1 用 lines（history-lines 还原的 committed 玩家行）；v2 玩家行在 convLines，
+   * 由 conversation.utterance 事件投回后写入，typing 中的 draft 与 pendingLines 都不算。
+   * 只用 committed 视图避免乐观行被回退后仍然把 round 推进（PR #147 P2-7）。
+   */
+  const visibleLines = convMode === "v2" ? [...lines, ...convLines] : lines;
+  // v2 的玩家行只在 convLines 里（由 conversation.utterance 投回后渲染）；前台恢复时
+  // convView 会被 reset，但 convLines 被保留——所以数 convLines，恢复后 playedTurns 不归零。
+  const playedTurns = playedTurnsOf(convMode, lines, convLines);
+  /**
+   * 下一步能干什么：开局给剧本建议，之后按当前场景推导（出口 + 在场的人）。
+   * v2 的 view.position 几乎为空，改用会话状态里的在场 NPC 投影（不编造出口）；
+   * v1 仍用服务端下发的 position，行为不变。
+   */
+  const candidatePos = convMode === "v2" && playedTurns > 0 ? candidatePosition(pos, state, actorId) : pos;
+  const nextActions = playedTurns === 0 ? (scenario?.suggestions ?? []) : turnSuggestions(candidatePos, playedTurns, actorId);
 
   return (
     <div className="app screen-in">
@@ -1132,7 +1250,7 @@ await runTurn(
             state={state}
             panels={panels}
             pos={pos}
-            lines={convMode === "v2" ? [...lines, ...convLines] : lines}
+            lines={visibleLines}
             typing={typing}
             busy={busy}
             // 已知两个全屏遮罩（地图 MapOverlay / 局内调试面板 DebugPanel）不会卸载 ChatPanel：
@@ -1160,6 +1278,7 @@ await runTurn(
             onLoadEarlier={() => void loadEarlier()}
             v2Modes={convMode === "v2" ? v2Modes : undefined}
             onSendUtterance={convMode === "v2" ? sendV2Utterance : undefined}
+            onAutoRound={convMode === "v2" ? autoRound : undefined}
             pendingLines={pendingLines}
           />
         )}

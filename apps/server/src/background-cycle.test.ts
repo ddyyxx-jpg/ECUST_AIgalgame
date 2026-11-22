@@ -141,21 +141,19 @@ describe("BackgroundCycle", () => {
     expect(cycle.isBusy("room_a")).toBe(false);
   });
 
-  it("看门狗：超时只结束本次结果；锁跟任务体 settle，同房再 run 返回 busy", async () => {
+  it("看门狗：超时 abort 并强制接管；同房间新 run 立即拿到锁，旧任务体不干扰", async () => {
     const dir = tempDir("bg-cycle-");
     const ledger = new JobLedger(dir);
-    const cycle = new BackgroundCycle({ ledger, defaultStallMs: 25 });
-    const taskGate = deferred();
+    const cycle = new BackgroundCycle({ ledger, defaultStallMs: 25, idFactory: idSequence() });
+    const oldGate = deferred();
     let seen: AbortSignal | undefined;
-    let jobId = "";
     const first = cycle.run(
       "room_a",
       { kind: "canonize", basedOnSeq: 1, stallMs: 25 },
-      async ({ signal, jobId: id }) => {
+      async ({ signal }) => {
         seen = signal;
-        jobId = id;
-        // 任务体签名不接 signal：abort 之后它照常继续跑（真实的 retireRoom/step 就是这样）
-        await taskGate.promise;
+        // 任务体不响应 abort（永久挂起）：旧实现会让房间永久 busy
+        await oldGate.promise;
         return { late: true };
       },
     );
@@ -163,24 +161,48 @@ describe("BackgroundCycle", () => {
     const out = await first;
     expect(out).toMatchObject({ ok: false, reason: "stalled" });
     expect(seen?.aborted).toBe(true);
-    expect((await ledger.list("room_a")).find((r) => r.id === jobId)).toMatchObject({ status: "failed" });
-
-    // 回归 PR #125 P1-1：stall 后任务体还在跑，锁不许放
-    expect(cycle.isBusy("room_a")).toBe(true);
-    expect(await cycle.run("room_a", { kind: "gossip", basedOnSeq: 2 }, async () => ({ x: 1 })))
-      .toEqual({ ok: false, reason: "busy" });
-
-    // 旧任务体真正 resolve 后才放锁、waitForIdle 才为 true，下一拍才能进
-    taskGate.resolve();
-    expect(await cycle.waitForIdle("room_a", 1000)).toBe(true);
+    expect(cycle.telemetry.takeovers).toBe(1);
     expect(cycle.isBusy("room_a")).toBe(false);
-    const next = await cycle.run("room_a", { kind: "gossip", basedOnSeq: 2 }, async () => ({ x: 1 }));
-    expect(next).toMatchObject({ ok: true });
+    // 旧任务体还没 settle，但锁已交给下一世代
+    const second = cycle.run("room_a", { kind: "gossip", basedOnSeq: 2 }, async () => ({ x: 2 }));
+    const out2 = await second;
+    expect(out2).toMatchObject({ ok: true });
 
-    // 迟到的任务体不得把 failed 覆盖成 done
+    // 旧任务体迟到 settle：不清掉新锁（其实新 run 已完成），不把旧 job 的 done 写进账本
+    oldGate.resolve();
+    await waitUntil(() => false, 20).catch(() => {}); // 给旧任务体的迟到收尾一点时间
     const recs = await ledger.list("room_a");
-    expect(recs.find((r) => r.id === jobId)).toMatchObject({ status: "failed" });
-    expect(recs).toHaveLength(2);
+    expect(recs.find((r) => r.id === "job_1")).toMatchObject({ status: "failed" });
+    expect(recs.find((r) => r.id === "job_2")).toMatchObject({ status: "done" });
+    expect(cycle.isBusy("room_a")).toBe(false);
+    expect(await cycle.waitForIdle("room_a", 10)).toBe(true);
+  });
+
+  it("强制接管：新 run 在途时旧任务体 settle 不得清锁/覆盖新状态，waitForIdle 等新世代", async () => {
+    const cycle = new BackgroundCycle({ defaultStallMs: 20, idFactory: idSequence() });
+    const oldGate = deferred();
+    const newGate = deferred();
+    const first = cycle.run("room_b", { kind: "canonize", basedOnSeq: 1, stallMs: 20 }, async () => {
+      await oldGate.promise;
+      return { stale: true };
+    });
+    expect(await first).toMatchObject({ ok: false, reason: "stalled" });
+
+    let newSeen = false;
+    const second = cycle.run("room_b", { kind: "gossip", basedOnSeq: 2, stallMs: 5000 }, async () => {
+      newSeen = true;
+      await newGate.promise;
+      return { fresh: true };
+    });
+    expect(newSeen).toBe(true);
+    // 等待者挂在新世代上：旧任务体 settle 不该让它提前返回
+    const waiter = cycle.waitForIdle("room_b", 30);
+    oldGate.resolve();
+    expect(await waiter).toBe(false); // 新 run 未结束 → 超时 false（旧世代 settle 没误唤醒）
+    expect(cycle.isBusy("room_b")).toBe(true);
+    newGate.resolve();
+    expect(await second).toMatchObject({ ok: true });
+    expect(await cycle.waitForIdle("room_b", 10)).toBe(true);
   });
 
   // PR #125 复审 P3（background-cycle.ts:111）：旧闸门先置 written 再 await，慢 I/O 下

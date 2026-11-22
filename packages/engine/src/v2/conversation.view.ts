@@ -12,9 +12,10 @@ import type {
 /** 心理/私密记忆标签：即便 memory.write 写了 public 也不能把这些 tag 下发 */
 const SECRET_MEMORY_TAGS = new Set(["mental", "secret"]);
 /** Plot 里属于 GM 的字段，玩家视角一律抹掉 */
-const SECRET_PLOT_KEYS = ["forbidReveal", "leakPoints", "guard", "leverage", "risk"] as const;
+const SECRET_PLOT_KEYS = ["forbidReveal", "leakPoints", "guard", "leverage", "risk", "goal"] as const;
 
-function stripPlotSecrets(plot: Plot): Plot {
+/** GM 字段剥离；导出以便 dev/v1/HTTP 出口复用同一份字段清单（PR #147 审阅 P0） */
+export function stripPlotSecrets(plot: Plot): Plot {
   const clean: Plot = { ...plot };
   for (const key of SECRET_PLOT_KEYS) delete clean[key];
   return clean;
@@ -85,7 +86,11 @@ export function projectConversationEvents(
       case "conversation.mental":
         break;
       case "conversation.utterance":
-        if (allowed && ev.delivery.to === viewer) out.push(ev);
+        if (allowed && ev.delivery.to === viewer) {
+          // 只有被指名的那一方能看到 target；旁听者拿到 target 等于泄露"谁在跟谁说悄悄话"
+          const { target, ...rest } = ev.delivery;
+          out.push({ ...ev, delivery: viewer === target ? ev.delivery : rest });
+        }
         break;
       case "conversation.committed":
         out.push({

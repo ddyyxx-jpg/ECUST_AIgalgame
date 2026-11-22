@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { loadRoomThenReset } from "./room-enter.ts";
 import { keepRoomLocalState, restoreRoomLocalState } from "./room-local-state.ts";
+import type { Line } from "./ui.ts";
 
 /** 记录「谁先被调用」的顺序数组：reset 出现在 fetch 之前即失败 */
 interface Calls {
@@ -125,8 +126,29 @@ describe("loadRoomThenReset（进房顺序：先拉数据、成功后才 reset�
     expect(calls.restore).not.toHaveBeenCalled();
   });
 
-  it("capture 产物带草稿/convMode 时，reset 后 restore 能拿回（保留逻辑的真实集成点）", async () => {
-    let ui: { draft: string; convMode: "v1" | "v2" } = { draft: "不要重拉时丢我", convMode: "v2" };
+  it("deadline 作废（isLoading=false）：不 reset 也不拿超时数据换房", async () => {
+    const calls = makeCalls();
+    const out = await loadRoomThenReset({
+      fetchState: calls.fetchState,
+      fetchHistory: calls.fetchHistory,
+      isCurrent: () => true,
+      isLoading: () => false,
+      capture: calls.capture,
+      reset: calls.reset,
+      restore: calls.restore,
+    });
+    expect(out).toBeNull();
+    expect(calls.order).toEqual(["fetchState"]);
+    expect(calls.reset).not.toHaveBeenCalled();
+    expect(calls.restore).not.toHaveBeenCalled();
+  });
+
+  it("capture 产物带草稿/convMode/convLines 时，reset 后 restore 能拿回（保留逻辑的真实集成点）", async () => {
+    let ui: { draft: string; convMode: "v1" | "v2"; convLines: Line[] } = {
+      draft: "不要重拉时丢我",
+      convMode: "v2",
+      convLines: [{ id: 1, kind: "npc", text: "已提交的一行" }],
+    };
     const captured = await loadRoomThenReset({
       fetchState: async () => ({ room: "room_1" }),
       fetchHistory: async () => ({ lines: [] as string[] }),
@@ -138,16 +160,21 @@ describe("loadRoomThenReset（进房顺序：先拉数据、成功后才 reset�
           currentRoomId: "room_1",
           currentDraft: ui.draft,
           currentConvMode: ui.convMode,
+          currentConvLines: ui.convLines,
         }),
       reset: () => {
-        ui = { draft: "", convMode: "v1" };
+        ui = { draft: "", convMode: "v1", convLines: [] };
       },
       restore: (local) => {
         const actions = restoreRoomLocalState(local);
-        ui = { draft: actions.input ?? ui.draft, convMode: actions.convMode ?? ui.convMode };
+        ui = {
+          draft: actions.input ?? ui.draft,
+          convMode: actions.convMode ?? ui.convMode,
+          convLines: actions.convLines ?? ui.convLines,
+        };
       },
     });
     expect(captured).toMatchObject({ draft: "不要重拉时丢我", convMode: "v2", preserved: true });
-    expect(ui).toEqual({ draft: "不要重拉时丢我", convMode: "v2" });
+    expect(ui).toEqual({ draft: "不要重拉时丢我", convMode: "v2", convLines: [{ id: 1, kind: "npc", text: "已提交的一行" }] });
   });
 });

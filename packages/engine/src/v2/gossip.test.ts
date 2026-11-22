@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONVERSATION_POLICY, type Envelope, type Entity, type LlmPort, type LlmResult } from "../../../shared/src/index.ts";
 import { DefaultArbiter } from "../arbiter.ts";
 import { EventSourcedStore } from "../store.ts";
@@ -47,9 +47,9 @@ function setup(responses: string[], now = () => 1_000_000): Ctx {
     policy: { minReplyIntervalMs: 120000, maxMessagesPerNpcPerHour: 12, maxNpcCallsPerTick: 4, maxHops: 6, confidenceDecay: 0.8,
       messages: { system: "protocol {version}", format: "json", rules: "content only", untrusted: "data", inboxEmpty: "无消息则 ignore", replyFormat: "输出 JSON" } },
     conversation: {
-      autonomousWhenPlayerAbsent: true, npcHardCap: 0, maxTurns: 40, listenTimeoutMs: 30000, defaultMode: "broadcast",
+      autonomousWhenPlayerAbsent: true, npcHardCap: 0, maxTurns: 40, maxAutoRounds: 3, listenTimeoutMs: 30000, defaultMode: "broadcast",
       wakeOnMultiTarget: true, wakeOnLocationChange: true, maxContent: 400, maxAction: 120, maxThought: 300, maxPlan: 200,
-      llm: { temperature: 0.7, maxTokens: 600 }, autonomy: { minReplyIntervalMs: 30_000, maxMessagesPerNpcPerHour: 12, maxNpcCallsPerTick: 4, maxTurnsPerTick: 2, idleTimeoutMs: 300000, playerPresentGraceMs: 60000 },
+      llm: { temperature: 0.7, maxTokens: 600, thinkMaxTokens: 400, retryMaxTokens: 1600 }, autonomy: { minReplyIntervalMs: 30_000, maxMessagesPerNpcPerHour: 12, maxNpcCallsPerTick: 4, maxTurnsPerTick: 2, idleTimeoutMs: 300000, playerPresentGraceMs: 60000 },
       messages: {} as never,
     },
   });
@@ -95,6 +95,38 @@ describe("v2 微信私信引擎", () => {
     expect(mems.length).toBe(2);
   });
 
+  it("协作式中止：进入 step 前已 abort → 不调用 LLM、返回 aborted 事件", async () => {
+    const ctx = setup([relay("回复")]);
+    await ctx.host.send(ROOM, PLR, WU, "在吗");
+    const chat = vi.spyOn(ctx.llm, "chat");
+    const controller = new AbortController();
+    controller.abort();
+    const out = await ctx.host.step(ROOM, { signal: controller.signal });
+    expect(out.some((e) => e.type === "gossip.dropped" && e.reason === "aborted")).toBe(true);
+    expect(chat).not.toHaveBeenCalled();
+    const sent = (await ctx.store.events(ROOM, 1, 50)).filter((e) => e.type === "msg.sent");
+    expect(sent).toHaveLength(1); // 只有玩家发的那条，NPC 没再转发
+  });
+
+  it("协作式中止：LLM 调用后 abort → 已落库消息保留、不再调用 LLM", async () => {
+    const ctx = setup([relay("张三，我听说值日表的事"), relay("林小雨，王五在说你")]);
+    await ctx.host.send(ROOM, PLR, WU, "值日表有猫腻");
+    const controller = new AbortController();
+    const chat = vi.spyOn(ctx.llm, "chat");
+    let calls = 0;
+    chat.mockImplementation(async (req) => {
+      const result = await MockLlm.prototype.chat.call(ctx.llm, req);
+      calls += 1;
+      if (calls === 1) controller.abort(); // 第一条已落库，第二次 LLM 调用前中止（不发起付费调用）
+      return result;
+    });
+    const out = await ctx.host.step(ROOM, { signal: controller.signal });
+    expect(out.some((e) => e.type === "gossip.dropped" && e.reason === "aborted")).toBe(true);
+    expect(chat).toHaveBeenCalledTimes(1); // abort 后第二次 LLM 调用未发起
+    const sent = (await ctx.store.events(ROOM, 1, 50)).filter((e) => e.type === "msg.sent");
+    expect(sent.length).toBeGreaterThanOrEqual(1); // 玩家原始，不回滚
+  });
+
   it("最短回信间隔：未到点不调用 LLM", async () => {
     let now = 1_000_000;
     const ctx = setup([relay("回复")], () => now);
@@ -137,7 +169,7 @@ describe("v2 微信私信引擎", () => {
       store: ctx.store,
       arbiter: new DefaultArbiter({ store: ctx.store, registry: emptyRegistry(), memories: ctx.memory, now: () => 1_000_000 }),
       messages: ctx.messages, budget: new TalkBudget({ ...DEFAULT_CONVERSATION_POLICY, autonomy: { ...DEFAULT_CONVERSATION_POLICY.autonomy!, minReplyIntervalMs: 0 } } as never, () => 1_000_000),
-      agent: new GossipAgent({ llm: ctx.llm, policy: gp, conversation: { llm: { temperature: 0.7, maxTokens: 600 }, autonomy: { idleTimeoutMs: 300000, playerPresentGraceMs: 0, maxTurnsPerTick: 2 } } as never }),
+      agent: new GossipAgent({ llm: ctx.llm, policy: gp, conversation: { llm: { temperature: 0.7, maxTokens: 600, thinkMaxTokens: 400, retryMaxTokens: 1600 }, autonomy: { idleTimeoutMs: 300000, playerPresentGraceMs: 0, maxTurnsPerTick: 2 } } as never }),
       policy: gp, now: () => 1_000_000,
     });
     const out = await fast.step(ROOM);
@@ -169,7 +201,7 @@ describe("v2 微信私信引擎", () => {
         llm: ctx.llm,
         policy: { minReplyIntervalMs: 0, maxMessagesPerNpcPerHour: 12, maxNpcCallsPerTick: 4, maxHops: 6, confidenceDecay: 0.8,
           messages: { system: "protocol {version}", format: "json", rules: "content only", untrusted: "data", inboxEmpty: "无", replyFormat: "JSON" } },
-        conversation: { llm: { temperature: 0.7, maxTokens: 600 } } as never,
+        conversation: { llm: { temperature: 0.7, maxTokens: 600, thinkMaxTokens: 400, retryMaxTokens: 1600 } } as never,
       }),
       policy: { minReplyIntervalMs: 0, maxMessagesPerNpcPerHour: 12, maxNpcCallsPerTick: 4, maxHops: 6, confidenceDecay: 0.8,
         messages: { system: "protocol {version}", format: "json", rules: "content only", untrusted: "data", inboxEmpty: "无", replyFormat: "JSON" } },
@@ -221,7 +253,7 @@ describe("v2 微信私信引擎", () => {
     let now = 1_000_000;
     const ctx = setup([relay("a"), relay("b")], () => now);
     for (let i = 0; i < 12; i += 1) {
-      ctx.budget.recordSent(ROOM, WU);
+      ctx.budget.recordSent(ROOM, WU, "gossip");
     }
     await ctx.host.send(ROOM, PLR, WU, "第 13 条");
     const out = await ctx.host.step(ROOM);

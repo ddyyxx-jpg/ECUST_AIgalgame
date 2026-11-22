@@ -6,11 +6,14 @@
  * - 写：只有两种写入 —— travel 的懒安装 / tick 的模块提案，全部经 Arbiter.apply；
  * - 草案：委托 DraftEngine（状态机 + AI 生成 + published.json 落盘）。
  */
+import { DEFAULT_LIMITS } from "../../../packages/engine/src/index.ts";
+import type { DefaultArbiter, MemoryIndex } from "../../../packages/engine/src/index.ts";
 import { isErrorCode } from "../../../packages/shared/src/contract/errors.ts";
 import type {
   Arbiter,
   Dialogue,
   DialogueSpec,
+  DialogueStep,
   Envelope,
   Entity,
   LinkKind,
@@ -36,6 +39,7 @@ import type { MapFail, SceneDialogue, SceneLink, SceneRef, SceneStatus, SceneTem
 import { DraftEngine } from "./map.drafts.ts";
 import type { DraftListResult, DraftResult, PublishResult } from "./map.drafts.ts";
 import { displayNameOf, knowsNameOf, maskNamesDeep, maskTurnEvents, unknownPlaceholders } from "./view-names.ts";
+import { projectEventsForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
 
 // ---------------------------------------------------------------- 对外视图（docs/06 §4）
 export interface MapViewLink {
@@ -101,11 +105,13 @@ export type DialogueResult = { ok: true; npc: { id: string; name: string }; line
 export interface MapServiceDeps {
   store: Store;
   turn: Turn;
-  arbiter: Arbiter;
+  arbiter: Pick<Arbiter, "dryRun"> & Pick<DefaultArbiter, "apply">;
   modules: Modules;
   dialogue: Dialogue;
   llm: LlmPort;
   registry: Registry;
+  /** 夜间密谋的私忆也要进同一份记忆索引；不接会让"tick 后立刻召回"落空（PR #147 审阅 P1-2）。生产入口（bootstrap）必传 */
+  memory?: Pick<MemoryIndex, "ingest">;
   contentDir: string;
   dataDir: string;
   adminToken: string;
@@ -193,7 +199,16 @@ export class MapService {
     roomId: string,
     state?: WorldState,
   ): Promise<T> {
-    return maskTurnEvents<T>(roomId, result, this.deps.store, this.deps.appearance, state);
+    const masked = await maskTurnEvents<T>(roomId, result, this.deps.store, this.deps.appearance, state);
+    // travel 也走 Turn：它的 events 里有 turn.patch（整份 state + ops），只遮人名不够
+    // （PR #149 审阅 P0-1/P0-2）。tick 的 Envelope 已在上游裁过，这里幂等。
+    const withEvents = masked as unknown as { events?: unknown };
+    if (Array.isArray(withEvents.events)) {
+      (withEvents as { events: unknown[] }).events = withEvents.events.map((ev) =>
+        typeof ev === "object" && ev !== null ? projectTurnEventForPlayer(ev as { type: string }) : ev,
+      );
+    }
+    return masked;
   }
 
   /**
@@ -264,7 +279,8 @@ export class MapService {
     }
     if (failure) return this.outbound(failure, roomId, state);
 
-    const after = await this.deps.store.snapshot(roomId);
+    const patch = events.find((event) => event.type === "turn.patch");
+    const after = patch?.state ?? await this.deps.store.snapshot(roomId);
     // 模块对"不可达"会返回 ok:true + 空 proposals，而 Arbiter 部分应用也返回 ok:true；
     // 只看 turn 事件会把"没走动"当成到达。以移动后的权威位置做最终校验。
     const actorLoc = after.links.find((l) => l.kind === "located_in" && l.from === actor)?.to;
@@ -279,11 +295,38 @@ export class MapService {
   }
 
   // -------------------------------------------------------------- tick（不经过 Turn / LLM）
-  async tick(roomId: string, opts: { advance?: boolean } = {}): Promise<TickResult> {
+  /**
+   * 房间级串行队列（PR #147 审阅 P2-1）：tick 的 phase 判定、第一批提交、夜间编排
+   * 全部基于同一份快照，并发两个 tick 会各推一天、各开一场密谋。Arbiter 只保证
+   * 单次 apply 原子，不保证"读快照→判定→再次 apply"这条跨 apply 的业务链。
+   * 队列只按 roomId 串行，房间之间互不阻塞；上一次失败不阻断下一次（错误已由返回值承载）。
+   */
+  private readonly tickQueues = new Map<string, Promise<unknown>>();
+
+  async tick(roomId: string, opts: { advance?: boolean; viewer?: string } = {}): Promise<TickResult> {
+    const prev = this.tickQueues.get(roomId) ?? Promise.resolve();
+    const next = prev.then(
+      () => this.tickInner(roomId, opts),
+      () => this.tickInner(roomId, opts),
+    );
+    // 队列里只留"已 settle"的尾巴，避免错误态 Promise 污染下一次；返回值仍走 next
+    this.tickQueues.set(roomId, next.catch(() => undefined));
+    return next;
+  }
+
+  private async tickInner(roomId: string, opts: { advance?: boolean; viewer?: string } = {}): Promise<TickResult> {
     const events: Envelope[] = [];
+    let stateAfter: WorldState | undefined;
+    // 必须在 snapshot **之前**取 seq（PR #149 审阅 P1）：模块 tick / dryRun 期间如果有
+    // /turns 提交（例如 scene.set），snapshot 之后取的 seq 已经是新值，expectedSeq 会通过，
+    // 于是用旧快照算出的提案把并发写入覆盖掉。先取 seq 再读快照，最坏只是保守失败一次。
+    // seq 必须来自已载入的事件日志：直接调用 tick（不经过 guardRoom）时 store.seq() 只会给 0，
+    // 首个 expectedSeq 就会假冲突。load() 顺带把内存视图准备好，snapshot 随后只读它。
+    const seqBefore = await this.seqOf(roomId);
     const state = await this.deps.store.snapshot(roomId);
     const phase = opts.advance ? nextPhase(state.clock.phase) : state.clock.phase;
-    const actorId = playerActorId(state);
+    // 出站视角按调用者解析（PR #149 P3）：联机房不能用"1 号玩家"替别人过滤私忆
+    const actorId = opts.viewer ?? playerActorId(state);
 
     let proposals: Proposal[];
     try {
@@ -318,7 +361,12 @@ export class MapService {
       }
       // apply 默认 atomic：dryRun 与 apply 之间若有竞争/落盘失败，整批回滚（含 time.advance）。
       try {
-        const applied = await this.deps.arbiter.apply(roomId, batch, this.cause(roomId, "tick"));
+        const applied = await this.deps.arbiter.apply(roomId, batch, this.cause(roomId, "tick"), {
+          captureState: true,
+          // 队列内已串行，这里再加 seq 防线：队列之外的写入（对话/后台任务）插队时整批拒绝，
+          // 而不是把 time.advance 叠在别人刚提交的状态上（P2-1）
+          ...(seqBefore !== undefined ? { expectedSeq: seqBefore } : {}),
+        });
         const rejected = applied.rejected[0];
         if (!applied.ok || rejected) {
           const code = rejected && isErrorCode(rejected.code)
@@ -329,17 +377,34 @@ export class MapService {
           return this.outbound(fail(code, rejected?.detail ?? applied.error?.message ?? "tick 提案未提交"), roomId, state);
         }
         events.push(...applied.events);
+        stateAfter = applied.stateAfter;
       } catch (e) {
-        // 兜底未预期异常；语义与 E_STORE_FAULT 一致：整批未提交
+        // 同时涵盖落盘失败和替换后结果待核对的情况。
         return this.outbound(fail(codeOfError(e), e instanceof Error ? e.message : String(e)), roomId, state);
       }
     }
 
-    const after = await this.deps.store.snapshot(roomId);
+    const after = stateAfter ?? await this.deps.store.snapshot(roomId);
+
+    // 夜间密谋第二批（issue #96/#128）："进入夜间"严格按 nextPhase 的真实枚举判定。
+    // 第一批（time.advance + 模块提案）保持原子不变；密谋失败只 warn，不回滚已经推进的时间。
+    const enteredNight = opts.advance === true && state.clock.phase !== "night" && phase === "night";
+    if (enteredNight) {
+      try {
+        const plotEvents = await this.runNightPlot(roomId, after, state, actorId);
+        events.push(...plotEvents);
+      } catch (e) {
+        console.warn(`[map.tick] 夜间密谋编排失败（不影响时段推进）：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     const map = await this.buildMapView(after, actorId);
     // 出站脱敏（issue #53 成功 / #58 失败）：apply 的 envelopes 与 moved 摘要都要过
     // 同一层掩码，否则 tick 响应会从 payload/state 里漏出未认识 NPC 真名。
-    return this.outbound<TickResult>({ ok: true, events, moved: movedSummaries(events, after), map }, roomId, after);
+    // 出站再裁一次秘密（PR #147 审阅 P0）：夜间密谋的第二批事件会进 TickResult，
+    // plot 的 GM 字段与 NPC 私忆不能随响应体下发给玩家；测试需要原文时直接读 EventLog。
+    const visible = projectEventsForPlayer(events, actorId);
+    return this.outbound<TickResult>({ ok: true, events: visible, moved: movedSummaries(visible, after), map }, roomId, after);
   }
 
   // -------------------------------------------------------------- 场景对话（npc.scene 导演）
@@ -615,6 +680,116 @@ export class MapService {
   }
 
   // -------------------------------------------------------------- 内部：tick / cause
+  /**
+   * 夜间密谋编排：取在场且存活的 NPC ≥2 人，开 npc.plot 会话跑完，汇总提案后
+   * 以 cause.type=dialogue 单独交给 Arbiter（不是第一批 time.advance 批）。
+   *
+   * fail-soft 由 tick() 的调用点兜底：这里抛出的任何错误（open/step/close/apply）
+   * 都只写 warn 日志，tick 仍返回 ok:true 且世界状态保持第一批提交后的结果。
+   */
+  private async runNightPlot(roomId: string, after: WorldState, before: WorldState, actorId: string): Promise<Envelope[]> {
+    // 以入夜时的在场者为准：第一批 map 模块提案会把 NPC 按日程挪去宿舍，
+    // 若用应用后的快照取人，房间很快不足 2 人，密谋永远不会被触发。
+    const liveNpcIds = (s: WorldState) => s.room.scene.presentIds.filter(
+      (id) => id !== actorId && isLive(s, id) && s.entities[id]?.kind === "npc",
+    );
+    const beforeIds = liveNpcIds(before);
+    const participants = beforeIds.length >= 2 ? beforeIds : liveNpcIds(after);
+    if (participants.length < 2) return [];
+
+    // 配额收口（PR #147 审阅 P1-3）：引擎同时最多 6 条 active plot，满额时整批会被拒，
+    // 私忆随整批回滚、LLM 白调。这里先把"往夜留下的" oldest active 结案腾位；
+    // 全是本夜新建的就不调导演、不浪费一次生成（下一夜自然会结案）。
+    const closable = this.closablePlots(after);
+    if (closable === undefined) {
+      console.warn(`[map.tick] active plot 已达上限且无可结案，跳过本夜密谋：${roomId}`);
+      return [];
+    }
+
+    const session = await this.deps.dialogue.open({
+      roomId,
+      participants,
+      directorId: "npc.plot",
+      seed: { locId: before.room.scene.locId },
+      maxTurns: 3,
+      visibility: "private",
+    });
+    const proposals: Proposal[] = [];
+    let step: DialogueStep;
+    do {
+      step = await this.deps.dialogue.step(session.id);
+      proposals.push(...step.proposals);
+    } while (!step.done);
+    const summary = await this.deps.dialogue.close(session.id, "night.tick");
+    // close() 返回的是同一会话累积的提案；用它就够了（step 循环里只负责推进到 done）。
+    const plotProposals = summary.proposals.length > 0 ? summary.proposals : proposals;
+    if (plotProposals.length === 0 && closable.length === 0) return [];
+
+    // cause.seq 恒 0 会让私忆 id（mem_<room>_<cause.seq>_<n>）跨夜碰撞，第二夜起被幂等丢弃
+    // （PR #147 审阅 P1-1）：用"本批将要落库的下一个 seq"做前缀，夜与夜之间必然不同。
+    // 第一批已经 apply 过，store 已载入；load() 在这里只读内存视图，顺带给出权威 seq。
+    const seqBefore = await this.seqOf(roomId);
+    const cause = this.cause(roomId, "dialogue", (seqBefore ?? 0) + 1);
+    const applied = await this.deps.arbiter.apply(roomId, [...closable, ...plotProposals], cause, {
+      captureState: true,
+      ...(seqBefore !== undefined ? { expectedSeq: seqBefore } : {}),
+    });
+    if (!applied.ok || applied.rejected.length > 0) {
+      const first = applied.rejected[0];
+      console.warn(`[map.tick] 夜间密谋提案被拒：${first?.detail ?? applied.error?.message ?? "unknown"}`);
+      return [];
+    }
+    // 夜间私忆也要进记忆索引，否则默认 v2 群聊召回要等到 v1 回合/重启才看得到（P1-2）。
+    for (const ev of applied.events) this.deps.memory?.ingest?.(ev);
+    return applied.events;
+  }
+
+  /**
+   * 需要腾位时返回"结案提案"，不需要返回空数组，连腾位都做不到返回 undefined。
+   * 只结案往夜（createdDay < 今天）的 active plot：本夜刚起的剧情不在同一夜被自己关掉。
+   */
+  private closablePlots(state: WorldState): Proposal[] | undefined {
+    const active = state.plots.filter((p) => p.status === "active");
+    const over = active.length - (DEFAULT_LIMITS.plots - 1);
+    if (over <= 0) return [];
+    const olds = active
+      .filter((p) => (p.createdDay ?? 0) < state.clock.day)
+      .sort((a, b) => (a.createdDay ?? 0) - (b.createdDay ?? 0) || (a.id < b.id ? -1 : 1));
+    if (olds.length < over) return undefined;
+    return olds.slice(0, over).map((plot) => ({
+      op: "plot.upsert",
+      reason: "夜间密谋配额收口：往夜剧情结案",
+      by: "tick",
+      args: {
+        id: plot.id,
+        goal: plot.goal,
+        actors: plot.actors,
+        status: "resolved",
+        ...(plot.leverage ? { leverage: plot.leverage } : {}),
+        ...(plot.risk !== undefined ? { risk: plot.risk } : {}),
+        ...(plot.tone ? { tone: plot.tone } : {}),
+        ...(plot.leakPoints ? { leakPoints: plot.leakPoints } : {}),
+        ...(plot.forbidReveal ? { forbidReveal: plot.forbidReveal } : {}),
+        ...(plot.guard ? { guard: plot.guard } : {}),
+      },
+    }));
+  }
+
+  /**
+   * Store 契约只保证回放 API；生产实现（FileStore / EventSourcedStore）另有 `load()`，
+   * 它返回载入后的权威 seq（未载入时 `seq()` 只会给 0，首拍 tick 会假冲突）。
+   */
+  private async seqOf(roomId: string): Promise<number | undefined> {
+    const store = this.deps.store as Store & { load?: (roomId: string) => Promise<number> };
+    if (typeof store.load !== "function") return undefined;
+    try {
+      return await store.load(roomId);
+    } catch {
+      // 坏档/待核对：后面 snapshot 会抛出同一个错，让它去报
+      return undefined;
+    }
+  }
+
   private moduleContext(roomId: string, actorId: string, input: string, state: WorldState): ModuleContext {
     return {
       roomId,
@@ -635,12 +810,14 @@ export class MapService {
     };
   }
 
-  private cause(roomId: string, type: string): Envelope {
+  private cause(roomId: string, type: string, seq = 0): Envelope {
     return {
       v: 1,
       id: `evt_map_${type}_${hex8()}`,
       roomId,
-      seq: 0, // 真实 seq 由 Arbiter 按 store 分配；cause 只用来标 room/type/actor
+      // 真实 seq 由 Arbiter 按 store 分配；cause.seq 只用于标 room/type/actor，
+      // 以及 memory.write 派生 id 的唯一性（P1-1 夜间私忆跨夜碰撞）。
+      seq,
       ts: (this.deps.now ?? Date.now)(),
       actorId: "system",
       type,

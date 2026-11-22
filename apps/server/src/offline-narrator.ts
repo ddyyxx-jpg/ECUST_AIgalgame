@@ -32,18 +32,49 @@ export function parsePromptContext(messages: { content?: string }[]): PromptCont
   };
 }
 
-/** 场景名 → 描述（来自地图内容数据；缺数据时返回空表，不影响启动） */
-export async function loadSceneDescs(file: string): Promise<Map<string, string>> {
+export interface SceneDesc {
+  name: string;
+  desc: string;
+}
+
+/**
+ * locId → {name, desc}（来自地图内容数据；缺数据时返回空表，不影响启动）。
+ * #134：以前用场景**名字**做 key，而引擎交给场景 agent 的是 canon 的 locId/名字，
+ * 两边对不上 → 5 个地点全部匹配失败。改为按 id 建索引，同时可用名字反查。
+ */
+export async function loadSceneDescs(file: string): Promise<Map<string, SceneDesc>> {
   try {
-    const raw = JSON.parse(await readFile(file, "utf8")) as { scenes?: { name?: string; desc?: string }[] };
-    const map = new Map<string, string>();
+    const raw = JSON.parse(await readFile(file, "utf8")) as { scenes?: { id?: string; name?: string; desc?: string }[] };
+    const map = new Map<string, SceneDesc>();
     for (const s of raw.scenes ?? []) {
-      if (typeof s.name === "string" && typeof s.desc === "string" && s.desc.length > 0) map.set(s.name, s.desc);
+      if (typeof s.id === "string" && typeof s.name === "string" && typeof s.desc === "string" && s.desc.length > 0) {
+        map.set(s.id, { name: s.name, desc: s.desc });
+      }
     }
     return map;
   } catch {
     return new Map();
   }
+}
+
+/**
+ * 场景描述解析（#134）：优先 locId；名字回退时先经 canon 名→id 解析，再做同名匹配。
+ * canon 的「图书馆」与地图的「图文信息中心」名字不同但 id 对齐，只按名字找会全 miss。
+ */
+export function resolveSceneDesc(
+  descs: Map<string, SceneDesc>,
+  canonIdByName: Map<string, string>,
+  q: { locId?: string; locName?: string },
+): string {
+  const byId = q.locId ? descs.get(q.locId) : undefined;
+  const viaCanon = !byId && q.locName ? descs.get(canonIdByName.get(q.locName) ?? "") : undefined;
+  const byName = q.locName ? sceneByName(descs, q.locName) : undefined;
+  return (byId ?? viaCanon ?? byName)?.desc ?? "";
+}
+
+export function sceneByName(descs: Map<string, SceneDesc>, name: string): SceneDesc | undefined {
+  for (const d of descs.values()) if (d.name === name) return d;
+  return undefined;
 }
 
 const PHASE_OPENERS: Record<string, string[]> = {
@@ -74,6 +105,18 @@ function firstSentence(text: string): string {
   return s.length > 80 ? `${s.slice(0, 78)}…` : s;
 }
 
+/** 从输入里认出目标场景：取最长命中别名（比场景名长度更准） */
+export function pickSceneByInput(descs: Map<string, SceneDesc>, input: string): SceneDesc | undefined {
+  let named: SceneDesc | undefined;
+  let namedHit = 0;
+  for (const d of descs.values()) {
+    for (const alias of aliases(d.name)) {
+      if (input.includes(alias) && alias.length > namedHit) { named = d; namedHit = alias.length; }
+    }
+  }
+  return named;
+}
+
 /** 场景名的别名（"一食堂" → 也认"食堂"；"宿舍 3 号楼" → 也认"宿舍"），用于从输入里认出目标 */
 function aliases(name: string): string[] {
   const out = new Set<string>([name]);
@@ -99,20 +142,15 @@ function tailOf(input: string): string {
  * - 观察类输入不再重复场景描述：`turn.facts` 已经带了完整描述，重复会显得啰嗦
  * - 场景描述缺失（例如 AI 生成的用户场景）时退回通用白描，不报错
  */
-export function offlineNarrative(messages: { content?: string }[], scenes: Map<string, string>): string {
+export function offlineNarrative(messages: { content?: string }[], descs: Map<string, SceneDesc>): string {
   const ctx = parsePromptContext(messages);
   const moving = /去|到|往|回|进|走|前往/.test(ctx.input);
   const looking = /看|观察|环顾|四周|地图|在哪/.test(ctx.input);
 
   // 输入里出现场景名/别名 → 用那个场景；否则用当前地点。取最长匹配，避免"食堂"截胡"一食堂"以外的更长名字
-  let named = "";
-  for (const name of scenes.keys()) {
-    for (const alias of aliases(name)) {
-      if (ctx.input.includes(alias) && alias.length > named.length) named = name; // 记录原始场景名
-    }
-  }
-  const target = moving && named ? named : ctx.locName;
-  const desc = scenes.get(target) ?? "";
+  const named = pickSceneByInput(descs, ctx.input);
+  const target = moving && named ? named : sceneByName(descs, ctx.locName);
+  const desc = target?.desc ?? "";
 
   const parts = [pick(PHASE_OPENERS[ctx.phase] ?? PHASE_OPENERS.morning!, `${ctx.phase}${ctx.day}${ctx.input}`)];
   if (desc && !looking) parts.push(firstSentence(desc));

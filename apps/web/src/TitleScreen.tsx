@@ -4,7 +4,7 @@
  * 不持有任何权威状态：点"开始"才让 App 去建房。模型配置只在服务端管理端，玩家界面不提供入口。
  */
 import { useEffect, useState } from "react";
-import type { SaveEntry } from "./api.ts";
+import type { SaveEntry, SaveSlot } from "./api.ts";
 import type { SavesState } from "./use-saves.ts";
 import type { Scenario } from "./scenarios.ts";
 import { setSoundOn, soundOn } from "./sfx.ts";
@@ -26,6 +26,10 @@ export interface TitleScreenProps {
   onOpenSave: (save: SaveEntry) => void;
   /** 只从列表移除索引，不删房间 */
   onDeleteSave: (save: SaveEntry) => void;
+  /** issue #98：命名槽最小交互（创建 / 改名 / 删除映射） */
+  onCreateSlot: (label: string, roomId: string) => void;
+  onRenameSlot: (slot: SaveSlot) => void;
+  onDeleteSlot: (slot: SaveSlot) => void;
   busy: boolean;
   err: string;
   /** 当前登录账号（显示在右上角） */
@@ -76,6 +80,9 @@ export default function TitleScreen({
   savesState,
   onOpenSave,
   onDeleteSave,
+  onCreateSlot,
+  onRenameSlot,
+  onDeleteSlot,
   busy,
   err,
   username,
@@ -101,6 +108,9 @@ export default function TitleScreen({
 
   const pad = (n: number) => String(n).padStart(2, "0");
   const saves = savesState.saves;
+  const slots = savesState.slots;
+  const [slotLabel, setSlotLabel] = useState("");
+  const [slotRoom, setSlotRoom] = useState("");
 
   const items: { id: string; label: string; hint: string; primary?: boolean; onClick: () => void }[] = [
     {
@@ -194,8 +204,9 @@ export default function TitleScreen({
                         disabled={busy}
                       >
                         <span className="scenario-face">
+                          {/* 256 像素角色卡：和游戏内是同一张源图，分辨率更高、细节更多 */}
                           <img
-                            src={`/portraits/hero-${s.id}.jpg`}
+                            src={`/portraits/hero-${s.id}-card.png`}
                             alt=""
                             onError={(e) => {
                               e.currentTarget.style.display = "none";
@@ -218,6 +229,45 @@ export default function TitleScreen({
                 <p className="muted scenario-note">
                   存档索引跟随当前账号；「从列表移除」只移除入口，房间与对话历史仍保留，凭房间号还能回去。
                 </p>
+                {/* issue #98：命名槽——只管理账号内的房间映射，删槽不动房间/历史 */}
+                {savesState.status === "ready" && (
+                  <div className="slot-manager">
+                    <p className="title-mark slot-heading">命名槽</p>
+                    {slots.length > 0 && (
+                      <div className="slot-list">
+                        {slots.map((slot) => (
+                          <div className="save-row slot-row" key={slot.slotId}>
+                            <div className="save-main">
+                              <strong>{slot.label}</strong>
+                              <span className="muted save-room">{slot.roomId}</span>
+                            </div>
+                            <div className="draft-actions">
+                              <button type="button" className="btn ghost" disabled={busy}
+                                onClick={() => onRenameSlot(slot)}>改名</button>
+                              <button type="button" className="btn ghost" disabled={busy}
+                                title="只删槽映射，房间与历史保留"
+                                onClick={() => onDeleteSlot(slot)}>删除槽</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="slot-create">
+                      <input aria-label="槽名" placeholder="槽名（1–40 字）" maxLength={40}
+                        value={slotLabel} onChange={(e) => setSlotLabel(e.target.value)} />
+                      <select aria-label="槽绑定房间" value={slotRoom} onChange={(e) => setSlotRoom(e.target.value)}>
+                        <option value="">选择房间…</option>
+                        {saves.map((save) => (
+                          <option key={save.roomId} value={save.roomId}>{save.roomId}</option>
+                        ))}
+                      </select>
+                      <button type="button" className="btn primary" disabled={busy || !slotLabel.trim() || !slotRoom}
+                        onClick={() => { onCreateSlot(slotLabel, slotRoom); setSlotLabel(""); setSlotRoom(""); }}>
+                        新建槽
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {savesState.status !== "ready" || saves.length === 0 ? (
                   <SavesNotice state={savesState} />
                 ) : (

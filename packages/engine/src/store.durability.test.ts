@@ -70,6 +70,20 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
+it("同进程并发首次提交可创建新目录，同房间仍按序串行", async () => {
+  const dir = path.join(await tempDir(), "data", "rooms");
+  const other = "room_other";
+  const store = new FileStore(dir);
+  await Promise.all([
+    store.append(ROOM, [seedEnv(1)]),
+    store.append(ROOM, [seedEnv(2)]),
+    store.append(other, [{ ...seedEnv(1), roomId: other }]),
+  ]);
+  const restored = new FileStore(dir);
+  expect(await restored.load(ROOM)).toBe(2);
+  expect(await restored.load(other)).toBe(1);
+});
+
 describe("BLOCKER-1：落盘失败 → 状态不变、可安全重试", () => {
   it("目录只读时 apply 返回 E_STORE_FAULT，内存与 seq 都不变；恢复后重试只生效一次", async () => {
     const dir = await tempDir();
@@ -132,25 +146,18 @@ describe("MAJOR-1：重启后 seq 必须来自载入后的日志", () => {
   });
 });
 
-describe("加载时的断档修复：可继续玩，而不是整份存档读不出来", () => {
-  it("文件里有 seq 断档 → 截断到连续前缀并写回，房间仍可写", async () => {
+describe("日志断档", () => {
+  it("拒绝读写断档房间，保留原文件的全部内容", async () => {
     const dir = await tempDir();
     const file = path.join(dir, `${ROOM}.jsonl`);
-    // 模拟崩溃/半批写入：1 之后直接是 3，中间缺 2
-    await writeFile(file, [seedEnv(1), seedEnv(3)].map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+    const events = [seedEnv(1), seedEnv(3), seedEnv(4)];
+    const original = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
+    await writeFile(file, original, "utf8");
 
     const store = new FileStore(dir);
-    const loaded = await store.load(ROOM);
-
-    expect(loaded).toBe(1); // 只认能连成链的前缀
-    expect(store.repaired.has(ROOM)).toBe(true);
-    expect((await store.snapshot(ROOM)).entities[SHOP]?.name).toBe("小店");
-
-    // 修复后的文件已被写回成连续日志：新实例读出来仍是 1
-    expect(await new FileStore(dir).load(ROOM)).toBe(1);
-
-    // 还能继续写：seq 2 正常接上
-    await store.append(ROOM, [{ ...seedEnv(2), id: "evt_fixed_2" }]);
-    expect(store.seq(ROOM)).toBe(2);
+    await expect(store.load(ROOM)).rejects.toMatchObject({ code: "E_STORE_FAULT" });
+    await expect(store.append(ROOM, [seedEnv(2)])).rejects.toMatchObject({ code: "E_STORE_FAULT" });
+    expect(store.seq(ROOM)).toBe(0);
+    expect(await readFile(file, "utf8")).toBe(original);
   });
 });

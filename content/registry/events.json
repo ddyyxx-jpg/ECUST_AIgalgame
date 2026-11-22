@@ -51,6 +51,12 @@
       "type": "memory.impression.queued",
       "when": "canonize 发布世界层记忆并生成世界印象后（P4 保留：用户投影走 onImpression，事件暂不发射）",
       "broadcast": false
+    },
+    {
+      "type": "turn.committed",
+      "when": "Arbiter 对一批 Proposal 裁决成功并提交后，作为该批 EventLog 最后一条 Envelope 追加；payload 见 packages/engine/src/turn.evidence.ts:25-33",
+      "broadcast": false,
+      "payload": "{clientTurnId, turnId, actorId, committedSeq, narrative?, facts?, usage?}；committedSeq 为 marker 自身 seq；用于 #76 跨重启幂等键重建与历史补齐"
     }
   ]
 }

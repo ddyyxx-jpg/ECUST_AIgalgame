@@ -18,7 +18,7 @@ interface FakeLive {
 interface HarnessOptions {
   /** 挂载时页面是否已经在后台（模拟后台标签页加载） */
   startHidden?: boolean;
-  enterRoom?: (roomId: string) => Promise<void>;
+  enterRoom?: (roomId: string, signal: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -38,7 +38,7 @@ function harness(options: HarnessOptions = {}) {
     busy: false,
     draft: "",
   };
-  const enterRoom = vi.fn(options.enterRoom ?? (async (_roomId: string) => {}));
+  const enterRoom = vi.fn(options.enterRoom ?? (async (_roomId: string, _signal: AbortSignal) => {}));
   const onNotice = vi.fn((_error: unknown) => {});
   const resync = createSessionResync({
     now: () => now,
@@ -95,7 +95,7 @@ describe("createSessionResync（前台恢复接线：真实监听 → 判定 →
     h.fireFocus(); // 浏览器回到前台通常 visibilitychange 之后紧跟 focus
     await flush();
     expect(h.enterRoom).toHaveBeenCalledTimes(1);
-    expect(h.enterRoom).toHaveBeenCalledWith("room_1");
+    expect(h.enterRoom).toHaveBeenCalledWith("room_1", expect.any(AbortSignal));
     expect(h.onNotice).not.toHaveBeenCalled();
   });
 
@@ -146,7 +146,7 @@ describe("createSessionResync（前台恢复接线：真实监听 → 判定 →
     h.fireFocus(); // 若 hiddenSince 被提前清空，这里 awayMs=0 会被 too-soon 永久挡死
     await flush();
     expect(h.enterRoom).toHaveBeenCalledTimes(1);
-    expect(h.enterRoom).toHaveBeenCalledWith("room_1");
+    expect(h.enterRoom).toHaveBeenCalledWith("room_1", expect.any(AbortSignal));
   });
 
   it("节流：距上次同步 <30s 不重拉，超过 30s 后可再次重拉", async () => {
@@ -197,6 +197,47 @@ describe("createSessionResync（前台恢复接线：真实监听 → 判定 →
     await flush();
     expect(h.enterRoom).toHaveBeenCalledTimes(2);
     expect(h.onNotice).toHaveBeenCalledTimes(2);
+  });
+
+  it("P2-5：deadline 超时时 enterRoom reject 到 onNotice，resyncing 占位归还可重试", async () => {
+    const { TimeoutError } = await import("./timeout.ts");
+    const boom = new TimeoutError("装载超时");
+    const h = harness({
+      enterRoom: async () => {
+        throw boom;
+      },
+    });
+    h.hide();
+    h.advance(10_000);
+    h.show();
+    await flush();
+    expect(h.onNotice).toHaveBeenCalledWith(boom);
+    h.hide();
+    h.advance(31_000);
+    h.show();
+    await flush();
+    expect(h.enterRoom).toHaveBeenCalledTimes(2);
+    expect(h.onNotice).toHaveBeenCalledTimes(2);
+  });
+
+  it("P2-5：dispose 中止在途 enterRoom 的 signal，onNotice 不再触发", async () => {
+    let observed: AbortSignal | null = null;
+    const h = harness({
+      enterRoom: (_roomId, signal) => {
+        observed = signal;
+        return new Promise<void>(() => {});
+      },
+    });
+    h.hide();
+    h.advance(10_000);
+    h.show();
+    await flush();
+    expect(observed).not.toBeNull();
+    h.resync.dispose();
+    expect(observed!.aborted).toBe(true);
+    expect(observed!.reason).toBeInstanceOf(DOMException);
+    await flush();
+    expect(h.onNotice).not.toHaveBeenCalled();
   });
 
   it("防重入：enterRoom 在途时重复事件不再发起", async () => {

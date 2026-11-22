@@ -6,7 +6,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ActorId, Memory, MemoryRecord, Registry, RoomId, Store, Turn, TurnEvent, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import type { ConversationEvent, GossipEvent, MessageDigest, UtteranceModeDef } from "../../../packages/shared/src/contract/v2.ts";
-import { projectConversationEvents, type ConversationHostV2 } from "../../../packages/engine/src/v2/index.ts";
+import { projectEventsForPlayer, playerOf, projectStateForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
+import { projectConversationEvents, saveSnapshot, sessionSnapshotPath, type ConversationHostV2 } from "../../../packages/engine/src/v2/index.ts";
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
 import type { LlmSettings } from "./settings.ts";
@@ -15,6 +16,7 @@ import { askedNameTargetId, introducedPresentIds, viewerSpeech } from "./name-un
 import type { SaveIndex } from "./saves.ts";
 import type { TurnHistory } from "./turn-history.ts";
 import { registerResumeRoutes } from "./resume.routes.ts";
+import { registerSlotsRoutes } from "./slots.routes.ts";
 import { registerAuthRoutes, type AuthService } from "./auth.ts";
 import { registerAdminRoutes } from "./admin.routes.ts";
 import { dailyLimitFor } from "./auth-store.ts";
@@ -22,12 +24,16 @@ import type { TurnLedger } from "./quota.ts";
 import type { AdminLog } from "./admin-log.ts";
 import { makeRoomExists } from "./room-exists.ts";
 import { isSafeRoomId } from "../../../packages/engine/src/store.ts";
+import { clampLimit } from "./limit.ts";
+import { isRoomSyncFault, StoreCommitUnknownError } from "../../../packages/engine/src/store-write.ts";
 import { EMPTY_SCENARIOS } from "./scenarios.ts";
 import type { ScenarioCatalog } from "./scenarios.ts";
 import { registerViewRoutes } from "./view.routes.ts";
 import { adminTokenOf, guardRoom } from "./room-guard.ts";
 import { AdminTokenGate, type TokenVerdict } from "./admin-token.ts";
-import { isStoreFault } from "./store-fault.ts";
+import { isStoreFault, storeFaultMessage } from "./store-fault.ts";
+import { parseCommitEvidence } from "@galgame/engine";
+import type { TurnCommitEvidence } from "@galgame/engine";
 import { registerDebugRoutes } from "./debug.routes.ts";
 import type { DebugGate } from "./debug.ts";
 
@@ -56,6 +62,8 @@ export interface AppDeps {
   canonize?: {
     retireRoom(roomId: string): Promise<{ written: string[]; candidates: number }>;
     tombstone(memoryId: string, reason: string): Promise<boolean>;
+    /** 带失败原因的同路径版本（PR #149 P2-4）：区分并发冲突与真正不可变 */
+    tombstoneWithReason?(memoryId: string, reason: string): Promise<{ ok: boolean; code?: string }>;
     stats(): { worldId: string; version: number; writtenToday: number; writtenTotal: number; circuitOpen: boolean; consecutiveJudgeFailures: number };
     sample(limit: number): MemoryRecord[];
   };
@@ -83,14 +91,16 @@ export interface AppDeps {
     inbox(roomId: RoomId, to: ActorId): MessageDigest[];
     subscribe(roomId: RoomId, viewer: ActorId, cb: (ev: GossipEvent) => void): () => void;
   };
-  /** dev/v2：群聊会话宿主（未接线时不注册端点；会话/幂等缓存全在进程内，重启即新会话） */
-  conversation?: { host: ConversationHostV2; modes?: Map<string, UtteranceModeDef> };
+  /** dev/v2：群聊会话宿主（未接线时不注册端点；#90 起会话从独立快照文件恢复，见 bootstrap.ts） */
+  conversation?: { host: ConversationHostV2; modes?: Map<string, UtteranceModeDef>; dataDir?: string };
   /** 管理操作日志 */
   adminLog?: AdminLog;
   /** Cookie 写请求 CSRF 允许的 Origin（authRequired=1 时用） */
   publicOrigin?: string;
   /** 调试面板口令门；缺省/未配置时不注册调试端点 */
   debugGate?: DebugGate | null;
+  /** 单次历史/事件响应行数上限（默认 200，GALGAME_HISTORY_LIMIT_MAX） */
+  historyLimitMax?: number;
   version: string;
 }
 
@@ -111,6 +121,8 @@ const ConversationBodySchema = z
     clientTurnId: z.string().min(1).max(120),
     userId: z.string().optional(),
     interject: z.string().min(1).optional(),
+    /** #136：玩家沉默时推进一轮 NPC-NPC 自主对话（与 utterance 互斥，由引擎裁决） */
+    auto: z.boolean().optional(),
     utterance: z
       .object({
         id: z.string().min(1).optional(),
@@ -121,6 +133,8 @@ const ConversationBodySchema = z
         action: z.string().max(2000).optional(),
         coverAction: z.string().max(2000).optional(),
         notice: z.string().max(2000).optional(),
+        // #135：关键台词提权（1–5）；docs/03 已登记，schema 漏了会让前端 400
+        salience: z.number().min(1).max(5).optional(),
       })
       .optional(),
   })
@@ -148,6 +162,27 @@ const SSE_HEADERS = {
 
 function schemaError(message: string): GameError {
   return { ok: false, code: "E_SCHEMA_INVALID", message };
+}
+
+/**
+ * 从 EventLog 找 turn.committed 提交证据（issue #76）。
+ * 标记与状态事件同批落盘，是提交事实；坏标记跳过，绝不把未提交回合误判为已提交。
+ */
+async function findCommitEvidence(
+  store: Store,
+  roomId: string,
+  clientTurnId: string,
+  actorId?: string,
+): Promise<TurnCommitEvidence | undefined> {
+  const envs = await store.events(roomId, 0);
+  for (const env of envs) {
+    const evidence = parseCommitEvidence(env);
+    if (!evidence) continue;
+    if (evidence.clientTurnId !== clientTurnId) continue;
+    if (actorId && evidence.actorId !== actorId) continue;
+    return evidence;
+  }
+  return undefined;
 }
 
 /** 管理员鉴权失败超限：429 + Retry-After（不再暴露"这次令牌对不对"） */
@@ -202,7 +237,7 @@ async function safe(reply: FastifyReply, fn: () => Promise<unknown>): Promise<un
     // 内部异常（含绝对路径的 zod 错误等）只进服务端日志，不回给客户端
     console.error("[server] unhandled route error", e);
     if (isStoreFault(e)) {
-      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "存储读写失败，请稍后重试" });
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: storeFaultMessage(e, "存储读写失败，请稍后重试") });
     }
     return reply.code(500).send({ ok: false, code: "E_MODULE_FAULT", message: "服务器内部错误" });
   }
@@ -223,7 +258,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     }
     console.error("[server] unhandled route error", error);
     if (isStoreFault(error)) {
-      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "存储读写失败，请稍后重试" });
+      return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: storeFaultMessage(error, "存储读写失败，请稍后重试") });
     }
     return reply.code(500).send({ ok: false, code: "E_MODULE_FAULT", message: "服务器内部错误" });
   });
@@ -379,6 +414,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (deps.auth.resolve(req)?.role === "admin") return null;
     return { ok: false, code: "E_FORBIDDEN", message };
   };
+  /** 经 adminOnly 放行后再取令牌交给 MapService 二次校验；本身不作为鉴权凭据（#105）。 */
+  const adminToken = (req: FastifyRequest): string => adminTokenOf(req.headers);
 
   app.post("/api/v1/settings/llm", async (req) => {
     const deny = settingsGuard(req);
@@ -455,7 +492,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   });
 
   // 续玩/存档（issue #7）：独立区块，见 resume.routes.ts
-  registerResumeRoutes(app, deps, { userIdOf, isWorldRoom, roomExists });
+  const resumeHelpers = { userIdOf, isWorldRoom, roomExists };
+  registerResumeRoutes(app, deps, resumeHelpers);
+  // 命名槽（issue #98）：docs/03 §5.2.7 已登记，独立区块见 slots.routes.ts
+  registerSlotsRoutes(app, deps, resumeHelpers);
 
   // ---------------------------------------------------------------- dev/v2 微信私信
   if (deps.gossip) {
@@ -521,7 +561,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const host = deps.conversation.host;
     /** roomId → sessionId：进程内映射；会话本体/幂等缓存也在 host 内存里，重启即新会话 */
     const sessions = new Map<string, string>();
-    const MAX_SESSIONS = 256;
+    // 淘汰阈值默认 256；env 仅供单测压低到个位数触发淘汰路径（与 GALGAME_GOSSIP_SCAN_MS 同风格）
+    const configuredMax = Number(process.env.GALGAME_CONVERSATION_MAX_SESSIONS);
+    const MAX_SESSIONS = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 256;
 
     /**
      * 房间级串行（MAJOR-2）：openOrReuse 的 get/open/insert 必须与本轮 host.run 共用一把锁，
@@ -542,16 +584,33 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
 
     const openOrReuse = async (roomId: string, actorId: string, state: WorldState) => {
       const cached = sessions.get(roomId);
-      const session = cached ? host.get(cached) : undefined;
+      let session = cached ? host.get(cached) : undefined;
+      if (!(session && session.roomId === roomId && session.status === "open")) {
+        // #123 P0-C：进程内 Map 在重启后必然为空，但 bootstrap 已把快照恢复进 host。
+        // 这里回退到 host.getByRoom，否则恢复的会话成孤儿、被新 open 的 conv 覆盖。
+        const restored = host.getByRoom(roomId);
+        if (restored && restored.roomId === roomId && restored.status === "open") {
+          session = restored;
+          sessions.set(roomId, restored.id);
+        }
+      }
       if (session && session.roomId === roomId && session.status === "open") {
+        // #104：复用时 participants 以 host 内会话为准（这里不重算/不覆盖），
+        // 后续回合的可见性投影读 host.get(sessionId).participants，而非本函数的入参快照。
         return { sessionId: session.id, opened: undefined as ConversationEvent | undefined };
       }
       const present = [...state.room.scene.presentIds];
       if (!present.includes(actorId)) present.unshift(actorId);
+      // #104：participants 只是 open 时的初始猜测；host.open 内部按快照场景归一人后以 host 内为准。
       const fresh = await host.open({ roomId, participants: present });
       if (sessions.size >= MAX_SESSIONS) {
         const oldest = sessions.keys().next().value;
-        if (oldest) sessions.delete(oldest);
+        if (oldest) {
+          // #104：淘汰映射前先 close 旧 host 会话（标记 closed + 回收幂等缓存），避免会话泄漏。
+          const evictedId = sessions.get(oldest);
+          if (evictedId) host.close(evictedId);
+          sessions.delete(oldest);
+        }
       }
       sessions.set(roomId, fresh.id);
       const opened: ConversationEvent = { type: "conversation.opened", sessionId: fresh.id, participants: [...fresh.participants] };
@@ -568,6 +627,55 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       if (!access) return reply;
       if (actionsPaused(reply)) return reply;
 
+      // #104：与 v1 /turns 共用同一 TurnLedger 计量。按逻辑请求预留，拒绝必须在 SSE 头之前，
+      // 未登录（本地无 auth/无 userId）不结算额度；成功后 committed，失败/提前 EOF 按状态机回收。
+      const userId = access.userId;
+      const turnScope = userId ? { userId, roomId, clientTurnId: body.clientTurnId } : undefined;
+      const ledger = userId ? deps.ledger : undefined;
+      // charged=false：本请求不新增计费（未登录，或 v2 的同 ID 重放命中 host 幂等缓存、无 LLM 调用）
+      let charged = false;
+      // #104：预留与 host.run 共用房间串行锁（MAJOR-2）。v2 并发首回合的多个不同 clientTurnId
+      // 若在锁外 reserve，第二条会被 TurnLedger「同一用户同时只允许一个 running」抢先拒绝；
+      // 而 host 层本就把它们串行执行。放进锁内让第二条等第一条 committed 后再 reserve，
+      // 与 v1 /turns「按实际 LLM 调用计费」口径一致。reserve/settle 都在这把锁内完成。
+      const reserveTurn = async (): Promise<boolean> => {
+        if (!ledger || !userId || !turnScope) return true;
+        const settings = deps.auth?.store.getSettings();
+        const dailyLimit = settings ? dailyLimitFor(settings, userId) : null;
+        const reserved = ledger.reserve({
+          ...turnScope, actorId,
+          dailyLimit, actionsEnabled: settings?.actionsEnabled ?? true,
+        });
+        if (!reserved.ok) {
+          if (reserved.code === "E_PRECONDITION" && reserved.committedSeq !== undefined) {
+            // #123 P1-1：ledger 说 committed 还不够——必须 host 幂等缓存里真有这条提交才算重放。
+            // 快照丢失/崩溃窗口下 host 已无该 key：此时放行会生成新回合并且不计费（P1-1 原 bug），
+            // 因此 fail-closed 返回 409，让客户端换新 clientTurnId 重试。
+            if (host.hasCommittedByRoom(roomId, actorId, body.clientTurnId)) return true;
+            reply.code(409).send({
+              ok: false, code: "E_PRECONDITION",
+              message: "该 clientTurnId 已提交但会话缓存已失效，请使用新的 clientTurnId 重试",
+              committedSeq: reserved.committedSeq,
+            });
+            return false;
+          }
+          const status = reserved.code === "E_RATE_LIMITED" ? 429 : 409;
+          reply.code(status).send({ ok: false, code: reserved.code, message: reserved.message, ...(reserved.committedSeq !== undefined ? { committedSeq: reserved.committedSeq } : {}) });
+          return false;
+        }
+        charged = true;
+        // running 必须先确认落盘再开跑，与 /turns 同口径（磁盘上不能只留 reserved）
+        try {
+          await ledger.transitionDurable(turnScope, "running");
+        } catch {
+          ledger.transition(turnScope, "failed");
+          charged = false;
+          reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "额度账本写入失败，行动未开始，可重试" });
+          return false;
+        }
+        return true;
+      };
+
       const utterance = body.utterance
         ? { ...body.utterance, id: body.utterance.id ?? `utt_${body.clientTurnId}`, speaker: actorId }
         : undefined;
@@ -583,13 +691,16 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         const placeholder = unknownPlaceholders(access.state, deps.appearance).get(utteranceTarget.name);
         utterance.content = unmaskTargetPlaceholder(utterance.content, placeholder, utteranceTarget.name);
       }
-      reply.raw.writeHead(200, SSE_HEADERS);
       let sessionId = "";
       let opened: ConversationEvent | undefined;
       const out: ConversationEvent[] = [];
-      try {
-        // open/insert 与 host.run 在同一房间锁内：并发首回合第二次进来时直接复用已 open 的会话。
-        await serializeTurn(roomId, async () => {
+      let caught: unknown;
+      // 房间锁内：额度预留 → openOrReuse → host.run → 结算，全在同一把锁上。
+      // 拒绝（额度不足/账本写失败）必须在 SSE 头之前返回，故先把锁内阶段的结果带出来。
+      let denied = false;
+      await serializeTurn(roomId, async () => {
+        if (!(await reserveTurn())) { denied = true; return; }
+        try {
           const r = await openOrReuse(roomId, actorId, access.state);
           sessionId = r.sessionId;
           opened = r.opened;
@@ -597,9 +708,50 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
             clientTurnId: body.clientTurnId,
             ...(utterance ? { utterance } : {}),
             ...(body.interject ? { interject: body.interject } : {}),
+            ...(body.auto ? { auto: true } : {}),
             ...(access.userId ? { userId: access.userId } : {}),
           })) out.push(ev);
-        });
+          // #104：结算与事件流同源——只有真的 committed 才记 committed；
+          // conversation.error（含插话/拒绝）按 failed；无 committed 也无 error 的提前结束按 unconfirmed。
+          if (charged && turnScope && ledger) {
+            const commitEv = out.find((e) => e.type === "conversation.committed");
+            const errored = out.some((e) => e.type === "conversation.error");
+            if (commitEv && commitEv.type === "conversation.committed") {
+              // conversation.* 不写 EventLog（无 Envelope seq），用回合号作为 committedSeq 供重放识别；
+              // 重放时 reserve 见到 committedSeq 即放行到 host 幂等缓存，不重复计费。
+              ledger.transition(turnScope, "committed", { committedSeq: commitEv.turn });
+              // #90：回合已提交后把会话快照原子落盘（独立文件，不进 EventLog）。
+              // 快照只是恢复投影，写失败只记日志，不影响已提交的世界真源。
+              const dataDir = deps.conversation?.dataDir;
+              if (dataDir) {
+                try {
+                  await saveSnapshot(sessionSnapshotPath(dataDir, roomId), host.exportSessions(roomId));
+                } catch (e) {
+                  console.warn(`[conversation] 保存房间 ${roomId} 会话快照失败（不影响已提交回合）：`, e instanceof Error ? e.message : e);
+                }
+              }
+            } else if (errored) ledger.transition(turnScope, "failed");
+            else if (body.auto && out.some((e) => e.type === "conversation.notice")) {
+              // 只限 auto 超上限：既没调模型也没写世界，不能按 unconfirmed 占额度。
+              // 审核拦截（blocked）也只回 notice，但那是真实发生过的一次审核调用，维持 unconfirmed 原语义。
+              ledger.transition(turnScope, "failed");
+            } else ledger.transition(turnScope, "unconfirmed");
+          }
+        } catch (e) {
+          // #104：异常路径按失败回收额度（未 committed），与 v1 /turns 的 catch 同口径；重放命中不结算
+          if (charged && turnScope && ledger) ledger.transition(turnScope, "failed");
+          caught = e;
+        }
+      });
+      if (denied) return reply;
+      reply.raw.writeHead(200, SSE_HEADERS);
+      // #106：心跳注释行（SSE comment，前端 parseSsePart 会忽略）。与 gossip SSE 同口径，
+      // 每 15s 写一次 `: ping\n\n`，避免代理/浏览器把长时间无数据的 LLM 流判为死连接。
+      // 前端无需额外超时检测：SSE 的 onUnconfirmed（正常 EOF 未收到 committed/error）已覆盖断流。
+      const heartbeat = setInterval(() => reply.raw.write(": ping\n\n"), 15_000);
+      heartbeat.unref?.();
+      try {
+        if (caught !== undefined) throw caught;
         if (opened) sseWrite(reply.raw, opened.type, opened);
         // 与 /turns 同一口径：收齐后按最终状态脱敏再一次性写出（模型可能把真名写进台词）
         const committed = out.find((e) => e.type === "conversation.committed");
@@ -636,12 +788,19 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         const visible = projectConversationEvents(out, actorId, members, deps.registry);
         for (const ev of visible) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, placeholders));
       } catch (e) {
+        const roomSyncFault = isRoomSyncFault(e);
+        // #104：异常路径按失败回收额度（未 committed），与 v1 /turns 的 catch 同口径；重放命中不结算
+        // #117：日志可能已替换（StoreCommitUnknownError）时记 unconfirmed；房间只是被冻结则按 failed 释放
+        const uncertain = e instanceof StoreCommitUnknownError;
+        if (charged && turnScope && ledger) ledger.transition(turnScope, uncertain ? "unconfirmed" : "failed");
         const err: ConversationEvent = {
-          type: "conversation.error", sessionId, code: "E_MODULE_FAULT",
+          type: "conversation.error", sessionId, code: roomSyncFault ? "E_STORE_FAULT" : "E_MODULE_FAULT",
           message: e instanceof Error ? e.message : String(e),
+          ...(roomSyncFault ? { retryable: false } : {}),
         };
         sseWrite(reply.raw, err.type, err);
       } finally {
+        clearInterval(heartbeat);
         reply.raw.end();
       }
     };
@@ -709,7 +868,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!access) return reply;
     // 原始快照里带着实体真名：未认识的人必须在这里也脱敏，否则"服务端不下发真名"
     // 只是口号——新建房间就能从 /state 看光所有 NPC（审阅 P0-1）。
-    return maskNamesDeep(access.state, unknownPlaceholders(access.state, deps.appearance));
+    // plot 的 GM 字段（forbidReveal/leakPoints/goal…）不能随 /state 下发（PR #147 审阅 P0）
+    return maskNamesDeep(projectStateForPlayer(access.state), unknownPlaceholders(access.state, deps.appearance));
   });
 
   app.get("/api/v1/rooms/:roomId/events", async (req, reply) => {
@@ -720,7 +880,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf, viewer ? { actorId: viewer } : {});
     if (!access) return reply;
     const from = Number(q.fromSeq ?? 0);
-    const limit = Math.min(Number(q.limit ?? 200), 200);
+    const limit = clampLimit(q.limit, deps.historyLimitMax ?? 200);
     const allEvents = await deps.store.events(roomId, from, limit);
     // dev/v2：msg.sent 带 audience，玩家非收发双方连历史事件都不能读（十审 P1）
     const events = allEvents.filter((e) => {
@@ -729,8 +889,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       return e.audience.includes(viewer);
     });
     // 历史回放同样脱敏：旧回合的叙事里可能带着尚未认识的人的真名
-    const placeholders = unknownPlaceholders(await deps.store.snapshot(roomId), deps.appearance);
-    return { events: maskNamesDeep(events, placeholders), lastSeq: events.length ? events[events.length - 1]!.seq : from };
+    const snapshot = await deps.store.snapshot(roomId);
+    const placeholders = unknownPlaceholders(snapshot, deps.appearance);
+    // 秘密裁剪（PR #147 审阅 P0）：plot 事件剥 GM 字段，私忆只留 public 与玩家本人；
+    // viewer 取服务端解析的玩家身份，不信任 query 里的 actorId。
+    const visible = projectEventsForPlayer(events, playerOf(snapshot, access.userId));
+    return { events: maskNamesDeep(visible, placeholders), lastSeq: visible.length ? visible[visible.length - 1]!.seq : from };
   });
 
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */
@@ -881,12 +1045,21 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         console.warn(`[names] 回合已提交，但脱敏快照失败，改用回合开始前快照：${roomId}`, e);
         placeholders = unknownPlaceholders(snapshotForInput, deps.appearance);
       }
-      for (const ev of events) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, placeholders));
+      // turn.patch.state 也带 plots，必须和 /state 同口径剥秘密（PR #147 审阅 P0）
+      for (const ev of events) sseWrite(reply.raw, ev.type, maskNamesDeep(projectTurnEventForPlayer(ev), placeholders));
     } catch (e) {
       errored = true;
       // 收到 turn.commit 后才会走到这里的旁路异常：账本保持 committed，也不给客户端可重试信号
-      if (!committed && turnScope) ledger?.transition(turnScope, "failed");
-      sseWrite(reply.raw, "turn.error", { type: "turn.error", code: "E_UPSTREAM", message: String(e), retryable: !committed });
+      const roomSyncFault = isRoomSyncFault(e);
+      if (!committed && turnScope) {
+        ledger?.transition(turnScope, e instanceof StoreCommitUnknownError ? "unconfirmed" : "failed");
+      }
+      sseWrite(reply.raw, "turn.error", {
+        type: "turn.error",
+        code: roomSyncFault ? "E_STORE_FAULT" : "E_UPSTREAM",
+        message: roomSyncFault ? e.message : String(e),
+        retryable: !committed && !roomSyncFault,
+      });
     } finally {
       reply.raw.end();
     }
@@ -909,17 +1082,48 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const needsHistoryIdentity = entry.state === "committed" && !entry.turnId;
     let recoveredTurn: { turnId: string; committedSeq: number } | undefined;
     // 历史按账号、角色和逻辑 ID 匹配。人工结案已提交但缺 turnId 时，仅补充查询响应。
-    if (scope && deps.history && (needsReconciliation || needsHistoryIdentity)) {
-      const line = (await deps.history.readAll(roomId)).find(
-        (l) => l.clientTurnId === clientTurnId && l.userId === userId && l.actorId === entry.actorId,
-      );
-      if (line && needsHistoryIdentity) {
-        recoveredTurn = { turnId: line.turnId, committedSeq: line.committedSeq };
-      } else if (line) {
-        const reconciled = await deps.ledger?.reconcileCommitted(scope, { turnId: line.turnId, committedSeq: line.committedSeq });
-        // 账本写失败不能伪装成"结果待核对"：玩家/运维需要区分存储故障与真的未决
-        if (reconciled && !reconciled.ok && reconciled.code === "E_STORE_FAULT") {
-          return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: reconciled.message });
+    if (scope && (needsReconciliation || needsHistoryIdentity)) {
+      // 先查 EventLog 的 turn.committed 标记（issue #76）：它与状态事件同批落盘，
+      // 即使进程在历史写入前被杀也能证明提交，避免 unconfirmed 永久卡住。
+      const evidence = deps.store ? await findCommitEvidence(deps.store, roomId, clientTurnId, entry.actorId) : undefined;
+      if (evidence) {
+        // 房间日志已提交但历史/续玩索引在崩溃时没写：用标记里的内容补历史行。
+        const exists = deps.history
+          ? (await deps.history.readAll(roomId)).some(
+              (l) => l.turnId === evidence.turnId && l.actorId === evidence.actorId,
+            )
+          : true;
+        if (!exists && deps.history) {
+          const line = {
+            formatVersion: 1 as const, roomId,
+            turnId: evidence.turnId, committedSeq: evidence.committedSeq,
+            actorId: evidence.actorId,
+            ...(userId ? { userId } : {}),
+            clientTurnId: evidence.clientTurnId,
+            input: "", narrative: evidence.narrative ?? "",
+            speakers: [], facts: evidence.facts ?? [], createdAt: Date.now(),
+          };
+          await deps.history.append(line);
+        }
+        recoveredTurn = { turnId: evidence.turnId, committedSeq: evidence.committedSeq };
+        if (needsReconciliation && scope && deps.ledger) {
+          const reconciled = await deps.ledger.reconcileCommitted(scope, recoveredTurn);
+          // 账本写失败不能伪装成"结果待核对"：玩家/运维需要区分存储故障与真的未决
+          if (!reconciled.ok && reconciled.code === "E_STORE_FAULT") {
+            return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: reconciled.message });
+          }
+        }
+      } else if (deps.history) {
+        const line = (await deps.history.readAll(roomId)).find(
+          (l) => l.clientTurnId === clientTurnId && l.userId === userId && l.actorId === entry.actorId,
+        );
+        if (line && needsHistoryIdentity) {
+          recoveredTurn = { turnId: line.turnId, committedSeq: line.committedSeq };
+        } else if (line) {
+          const reconciled = await deps.ledger?.reconcileCommitted(scope, { turnId: line.turnId, committedSeq: line.committedSeq });
+          if (reconciled && !reconciled.ok && reconciled.code === "E_STORE_FAULT") {
+            return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: reconciled.message });
+          }
         }
       }
     }
@@ -948,8 +1152,15 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!verdict.ok) return reply.code(403).send({ ok: false, code: "E_FORBIDDEN", message: "需要管理员令牌" });
     const body = (req.body ?? {}) as { memoryId?: string; reason?: string };
     if (!body.memoryId) return reply.code(400).send({ ok: false, code: "E_SCHEMA_INVALID", message: "memoryId 必填" });
-    const done = await deps.canonize.tombstone(body.memoryId, body.reason ?? "管理员撤回");
-    if (done) return { ok: true };
+    const port = deps.canonize;
+    const outcome = port.tombstoneWithReason
+      ? await port.tombstoneWithReason(body.memoryId, body.reason ?? "管理员撤回")
+      : { ok: await port.tombstone(body.memoryId, body.reason ?? "管理员撤回") };
+    if (outcome.ok) return { ok: true };
+    // 并发冲突 ≠ 不可变：世界层正被别的任务写入时，同一个请求重试就能成功（PR #149 P2-4）
+    if (outcome.code === "E_SEQ_GAP") {
+      return reply.code(503).send({ ok: false, code: "E_SEQ_GAP", message: "世界记忆正在被其他任务写入，请稍后重试", retryable: true });
+    }
     // 撤回失败的真实原因从世界层记忆状态推：不存在 = 404 语义，已撤回 = 不可变
     // 存在性用记忆索引判（sample(200) 在世界层 >200 条时会误判 404，审阅 P2-⑤）
     const hit = deps.memory.get?.(body.memoryId);
@@ -1009,7 +1220,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    return safe(reply, () => deps.map.tick(roomId, parsed.data));
+    // viewer：出站事件按调用者自己的视角裁私忆（PR #149 P3）；未登录时由 MapService 回退到玩家角色
+    const viewer = access.userId ? playerOf(access.state, access.userId) : undefined;
+    return safe(reply, () => deps.map.tick(roomId, { ...parsed.data, ...(viewer ? { viewer } : {}) }));
   });
 
   app.post("/api/v1/rooms/:roomId/map/dialogue", async (req, reply) => {
@@ -1031,28 +1244,41 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     return safe(reply, () => deps.map.createDraft(req.body));
   });
 
-  app.get("/api/v1/map/drafts", (req, reply) => safe(reply, () => deps.map.listDrafts(adminTokenOf(req.headers))));
+  // #105：所有草案端点统一走 AdminTokenGate（sha256+timingSafeEqual+10次/60s 限流），
+  // 不再直接用原始令牌绕过 tokenEquals/限流。adminOnly 内部即 adminVerdict(req)，
+  // 与登录门/CSRF/room-guard/admin.routes 共用同一请求级判定缓存。
+  app.get("/api/v1/map/drafts", (req, reply) => {
+    const deny = adminOnly(req, "地图草案暂仅管理员可用");
+    if (deny) return reply.code(deny.code === "E_RATE_LIMITED" ? 429 : 200).send(deny);
+    return safe(reply, () => deps.map.listDrafts(adminToken(req)));
+  });
 
   app.get("/api/v1/map/drafts/:id", (req, reply) => {
     const deny = adminOnly(req, "地图草案暂仅管理员可用");
-    if (deny) return deny;
+    if (deny) return reply.code(deny.code === "E_RATE_LIMITED" ? 429 : 200).send(deny);
     const { id } = req.params as { id: string };
     return safe(reply, () => deps.map.getDraft(id));
   });
 
   app.post("/api/v1/admin/map/drafts/:id/review", (req, reply) => {
+    const deny = adminOnly(req, "地图草案暂仅管理员可用");
+    if (deny) return reply.code(deny.code === "E_RATE_LIMITED" ? 429 : 200).send(deny);
     const { id } = req.params as { id: string };
-    return safe(reply, () => deps.map.reviewDraft(id, adminTokenOf(req.headers), req.body));
+    return safe(reply, () => deps.map.reviewDraft(id, adminToken(req), req.body));
   });
 
   app.post("/api/v1/admin/map/drafts/:id/publish", (req, reply) => {
+    const deny = adminOnly(req, "地图草案暂仅管理员可用");
+    if (deny) return reply.code(deny.code === "E_RATE_LIMITED" ? 429 : 200).send(deny);
     const { id } = req.params as { id: string };
-    return safe(reply, () => deps.map.publishDraft(id, adminTokenOf(req.headers), req.body));
+    return safe(reply, () => deps.map.publishDraft(id, adminToken(req), req.body));
   });
 
   app.post("/api/v1/admin/map/drafts/:id/generate", (req, reply) => {
+    const deny = adminOnly(req, "地图草案暂仅管理员可用");
+    if (deny) return reply.code(deny.code === "E_RATE_LIMITED" ? 429 : 200).send(deny);
     const { id } = req.params as { id: string };
-    return safe(reply, () => deps.map.retryGenerate(id, adminTokenOf(req.headers)));
+    return safe(reply, () => deps.map.retryGenerate(id, adminToken(req)));
   });
 
   // ---------------------------------------------------------------- 图鉴 / 开局剧本（docs/03 §5.2.5、§5.2.6）

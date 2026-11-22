@@ -49,6 +49,23 @@ describe("makeTurnHandlers（版本隔离 + 结局分流）", () => {
     expect(written.filter((w) => w.startsWith("err:"))).toHaveLength(1);
   });
 
+  it("结果待核对的存储错误展示核对提示，不显示重试按钮", () => {
+    const { deps, written } = setup(true);
+    deps.setErrRetryable = (value) => written.push(`retryable:${value}`);
+    makeTurnHandlers(deps).onError?.("E_STORE_FAULT", "pending", false);
+    expect(written).toContain("retryable:false");
+    expect(written.find((value) => value.startsWith("err:"))).toContain("核对");
+    expect(written.find((value) => value.startsWith("err:"))).not.toContain("重试");
+  });
+
+  it("保留 HTTP 存储错误的核对提示", () => {
+    const { deps, written } = setup(true);
+    deps.setErrRetryable = (value) => written.push(`retryable:${value}`);
+    const message = "该房间有待核对的写入，请先核对存档。";
+    makeTurnHandlers(deps).onError?.("E_STORE_FAULT", message);
+    expect(written).toEqual([`err:${message}`, "retryable:false"]);
+  });
+
   it("E_UNAUTHORIZED 走会话失效，不显示普通错误", () => {
     const { deps, written } = setup(true);
     makeTurnHandlers(deps).onError?.("E_UNAUTHORIZED", "未登录");

@@ -12,6 +12,7 @@
     "dev:web": "vite --config apps/web/vite.config.ts apps/web",
     "build:web": "vite build --config apps/web/vite.config.ts apps/web",
     "check:contract": "tsx scripts/check-contract.ts",
+    "deploy:smoke": "tsx scripts/deploy-smoke.ts",
     "replay": "tsx scripts/replay.ts"
   },
   "devDependencies": {

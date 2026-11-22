@@ -18,10 +18,14 @@ const FRIENDLY: Record<string, string> = {
   E_TURN_BUSY: "上一回合还没结束，稍等你再试。",
 };
 
-export function explainTurnError(code: string, message?: string): string {
+export function explainTurnError(code: string, message?: string, retryable?: boolean): string {
+  const detail = (message ?? "").trim();
+  if (code === "E_STORE_FAULT" && retryable !== true) {
+    if (retryable === false) return "请先核对房间存档结果。";
+    return detail || "暂时无法读取或写入存档。";
+  }
   const hint = FRIENDLY[code];
   if (hint) return hint;
-  const detail = (message ?? "").trim();
   return detail ? `${code}: ${detail}` : code || "回合失败";
 }
 
@@ -44,4 +48,18 @@ export function isRetryableTurnError(code: string, retryable?: boolean): boolean
  */
 export function shouldDropRetryOnMove(prevLocId: string, nextLocId: string): boolean {
   return Boolean(prevLocId) && Boolean(nextLocId) && prevLocId !== nextLocId;
+}
+
+/**
+ * v2「重试」提交参数（PR #149 P2-7）：blocked 的 auto 回合没有玩家输入，
+ * 但必须带上 auto 标记才能走真正的自主轮，否则空输入会被 dispatch 的守卫直接吃掉。
+ */
+export interface RetrySubmission {
+  text: string;
+  auto: boolean;
+}
+
+export function retrySubmission(last: { text: string; auto?: boolean } | null): RetrySubmission | null {
+  if (!last) return null;
+  return { text: last.text, auto: last.auto === true };
 }

@@ -91,20 +91,29 @@ interface RoomMember {
 | `clock.advanced` | 全场 | 全量 |
 | `scene.changed` | 全场 | 只发 `locationId` + 在场者 |
 | `actor.moved` | 全场 | 非在场者只发"离开了房间"粗粒度 |
-| `turn.committed` | 全场 | `{turnId, seq, actorId}` |
+| `turn.committed` | 不广播（EventLog 记账） | payload `{clientTurnId, turnId, actorId, committedSeq, narrative?, facts?, usage?}`（`packages/engine/src/turn.evidence.ts:25-33`）；`content/registry/events.json` 登记 `broadcast:false`，只进 EventLog 供存档/统计/跨重启幂等与服务器时段计数，**不作为 SSE 事件下发客户端** |
 | `room.member.joined` / `room.member.left` | 全场 | 全量 |
 | `entity.created` / `entity.tombstoned` | 全场 | 只发 `{id, kind, name}`，`attrs` 待拉取 |
-| `plot.upserted` / `plot.resolved` | 全场 | **剥掉** `leakPoints`/`forbidReveal`/`goal`，只留 `plotId`+标题级摘要 |
+| `plot.upserted` / `plot.resolved` | 全场 | **剥掉** `leakPoints`/`forbidReveal`/`goal`/`guard`/`leverage`/`risk`（`SECRET_PLOT_KEYS`），只留 `id`/`actors`/`status`/`tone`/`createdDay` |
 | `npc.spoke`（`visibility:"scene"`） | 参与者 | 会话参与者 + 该 `locationId` 在场者；不在场者收不到，靠后续叙事"听说…" |
 | `npc.spoke`（`visibility:"private"`） | 参与者 | 仅 `participants`；密谋走这条，旁观者与联机队友都收不到 |
 | `attr.changed`（`visibility:"private"`） | 参与者 | 该实体 owner + 有 observe 权限者；如 `guard` 默认不广播，只推"可疑细节" |
 | `link.created` / `link.removed`（`kind:"secret"`） | 参与者 | 仅两端实体；玩家间"欠人情"不广播 |
 | `memory.written` | 不广播 | 服务端内部事件；仅当影响 `guard.changed` 时对外推表现 |
-| `turn.*` 全部 / `state.sync` | 仅自己 | 回合是提交者私有的流，他人只看到 `turn.committed` + 广播事件；`state.sync` 每连接一次，payload 按 `actorId` 裁切成 `View` |
+| `turn.*` 全部 / `state.sync` | 仅自己 | 回合是提交者私有的流，他人只看到广播事件；`turn.committed` 只在服务端 EventLog 记账（§3.1 服务器据此计数推进时段），不下发给客户端；`state.sync` 每连接一次，payload 按 `actorId` 裁切成 `View` |
 | `turn.ui` / `plot.ping` | 仅自己 | 选项/面板给"当前行动者"；"夜里似乎有人说话…"只推给触发者 |
 | `presence.update` | 仅自己 | 房主收完整成员表，普通成员只收"人数变化" |
 
 > **实现约束**：可见性在 `Router` 层用纯函数 `visibleTo(env, actorId, room): boolean` 计算，`Transport` 拿到的是**已裁切**的 Envelope。禁止把全量 Envelope 交给 Transport 再由客户端过滤（§5.4）。
+
+> **HTTP 轮询出口同样要裁（PR #147 审阅 P0）**：`visibleTo` 只管"发不发"，管不了"发出去的 payload 里还有什么"。`plot.upserted` 的 payload 是整条 `Plot`（含 `forbidReveal`/`leakPoints`/`goal`），`memory.written` 的 `visibility` 字段在 payload 里——所以 `GET /state`、`GET /events`、`POST /map/tick` 的响应和 v1 `turn.patch` 的 `state` 都必须过一遍 `apps/server/src/outbound-secrets.ts`：
+> - `projectEventsForPlayer(events, viewer)`：`plot.upserted` → `stripPlotSecrets(plot)`（引擎 `packages/engine/src/v2/conversation.view.ts` 同一实现，前后端一套规则）；`memory.written` 只有 `visibility==="public"` 或 `ownerId===viewer` 才留，其余整条消失（不是脱敏，是"这条不存在"）。
+> - `projectStateForPlayer(state)`：`state.plots` 逐条剥。
+> - `playerOf(state)`：服务端自己解析玩家实体（`role==="player"` → `kind==="plr"`），不信 query/header 里的 viewer。
+> - `projectTurnEventForPlayer(ev)`：v1 `TurnEvent` 不是 Envelope，单独入口；`turn.patch` 的 `state` 剥 plot 秘密、`ops` 复用 dev/v2 的 `projectProposals`（非 public 的 `memory.write` 整条丢弃，`plot.upsert` 剥 GM args）。`/map/travel` 返回的 Turn 事件也走同一入口（travel 的 `events` 里有 `turn.patch`，只遮人名不够）。
+> - `memory.tombstoned`：payload 里的 `reason` 是**被撤回记忆的正文**（`arbiter.ops.ts` 把 `memory.write(status:"tombstoned").content` 塞进 reason），玩家侧只留 `memoryId`/`supersedes`，正文一律不下发。
+> - viewer 按**登录账号绑定**解析（`playerOf(state, userId)`）：`/events` 与 `/map/tick` 都用调用者本人，联机房不会把 1 号玩家的私忆发给别人。
+> - 回归证据：`apps/server/src/plot-night.route.test.ts` 直接断言 `POST /map/tick`、`GET /state`、`GET /events`、`POST /map/travel`、`POST /turns` 的**响应体**里不出现 `forbidReveal`/`leakPoints`/秘密原文与私忆；`turn.patch.ops` 逐条断言（`memory.write` 只能 public、`plot.upsert` 无 GM args）；撤回事件断言 `reason === undefined`。
 
 ### 3.3 断线续传（`Last-Event-ID`）
 
@@ -245,7 +254,7 @@ sequenceDiagram
 | 点 | 策略 |
 |---|---|
 | 判定与隐藏值 | 所有随机判定在服务端（seeded，可回放），客户端不参与；`guard`/`affinity` 不直接下发数字，`View.panel` 只给形容词档位（"平静/不安/警惕"） |
-| 密谋内容 | `plot.upserted` 广播时**剥掉** `leakPoints`/`forbidReveal`/`goal`，只留 `title` 与 `status` |
+| 密谋内容 | `plot.upserted` 广播时**剥掉** `leakPoints`/`forbidReveal`/`goal`，只留 `id`/`actors`/`status` |
 | 回放 | 客户端**不提供** `Store.events` 的任意 `from` 读取（否则能拉全量日志推导密谋）；只允许 `fromSeq >= joinedSeq` 且仅补发"当时对你有权"的事件（历史裁切按事件发生时刻的 `__audience` 固化） |
 | 旁观者 | `role:"spectator"` 只订阅 §3.2 A 类事件 + 当前场景的叙事摘要，**不进入任何 `Dialogue` 的 `participants`**，不占 `maxActors` |
 

@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { mkdir } from "node:fs/promises";
+import path from "node:path";
 import Fastify from "fastify";
 import { tempDir } from "@galgame/testkit";
 import { createApp } from "./bootstrap.ts";
@@ -206,6 +207,38 @@ describe("行动核对端点", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ ok: true, state: "committed" });
     expect(deps.ledger.get("c1")?.state).toBe("committed");
+    await app.close();
+  });
+
+  it("半提交（房间日志已落、历史未写）后待核对 → 核对端点用 EventLog 证据补历史并结案（#76）", async () => {
+    const { app, deps, cookie, roomId, actorId } = await setup();
+    const first = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/turns`,
+      headers: { cookie, ...ORIGIN },
+      payload: { actorId, input: "你好", clientTurnId: "c1" },
+    });
+    expect(first.statusCode).toBe(200);
+    const marker = (await deps.store.events(roomId, 0)).find((e) => e.type === "turn.committed")!;
+    const committedSeq = marker.seq;
+
+    // 模拟崩溃点：额度卡在 unconfirmed、历史文件被抹空（历史写入前被杀）。
+    // 用全新的 TurnHistory 实例模拟重启——同进程实例的 known 缓存会误以为历史已写过。
+    deps.ledger.transition("c1", "unconfirmed");
+    const { writeFile } = await import("node:fs/promises");
+    const { TurnHistory } = await import("./turn-history.ts");
+    const oldDir = path.dirname(deps.history!.fileFor(roomId));
+    await writeFile(path.join(oldDir, `${roomId}.history.jsonl`), "", "utf8");
+    deps.history = new TurnHistory(oldDir);
+    expect((await deps.history!.readAll(roomId)).length).toBe(0);
+
+    const res = await app.inject({ method: "GET", url: `/api/v1/rooms/${roomId}/turns/c1`, headers: { cookie } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, state: "committed", committedSeq });
+    expect(deps.ledger.get("c1")?.state).toBe("committed");
+    // 历史被证据补齐，且只有一条（不重复）
+    const lines = await deps.history!.readAll(roomId);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.committedSeq).toBe(committedSeq);
     await app.close();
   });
 

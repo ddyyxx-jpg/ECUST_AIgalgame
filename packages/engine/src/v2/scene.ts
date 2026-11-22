@@ -1,19 +1,22 @@
 /**
  * 场景 agent（dev/v2）：开场广播一次 → 下线；被显式 @多人 / 换地点 唤醒 → 产出群像总结。
  * 总结不进世界状态，作为**半常驻特权注入**（S1.5 之后、forced、按 id 排序）进入 NPC 上下文。
+ * 每轮还会注入「当前场景」标题 + 静态说明（#134）：地点没变时前缀稳定，保住提示词缓存。
  * 这里只定义端口与编排；真正的"怎么写场景"由注入的 SceneAgentPort 决定（通常是另一个 LLM 调用）。
  */
 import type { Id, SceneBeat, SceneMemory, Utterance } from "../../../shared/src/index.ts";
 
 export interface SceneAgentPort {
-  /** 开场：描述当前地点与在场者 */
-  describe(input: { roomId: Id; locName?: string; present: readonly Id[] }): Promise<string>;
+  /** 开场/换地点：描述当前地点与在场者（入参带 locId，便于服务端按 id 查静态说明） */
+  describe(input: { roomId: Id; locId?: Id; locName?: string; present: readonly Id[] }): Promise<string>;
   /** 唤醒：总结群像场景 */
   summarize(input: {
     roomId: Id;
     trigger: "multi" | "location";
     recent: readonly string[];
     previous?: string;
+    locId?: Id;
+    locName?: string;
   }): Promise<string>;
 }
 
@@ -33,27 +36,43 @@ export function shouldWake(input: WakeInput): "multi" | "location" | null {
   return null;
 }
 
+export interface SceneLocation {
+  locId?: Id;
+  locName?: string;
+}
+
 export class SceneManager {
   private readonly beats = new Map<Id, SceneBeat[]>();
   private readonly memories = new Map<Id, SceneMemory>();
+  /** 当前地点与静态说明：换地点时由 describe 刷新 */
+  private readonly current = new Map<Id, { loc: SceneLocation; text: string }>();
 
   constructor(
     private readonly agent: SceneAgentPort,
     private readonly now: () => number = Date.now,
   ) {}
 
-  async open(sessionId: Id, roomId: Id, locName: string | undefined, present: readonly Id[], locId?: Id): Promise<SceneBeat> {
-    const text = (await this.agent.describe({ roomId, locName, present })).trim();
+  async open(sessionId: Id, roomId: Id, loc: SceneLocation, present: readonly Id[]): Promise<SceneBeat> {
+    const text = (await this.agent.describe({ roomId, locId: loc.locId, locName: loc.locName, present })).trim();
     const beat: SceneBeat = {
       id: `scene_${sessionId}_0`,
       kind: "opening",
       roomId,
-      ...(locId ? { locId } : {}),
+      ...(loc.locId ? { locId: loc.locId } : {}),
       text,
       createdAt: this.now(),
       order: "before",
     };
     this.beats.set(sessionId, [beat]);
+    this.current.set(sessionId, { loc, text });
+    // #134：开场也写 memories，render() 才有内容可注入（以前只 push beats → 开场永进不了提示词）
+    this.memories.set(sessionId, {
+      id: beat.id,
+      roomId,
+      origin: "scene",
+      text,
+      createdAt: beat.createdAt,
+    });
     return beat;
   }
 
@@ -67,16 +86,22 @@ export class SceneManager {
     roomId: Id,
     trigger: "multi" | "location",
     recent: readonly string[],
-    locId?: Id,
+    loc?: SceneLocation,
   ): Promise<SceneBeat> {
     const previous = this.memories.get(sessionId)?.text;
-    const text = (await this.agent.summarize({ roomId, trigger, recent, previous })).trim();
+    if (trigger === "location" && loc) {
+      const text = (await this.agent.describe({ roomId, locId: loc.locId, locName: loc.locName, present: [] })).trim();
+      this.current.set(sessionId, { loc, text });
+    }
+    const text = (
+      await this.agent.summarize({ roomId, trigger, recent, previous, locId: loc?.locId, locName: loc?.locName })
+    ).trim();
     const list = this.beats.get(sessionId) ?? [];
     const beat: SceneBeat = {
       id: `scene_${sessionId}_${list.length}`,
       kind: "summary",
       roomId,
-      ...(locId ? { locId } : {}),
+      ...(loc?.locId ? { locId: loc.locId } : {}),
       text,
       createdAt: this.now(),
       order: trigger === "location" ? "before" : "after",
@@ -92,6 +117,11 @@ export class SceneManager {
     return beat;
   }
 
+  /** 当前地点（供 step 判断换地点 / 渲染场景标题） */
+  location(sessionId: Id): SceneLocation | undefined {
+    return this.current.get(sessionId)?.loc;
+  }
+
   memory(sessionId: Id): SceneMemory | undefined {
     return this.memories.get(sessionId);
   }
@@ -101,13 +131,26 @@ export class SceneManager {
   }
 
   /**
-   * 半常驻注入文本：标题 + 按 id 排序的条目（逐字节稳定，保住提示词缓存前缀）。
-   * 只返回最新一条 summary（旧的被取代），没有则空串。
+   * 每轮注入文本：
+   * 【当前场景】图书馆（loc_library）
+   * <静态说明>
+   * 【场景·群像】（scene_x_2）
+   * <最新 summary；没有就用开场>
+   * 地点不变时整段逐字节稳定，保住提示词缓存前缀。
    */
   render(sessionId: Id): string {
+    const parts: string[] = [];
+    const cur = this.current.get(sessionId);
     const mem = this.memories.get(sessionId);
-    if (!mem) return "";
-    return [`【场景·群像】（${mem.id}）`, mem.text].join("\n");
+    const loc = cur?.loc ?? {};
+    if (loc.locName || loc.locId) {
+      const tag = loc.locId ? `${loc.locName ?? ""}（${loc.locId}）` : (loc.locName ?? "");
+      parts.push(`【当前场景】${tag}`.replace(/（）/g, ""));
+    }
+    // 开场时 current.text 与 memories.text 是同一段：只保留一次（审阅 P2）
+    if (cur?.text && cur.text !== mem?.text) parts.push(cur.text);
+    if (mem) parts.push(`【场景·群像】（${mem.id}）`, mem.text);
+    return parts.join("\n");
   }
 }
 

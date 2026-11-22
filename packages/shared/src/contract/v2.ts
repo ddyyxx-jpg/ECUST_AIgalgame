@@ -27,6 +27,8 @@ export interface Utterance {
   /** 低信息动作（非目标视角；缺省由 mode.actionVocab 生成） */
   coverAction?: string;
   notice?: string;
+  /** 可选：给这句台词写记忆时的显著度（1–5，缺省由引擎给 3）；关键线索靠它提权 */
+  salience?: number;
 }
 
 /** 模式定义（数据在 content/v2/utterance-modes.json，引擎只写通用解释器） */
@@ -60,6 +62,8 @@ export interface Delivery {
   speaker: ActorId;
   utteranceId: Id;
   mode: string;
+  /** 这次投递语义上的目标（收到者为目标本人时等于 to）：旁听行据此渲染「你是旁听」 */
+  target?: ActorId;
   channels: Channel[];
   content?: string;
   action?: string;
@@ -128,6 +132,8 @@ export interface ConversationSessionV2 {
   listenSince?: number;
   /** 最近一次观察到的地点（换地点唤醒用，会话内维护） */
   lastLocId?: Id;
+  /** 玩家本段沉默期已自动推进的 NPC-NPC 轮数（#136；玩家说话后清零） */
+  autoRounds?: number;
   visibility: "private" | "scene" | "public";
 }
 
@@ -138,6 +144,8 @@ export interface ConversationPolicy {
   npcHardCap: number;
   /** 纯 NPC 会话的总轮次上限 */
   maxTurns: number;
+  /** 玩家沉默时，一次 idle 推进最多允许的 NPC-NPC 自主轮数（#136） */
+  maxAutoRounds: number;
   /** 玩家点插话后迟迟不说话的自动恢复毫秒数 */
   listenTimeoutMs: number;
   /** 模型漏写 mode 时的兜底：从模式数据里按 id 取，取不到就 fail-closed（沉默） */
@@ -152,7 +160,15 @@ export interface ConversationPolicy {
   maxThought: number;
   maxPlan: number;
   /** 模型调用参数（数据化，避免引擎硬编码） */
-  llm: { temperature: number; maxTokens: number };
+  llm: {
+    temperature: number;
+    /** 说话决策的输出上限 */
+    maxTokens: number;
+    /** 只做心理活动时的输出上限（think 比 speak 短） */
+    thinkMaxTokens: number;
+    /** 被 finish_reason=length 截断后重试一次的输出上限 */
+    retryMaxTokens: number;
+  };
   /** 异步自主对话/微信的节流参数；引擎在调 LLM 之前消费 */
   autonomy: {
     minReplyIntervalMs: number;
@@ -179,12 +195,14 @@ export interface ConversationPolicy {
     storeUnavailable: string;
     memoryRejected: string;
     storeFlushFailed: string;
+    autoLimit: string;
   };
 }
 
 export const DEFAULT_CONVERSATION_POLICY: ConversationPolicy = {
   npcHardCap: 6,
   maxTurns: 40,
+  maxAutoRounds: 3,
   listenTimeoutMs: 30_000,
   autonomousWhenPlayerAbsent: true,
   defaultMode: "broadcast",
@@ -194,7 +212,7 @@ export const DEFAULT_CONVERSATION_POLICY: ConversationPolicy = {
   maxAction: 120,
   maxThought: 300,
   maxPlan: 200,
-  llm: { temperature: 0.7, maxTokens: 600 },
+  llm: { temperature: 0.7, maxTokens: 600, thinkMaxTokens: 400, retryMaxTokens: 1600 },
   autonomy: {
     minReplyIntervalMs: 30_000,
     maxMessagesPerNpcPerHour: 12,
@@ -219,8 +237,26 @@ export const DEFAULT_CONVERSATION_POLICY: ConversationPolicy = {
     storeUnavailable: "storage unavailable; safe to retry",
     memoryRejected: "memory write rejected; utterance was not stored",
     storeFlushFailed: "store.flush failed",
+    autoLimit: "auto rounds exhausted; waiting for player",
   },
 };
+
+/**
+ * 单个 NPC 本轮的处置结果（#132 可观测性）：为什么没说话一眼可见。
+ * 只含结构化字段，不含台词/心理正文。
+ */
+export interface NpcOutcome {
+  npcId: ActorId;
+  /** 最终落库的决策类型 */
+  kind: "speak" | "think" | "silent";
+  /** silent 时的结构化原因：budget / truncated / invalid / unavailable / hard-cap / listening */
+  reason?: string;
+  /** LLM 的 finish_reason（length 表示被截断） */
+  finishReason?: string;
+  latencyMs?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+}
 
 /** NPC 单次独立 LLM 的输出：说话 / 心理活动 / 沉默（三者互斥） */
 export type NpcDecision =
@@ -242,6 +278,11 @@ export interface ConversationTurnInput {
   utterance?: Utterance;
   /** 玩家点插话：切换 phase 到 listening */
   interject?: ActorId;
+  /**
+   * 自动推进：玩家沉默时由 server tick 调用，只跑 NPC-NPC 轮次。
+   * 与 utterance 互斥；interject 优先。
+   */
+  auto?: boolean;
   clientTurnId: string;
   userId?: Id;
 }
@@ -253,8 +294,17 @@ export type ConversationEvent =
   | { type: "conversation.mental"; actorId: ActorId; mental: MentalActivity }
   | { type: "conversation.scene"; beat: SceneBeat }
   | { type: "conversation.phase"; sessionId: Id; phase: ConversationPhase }
-  | { type: "conversation.notice"; text: string; facts?: string[] }
-  | { type: "conversation.committed"; sessionId: Id; turn: number; proposals: Proposal[]; usage?: Usage; state: WorldState }
+  | { type: "conversation.notice"; text: string; facts?: string[]; reason?: "autoLimit" }
+  | {
+      type: "conversation.committed";
+      sessionId: Id;
+      turn: number;
+      proposals: Proposal[];
+      usage?: Usage;
+      state: WorldState;
+      /** 本轮每个 NPC 的实际处置（可观测性；不含私密正文） */
+      outcomes?: NpcOutcome[];
+    }
   | { type: "conversation.error"; sessionId: Id; code: string; message: string; retryable?: boolean };
 
 /** v2 编排入口（与 v1 Turn 并列） */
@@ -324,5 +374,5 @@ export type GossipEvent =
   | { type: "gossip.error"; code: string; message: string; retryable?: boolean };
 
 /** dev/v2 两条独立提示词版本线：会话群聊 / 微信八卦，互不覆盖 */
-export const CONVERSATION_PROMPT_VERSION = "2026-11-19.3" as const;
+export const CONVERSATION_PROMPT_VERSION = "2026-11-21.1" as const;
 export const GOSSIP_PROMPT_VERSION = "2026-11-19.1" as const;

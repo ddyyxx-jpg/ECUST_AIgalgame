@@ -3,7 +3,7 @@
   "worldId": "ecust_campus",
   "width": 6000,
   "height": 4500,
-  "image": "/map/ecust-campus.jpg",
+  "image": "/map/campus-wide.jpg",
   "startLocId": "loc_library",
   "scenes": [
     {
@@ -528,13 +528,13 @@
       "name": "信息馆",
       "x": 2760,
       "y": 1940,
-      "status": "planned",
+      "status": "built",
       "category": "study",
       "anchorLocId": "loc_library",
-      "desc": "信息馆还停留在图纸上，围挡里是一片平整过的空地，只有勘测用的白灰线。",
+      "desc": "信息馆刚交付使用，一层是办事大厅和自助机，二层往上是自习区，靠窗的位置一早就被占满。",
       "tags": [
-        "规划",
-        "自习"
+        "自习",
+        "办事"
       ]
     },
     {

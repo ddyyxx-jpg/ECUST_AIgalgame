@@ -45,6 +45,20 @@ describe("收件箱 HTTP 层", () => {
     expect((await fetchInbox("room_1", "plr_me")).map((m) => m.id)).toEqual(["m1"]);
   });
 
+  it("#106：roomId 含 / ? # 等字符时三条路径均被 URI 编码", async () => {
+    const spy = vi.fn(async (_path: string, _init?: RequestInit) =>
+      new Response(JSON.stringify({ ok: true, messages: [] }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", spy);
+    const room = "room/a?b#c";
+    await fetchInbox(room, "plr_me");
+    expect(spy.mock.calls[0]![0]).toBe(`/api/v1/rooms/${encodeURIComponent(room)}/messages?actorId=plr_me`);
+    await postMessage(room, "plr_me", "npc_lin", "你好");
+    expect(spy.mock.calls[1]![0]).toBe(`/api/v1/rooms/${encodeURIComponent(room)}/messages`);
+    await streamInbox(room, "plr_me", { onMessage: () => undefined });
+    expect(spy.mock.calls[2]![0]).toBe(`/api/v1/rooms/${encodeURIComponent(room)}/messages/stream?actorId=plr_me`);
+  });
+
   it("POST 200 + ok:false 透传 E_CONTENT_BLOCKED，不当成功", async () => {
     vi.stubGlobal(
       "fetch",

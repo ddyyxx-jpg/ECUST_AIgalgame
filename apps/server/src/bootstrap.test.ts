@@ -6,6 +6,10 @@
  *   ② 玩家与 NPC 的开场 located_in / presentIds 必须真的落库；
  *   ③ solo 房 members 为空时 tick 的 playerActorId 仍应是玩家而不是 "system"。
  */
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import Fastify from "fastify";
+import { registerRoutes } from "./routes.ts";
 import { describe, expect, it } from "vitest";
 import { tempDir } from "@galgame/testkit";
 import { createApp } from "./bootstrap.ts";
@@ -26,6 +30,84 @@ function testConfig(): ServerConfig {
 }
 
 describe("bootstrap", () => {
+  it("坏档不阻断启动，访问坏房间返回存储故障，正常房间仍可读取", async () => {
+    const cfg = testConfig();
+    const original = await createApp(cfg);
+    const good = await original.createRoom("solo");
+    const bad = await original.createRoom("solo");
+    const file = path.join(cfg.dataDir, "rooms", `${bad.roomId}.jsonl`);
+    const broken = (await readFile(file, "utf8")) + '{"v":1';
+    await writeFile(file, broken);
+    await writeFile(path.join(cfg.dataDir, "rooms", "room_old.history.jsonl"), "{}\n");
+
+    const deps = await createApp(cfg);
+    const app = Fastify();
+    registerRoutes(app, deps);
+    try {
+      const failed = await app.inject({ url: `/api/v1/rooms/${bad.roomId}/state` });
+      expect(failed.statusCode).toBe(503);
+      expect(failed.json()).toMatchObject({ code: "E_STORE_FAULT" });
+      const healthy = await app.inject({ url: `/api/v1/rooms/${good.roomId}/state` });
+      expect(healthy.statusCode).toBe(200);
+      expect(await readFile(file, "utf8")).toBe(broken);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("跨房间私信坏档不会污染健康房间的收件箱", async () => {
+    const cfg = testConfig();
+    const deps = await createApp(cfg);
+    const good = await deps.createRoom("solo");
+    const bad = await deps.createRoom("solo");
+    const valid = await deps.gossip!.send(good.roomId, good.actorId, "npc_lin", "你好");
+    expect(valid.some((event) => event.type === "gossip.message")).toBe(true);
+    const file = path.join(cfg.dataDir, "rooms", `${bad.roomId}.jsonl`);
+    const seq = (await deps.store.events(bad.roomId, 1)).at(-1)!.seq + 1;
+    const crossRoomEvent = {
+      v: 1, id: "evt_bad_message", roomId: bad.roomId, seq, ts: 1, actorId: "npc_lin", type: "msg.sent",
+      payload: {
+        message: {
+          id: "msg_bad_room", roomId: good.roomId, from: "npc_lin", to: good.actorId,
+          kind: "gossip", content: "invalid cross-room data", hop: 1, confidence: 1, createdAt: 1, seq,
+        },
+      },
+    };
+    const broken = (await readFile(file, "utf8")) + JSON.stringify(crossRoomEvent) + "\n";
+    await writeFile(file, broken);
+
+    const restarted = await createApp(cfg);
+    await expect(restarted.store.snapshot(bad.roomId)).rejects.toMatchObject({ code: "E_STORE_FAULT" });
+    expect(await restarted.store.snapshot(good.roomId)).toEqual(await deps.store.snapshot(good.roomId));
+    expect(restarted.gossip!.inbox(good.roomId, good.actorId)).toEqual([]);
+    expect(restarted.gossip!.inbox(good.roomId, "npc_lin")).toHaveLength(1);
+    expect(await readFile(file, "utf8")).toBe(broken);
+  });
+
+  it("成功提交的长回合 ID 重启后仍能读取", async () => {
+    const cfg = testConfig();
+    const deps = await createApp(cfg);
+    const { roomId, actorId } = await deps.createRoom("solo");
+    const app = Fastify();
+    registerRoutes(app, deps);
+    try {
+      const response = await app.inject({
+        method: "POST", url: `/api/v1/rooms/${roomId}/turns`,
+        payload: { actorId, input: "我去图书馆看看", clientTurnId: "a".repeat(100) },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain("turn.commit");
+      const events = await deps.store.events(roomId, 1);
+      expect(events.some((e) => (e.causedBy?.length ?? 0) > 96)).toBe(true);
+
+      const restarted = await createApp(cfg);
+      expect(await restarted.store.events(roomId, 1)).toEqual(events);
+      expect(await restarted.store.snapshot(roomId)).toEqual(await deps.store.snapshot(roomId));
+    } finally {
+      await app.close();
+    }
+  });
+
   it("建房把玩家与 NPC 的初始位置真正写进世界", async () => {
     const deps = await createApp(testConfig());
     const { roomId, actorId } = await deps.createRoom("solo");

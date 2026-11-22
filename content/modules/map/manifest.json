@@ -19,6 +19,6 @@
   "priority": 20,
   "costWeight": 0,
   "budget": { "maxLlmCallsPerRoomHour": 0, "maxTokensPerTurn": 0 },
-  "limits": { "proposalsPerTurn": 32, "maxArrayItems": 48 },
+  "limits": { "proposalsPerTurn": 64, "maxArrayItems": 48 },
   "entryLocations": []
 }

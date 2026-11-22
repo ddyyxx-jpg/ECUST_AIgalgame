@@ -12,10 +12,12 @@
  *     不要拿它做 expectedSeq 校验（重启后第一回合会假报 E_SEQ_GAP）。
  */
 
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { Envelope, RoomId, Store, WorldState } from "../../shared/src/contract/types.ts";
 import { applyEvent, createInitialState } from "./projection.ts";
+import { decodeRoomLog, projectRoomEvents } from "./room-log.ts";
+import { RoomLogWriter, RoomStorageBlockedError, StoreCommitUnknownError } from "./store-write.ts";
 
 export interface StoreOptions {
   worldId?: string;
@@ -132,21 +134,20 @@ export class EventSourcedStore implements EventLog {
 /**
  * 文件版：每房间一个 JSONL（一行一个 Envelope）。
  *
- * 写盘用「整份日志写临时文件 → rename」而不是 appendFile：rename 在同一文件系统上是原子的，
- * 崩溃只会留下完整旧文件或完整新文件，不会留下半批事件（那才是"内存已提交、磁盘只写了一半"的根源）。
- * 代价是每次提交 O(n) 重写 —— M0 房间规模（<千条事件）完全可接受，M1 换 SQLite/WAL 时这层接口不变。
+ * 每次提交整份重写（O(n)），同步新文件后替换原日志，再同步目录。
  */
 export class FileStore extends EventSourcedStore {
   private readonly loaded = new Set<RoomId>();
   private readonly loading = new Map<RoomId, Promise<void>>();
   private readonly writes = new Map<RoomId, Promise<void>>();
   private readonly dir: string;
-  /** 载入时做过修复的房间（seq 断档/重复被截断），给诊断与测试用 */
-  readonly repaired = new Set<RoomId>();
+  private readonly writer: RoomLogWriter;
+  private readonly uncertain = new Map<RoomId, RoomStorageBlockedError>();
 
   constructor(dir = path.join(process.cwd(), "data", "rooms"), opts: StoreOptions = {}) {
     super(opts);
     this.dir = dir;
+    this.writer = new RoomLogWriter(dir);
   }
 
   private file(roomId: RoomId): string {
@@ -157,10 +158,6 @@ export class FileStore extends EventSourcedStore {
     return path.join(this.dir, `${roomId}.jsonl`);
   }
 
-  private tmpFile(roomId: RoomId): string {
-    return `${this.file(roomId)}.tmp`;
-  }
-
   /** 读取前先载入：所有读接口都经过这里，杜绝"用未载入的 seq 做校验" */
   override async load(roomId: RoomId): Promise<number> {
     await this.ensure(roomId);
@@ -168,6 +165,8 @@ export class FileStore extends EventSourcedStore {
   }
 
   private ensure(roomId: RoomId): Promise<void> {
+    const failure = this.uncertain.get(roomId);
+    if (failure) return Promise.reject(failure);
     if (this.loaded.has(roomId)) return Promise.resolve();
     const inflight = this.loading.get(roomId);
     if (inflight) return inflight;
@@ -176,14 +175,7 @@ export class FileStore extends EventSourcedStore {
     return task;
   }
 
-  /**
-   * 回放文件 → 内存。遇到 seq 断档/重复时**修复而不是裸抛**：
-   * 保留能连成链的前缀，把修复后的日志写回，房间仍可继续玩（丢的是断档之后的尾部事件）。
-   *
-   * Issue #7：`loaded` 只能在**成功读取并回放**之后才置位。读失败（网络盘/占用/权限/EISDIR）
-   * 时若先置位，房间会被永久当成"已载入"：seq 假 0、后续 append 从 1 重写并覆盖真实日志。
-   * 同理，断档修复的写盘也必须在改内存之前完成，写失败时 loaded/日志保持原样、下次可重试。
-   */
+  /** 坏档保留在原位置，仅在整份日志校验与投影成功后发布缓存。 */
   private async readLog(roomId: RoomId): Promise<void> {
     let text: string;
     try {
@@ -193,64 +185,26 @@ export class FileStore extends EventSourcedStore {
       this.loaded.add(roomId);
       return;
     }
-    const parsed: Envelope[] = [];
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const env = JSON.parse(line) as Envelope;
-        if (typeof env?.seq === "number") parsed.push(env);
-      } catch {
-        // 崩溃留下的半行：跳过而不是让整份存档读不出来
-      }
-    }
-
-    const kept: Envelope[] = [];
-    let expected = 1;
-    let broken = false;
-    for (const env of parsed) {
-      if (env.seq === expected) {
-        kept.push(env);
-        expected += 1;
-      } else {
-        broken = true; // 重复（<）或断档（>）：证据链到这里为止
-        if (env.seq > expected) break;
-      }
-    }
-
-    if (broken) {
-      // 先写回修复结果、再改内存：写盘失败时本次 load 抛错，loaded 与内存都不变，可重试
-      await this.writeAll(roomId, kept);
-      this.repaired.add(roomId);
-      if (process.env.GALGAME_DEBUG) {
-        console.error(`[store] ${roomId} 日志 seq 不连续，已截断到 seq ${kept.length}（原 ${parsed.length} 条）`);
-      }
-    }
-
-    try {
-      this.appendMemory(roomId, kept);
-    } catch (err) {
-      // 正常路径不会失败（kept 已是 seq 1 起的连续前缀）；只有出现第二个写入口才可能到这里。
-      // 清掉本次半载入，避免"内存有日志、loaded 未置位"导致重试永远 E_SEQ_GAP。
-      this.logs.delete(roomId);
-      this.states.delete(roomId);
-      throw err;
-    }
+    const events = decodeRoomLog(text, roomId);
+    const state = projectRoomEvents(this.initial(roomId), events);
+    if (events.length > 0) this.logs.set(roomId, events);
+    this.states.set(roomId, state);
     this.loaded.add(roomId);
   }
 
-  /** 原子写整份日志：tmp → rename（不要 appendFile，半批事件会撕裂存档） */
   private async writeAll(roomId: RoomId, envs: Envelope[]): Promise<void> {
-    await mkdir(this.dir, { recursive: true });
-    const body = envs.map((e) => JSON.stringify(e)).join("\n");
-    const tmp = this.tmpFile(roomId);
-    await writeFile(tmp, body.length > 0 ? `${body}\n` : "", "utf8");
-    await rename(tmp, this.file(roomId));
+    try {
+      await this.writer.write(this.file(roomId), envs);
+    } catch (error) {
+      if (error instanceof StoreCommitUnknownError) {
+        // 原文件可能已被替换，封住该房间，避免用内存里的旧投影继续结算。
+        this.uncertain.set(roomId, new RoomStorageBlockedError(error));
+        console.error(`[store] 房间 ${roomId} 的提交结果待核对`, error.cause);
+      }
+      throw error;
+    }
   }
 
-  /**
-   * 写盘先行：写成功才改内存。失败（磁盘满、权限、rename 失败）→ 抛错且内存不变，
-   * Arbiter 会把这次 apply 判为 E_STORE_FAULT，Turn 据此不发 commit，重试是安全的。
-   */
   override append(roomId: RoomId, envs: Envelope[]): Promise<void> {
     if (envs.length === 0) return Promise.resolve();
     const prev = this.writes.get(roomId) ?? Promise.resolve();
@@ -271,7 +225,7 @@ export class FileStore extends EventSourcedStore {
     return next;
   }
 
-  /** 写盘已经在 append 里 await 过；这里只等可能仍在排队的写（给脚本/测试用） */
+  /** 只等队列结清；各批写入的结果由各自的 append 返回。 */
   override async flush(roomId?: RoomId): Promise<void> {
     const waits = roomId ? [this.writes.get(roomId)] : [...this.writes.values()];
     await Promise.all(waits.filter((p): p is Promise<void> => !!p));
@@ -294,6 +248,7 @@ export class FileStore extends EventSourcedStore {
     return names
       .filter((n) => n.endsWith(".jsonl"))
       .map((n) => n.slice(0, -".jsonl".length))
+      .filter(isSafeRoomId)
       .sort();
   }
 

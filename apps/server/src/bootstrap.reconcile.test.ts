@@ -7,11 +7,12 @@
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { tempDir } from "@galgame/testkit";
 import { createApp } from "./bootstrap.ts";
 import type { ServerConfig } from "./config.ts";
 import type { JobRecord } from "./job-ledger.ts";
+import { FileStore } from "@galgame/engine";
 
 function testConfig(dataDir: string): ServerConfig {
   return {
@@ -86,5 +87,102 @@ describe("bootstrap 启动对账（端到端）", () => {
     const third = await createApp(cfg);
     expect(third.jobReconcile).toMatchObject({ rooms: 1, orphaned: 0, failed: 0, runnable: 1 });
     expect((await readFile(jobsFile, "utf8")).trim().split("\n").length).toBe(linesAfterFirstReconcile);
+  });
+
+  it("单房坏档被逐房隔离：缺 roomId 的房间跳过并 warn，其余房间照常对账", async () => {
+    const dataDir = tempDir("galgame-reconcile-");
+    const cfg = testConfig(dataDir);
+    const first = await createApp(cfg);
+    const { roomId: badRoom } = await first.createRoom("solo");
+    const { roomId: goodRoom } = await first.createRoom("solo");
+
+    const jobsDir = path.join(dataDir, "jobs");
+    await mkdir(jobsDir, { recursive: true });
+    const { roomId: _ignored, ...missingRoomId } = job(badRoom, {
+      id: "bad_missing",
+      status: "inflight",
+    });
+    await writeFile(path.join(jobsDir, `${badRoom}.jsonl`), JSON.stringify(missingRoomId) + "\n", "utf8");
+    await writeFile(
+      path.join(jobsDir, `${goodRoom}.jsonl`),
+      JSON.stringify(job(goodRoom, { id: "orphan", status: "inflight", attempts: 1 })) + "\n",
+      "utf8",
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const second = await createApp(cfg);
+      expect(second.jobReconcile).toMatchObject({ rooms: 2, orphaned: 1, failed: 1, runnable: 0, skipped: 0 });
+      expect(warn.mock.calls.flat().join(" ")).toContain("跳过非法记录");
+      expect((await second.jobLedger.list(goodRoom)).find((r) => r.id === "orphan")?.status).toBe("failed");
+      expect(await second.jobLedger.list(badRoom)).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("错放 roomId 的记录不会写进另一个房间，且该房被跳过", async () => {
+    const dataDir = tempDir("galgame-reconcile-");
+    const cfg = testConfig(dataDir);
+    const first = await createApp(cfg);
+    const { roomId: roomA } = await first.createRoom("solo");
+    const { roomId: roomB } = await first.createRoom("solo");
+
+    const jobsDir = path.join(dataDir, "jobs");
+    await mkdir(jobsDir, { recursive: true });
+    const fileA = path.join(jobsDir, `${roomA}.jsonl`);
+    const fileB = path.join(jobsDir, `${roomB}.jsonl`);
+    const stray = job(roomB, { id: "stray", status: "inflight", attempts: 1 });
+    await writeFile(fileA, JSON.stringify(stray) + "\n", "utf8");
+    const goodB = JSON.stringify(job(roomB, { id: "b_orphan", status: "inflight", attempts: 1 })) + "\n";
+    await writeFile(fileB, goodB, "utf8");
+    const beforeB = await readFile(fileB, "utf8");
+
+    // 真实 FileStore.listRooms 扫描 data/rooms/*.jsonl（含两个真实房间）
+    const store = new FileStore(path.join(dataDir, "rooms"));
+    expect((await store.listRooms()).sort()).toEqual([roomA, roomB].sort());
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const second = await createApp(cfg);
+      // 两个房间都被对账：B 的孤儿被标 failed；A 的坏档被 list 跳过（不算 skipped，因为未抛错）
+      expect(second.jobReconcile).toMatchObject({ rooms: 2, orphaned: 1, failed: 1, runnable: 0, skipped: 0 });
+      expect(warn.mock.calls.flat().join(" ")).toContain("跳过 roomId 不匹配记录");
+      expect(await readFile(fileB, "utf8")).not.toContain("stray");
+      expect((await readFile(fileB, "utf8")).startsWith(beforeB)).toBe(true);
+      expect((await second.jobLedger.list(roomA)).map((r) => r.id)).toEqual([]);
+      expect((await second.jobLedger.list(roomB)).find((r) => r.id === "b_orphan")?.status).toBe("failed");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("逐房隔离：单房读取抛错只跳过该房，其他房间照常对账", async () => {
+    const dataDir = tempDir("galgame-reconcile-");
+    const cfg = testConfig(dataDir);
+    const first = await createApp(cfg);
+    const { roomId: badRoom } = await first.createRoom("solo");
+    const { roomId: goodRoom } = await first.createRoom("solo");
+
+    const jobsDir = path.join(dataDir, "jobs");
+    await mkdir(jobsDir, { recursive: true });
+    // 目录代替文件：readFile 会抛 EISDIR，触发逐房 catch
+    await mkdir(path.join(jobsDir, `${badRoom}.jsonl`), { recursive: true });
+    await writeFile(
+      path.join(jobsDir, `${goodRoom}.jsonl`),
+      JSON.stringify(job(goodRoom, { id: "orphan", status: "inflight", attempts: 1 })) + "\n",
+      "utf8",
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const second = await createApp(cfg);
+      expect(second.jobReconcile).toMatchObject({ rooms: 2, orphaned: 1, failed: 1, runnable: 0, skipped: 1 });
+      const log = warn.mock.calls.flat().join(" ");
+      expect(log).toContain(`[background] reconcile 跳过房间 ${badRoom}`);
+      expect((await second.jobLedger.list(goodRoom)).find((r) => r.id === "orphan")?.status).toBe("failed");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

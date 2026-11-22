@@ -86,6 +86,7 @@ export class OpenAiCompatClient implements LlmPort {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
     let payload: unknown = undefined;
+    let headerTraceId: string | undefined;
     try {
       const res = await this.fetchImpl(`${baseUrl}/chat/completions`, {
         method: "POST",
@@ -100,6 +101,10 @@ export class OpenAiCompatClient implements LlmPort {
       if (res.status === 429) {
         throw new LlmError("E_RATE_LIMITED", `LLM 限流（HTTP 429）：${await snippet(res)}`);
       }
+      // 响应头优先：拿它串日志比 payload.id 可靠。DeepSeek 侧的 x-ds-trace-id 排第一——
+      // 排障要找的是上游那次请求（#146）：两者同时存在时以 DeepSeek trace 为准，x-request-id 只做兜底。
+      headerTraceId = res.headers.get("x-ds-trace-id") ?? res.headers.get("x-request-id")
+        ?? res.headers.get("x-trace-id") ?? res.headers.get("trace-id") ?? undefined;
       if (!res.ok) {
         // 非 2xx 统一归入可重试的格式错误：网关层没有更细的错误码（见 03 §7）
         throw new LlmError("E_LLM_FORMAT", `LLM 请求失败（HTTP ${res.status}）：${await snippet(res)}`);
@@ -118,16 +123,23 @@ export class OpenAiCompatClient implements LlmPort {
 
     const content = readContent(payload);
     const usage = readUsage(payload);
+    const finishReason = readFinishReason(payload);
     const result: LlmResult = {
       raw: content,
       usage,
       model: readModel(payload) ?? model,
       latencyMs: Date.now() - startedAt,
+      finishReason,
+      traceId: headerTraceId ?? readTraceId(payload),
     };
 
     if (wantJson) {
       const parsed = safeParseJson(content);
       if (!parsed.ok) {
+        // 先区分"被截断"和"格式不合法"：截断要重试更大的 max_tokens，不能当格式错误
+        if (finishReason === "length") {
+          throw new LlmError("E_LLM_TRUNCATED", "LLM 输出被 max_tokens 截断");
+        }
         // 解析失败也走可重试路径：空 content（U+0020 坑）与半截 JSON 都能靠重试救回
         throw new LlmError(parsed.code, `LLM 未返回合法 JSON：${parsed.message}`);
       }
@@ -189,6 +201,18 @@ function readContent(payload: unknown): string {
     throw new LlmError("E_LLM_FORMAT", "LLM 响应缺少 choices[0].message.content");
   }
   return content;
+}
+
+function readFinishReason(payload: unknown): string | undefined {
+  const choices = asRecord(payload)?.choices;
+  const first = Array.isArray(choices) ? asRecord(choices[0]) : undefined;
+  const reason = first?.finish_reason;
+  return typeof reason === "string" && reason !== "" ? reason : undefined;
+}
+
+function readTraceId(payload: unknown): string | undefined {
+  const id = asRecord(payload)?.id;
+  return typeof id === "string" && id !== "" ? id : undefined;
 }
 
 function readModel(payload: unknown): string | undefined {

@@ -8,8 +8,9 @@ import { apiFetch, GameError, httpErrorFrom, jsonHeaders } from "./http.ts";
 import { parseGossipMessageEvent } from "./inbox.ts";
 import { parseSsePart, splitSseBuffer } from "./sse.ts";
 
+// #106：roomId 同 actorId 一样做 URI 编码，避免房间名里的 / ? # 破坏路径/查询串
 const inboxPath = (roomId: string, actorId: string): string =>
-  `/api/v1/rooms/${roomId}/messages?actorId=${encodeURIComponent(actorId)}`;
+  `/api/v1/rooms/${encodeURIComponent(roomId)}/messages?actorId=${encodeURIComponent(actorId)}`;
 
 /** 403 会抛 HttpError(status=403)，由 UI 调 inboxLoadNotice 给降级提示，不当网络错误重试 */
 export async function fetchInbox(roomId: string, actorId: string): Promise<MessageRecord[]> {
@@ -36,7 +37,7 @@ export async function postMessage(
   content: string,
   replyTo?: string,
 ): Promise<SendOutcome> {
-  const r = await apiFetch(`/api/v1/rooms/${roomId}/messages`, {
+  const r = await apiFetch(`/api/v1/rooms/${encodeURIComponent(roomId)}/messages`, {
     method: "POST",
     headers: { ...jsonHeaders },
     body: JSON.stringify({ from, to, content, ...(replyTo ? { replyTo } : {}) }),
@@ -68,7 +69,7 @@ export async function streamInbox(
   h: InboxStreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  const r = await apiFetch(`/api/v1/rooms/${roomId}/messages/stream?actorId=${encodeURIComponent(actorId)}`, {
+  const r = await apiFetch(`/api/v1/rooms/${encodeURIComponent(roomId)}/messages/stream?actorId=${encodeURIComponent(actorId)}`, {
     headers: { accept: "text/event-stream" },
     ...(signal ? { signal } : {}),
   });

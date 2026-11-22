@@ -7,8 +7,12 @@ import type { Delivery, Id, Proposal, RoomId, Utterance, UtteranceModeDef, Actor
 /** 与 Arbiter 的 limits.memoryContentMax 对齐：组合后的记忆正文必须落在这个闭区间内 */
 const MEMORY_CONTENT_MAX = 500;
 
-/** 组合文本统一收口到 memory.write 的内容上限，避免字段各自合法、拼接后整批被拒 */
-function fitMemoryContent(text: string): string {
+/**
+ * 组合文本统一收口到 memory.write 的内容上限，避免字段各自合法、拼接后整批被拒。
+ * 导出给 ownSpeechLines 复用（#146）：注入行与落库行必须按同一规则截断，否则 >500 字符时
+ * 「自己的话」是完整句、召回行是前缀，mergeMemoryText 的前缀去重会失效、同一句占两行。
+ */
+export function fitMemoryContent(text: string): string {
   return text.slice(0, MEMORY_CONTENT_MAX);
 }
 
@@ -48,15 +52,17 @@ export function mentalFields(m: { thought: string; plan?: string }): AuditText[]
 }
 
 /** 一句话 → 可持久化的 memory.write Proposal。可见性来自模式数据，缺省 private（fail-closed） */
-export function memoryProposals(u: Utterance, roomId: RoomId, modes: Map<string, UtteranceModeDef>): Proposal[] {
+export function memoryProposals(u: Utterance, roomId: RoomId, modes: Map<string, UtteranceModeDef>, locName?: string): Proposal[] {
   const text = u.content ? `${u.content}${u.action ? ` (${u.action})` : ""}` : u.action ?? "";
   if (!text.trim()) return [];
   const visibility: "public" | "private" | "secret" = modes.get(u.mode)?.visibility ?? "private";
   const args: Record<string, unknown> = {
     ownerId: u.speaker,
     content: fitMemoryContent(text),
-    tags: ["dialogue", u.mode],
-    salience: 60,
+    // 地点 tag 让「在图书馆说过的话」和按地点检索的记忆真正重叠（#135；空 tag 会让打分恒 0）
+    tags: locName ? ["dialogue", u.mode, locName] : ["dialogue", u.mode],
+    // #135：关键线索可让模型通过 utterance.salience 提权（1–5 → 20–100 分），缺省 3
+    salience: typeof u.salience === "number" ? Math.min(5, Math.max(1, Math.round(u.salience))) * 20 : 60,
     visibility,
   };
   if (u.target && u.target !== "all") args.about = Array.isArray(u.target) ? u.target : [u.target];

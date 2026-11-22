@@ -5,6 +5,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Envelope } from "../../shared/src/contract/types.ts";
 import { applyEvent, createInitialState } from "./projection.ts";
+import { DefaultArbiter } from "./arbiter.ts";
+import { emptyRegistry } from "./registry.ts";
 import { EventSourcedStore, FileStore, isSafeRoomId } from "./store.ts";
 
 const ROOM = "room_test";
@@ -119,13 +121,72 @@ describe("FileStore（jsonl 一房间一文件）", () => {
     await expect(store.append("../pwn", [env(1, "entity.created", { entity: npc })])).rejects.toMatchObject({ code: "E_SCHEMA_INVALID" });
   });
 
-  it("崩溃留下的半行被跳过，不影响读档", async () => {
+  it("半行或有效 JSON 的坏事件均拒绝载入并保留源文件", async () => {
     const dir = await tempDir();
+    const file = path.join(dir, `${ROOM}.jsonl`);
     const good = JSON.stringify(env(1, "entity.created", { entity: npc }));
-    await writeFile(path.join(dir, `${ROOM}.jsonl`), `${good}\n{"v":1,"id":"evt_broken`, "utf8");
     const store = new FileStore(dir);
-    const snap = await store.snapshot(ROOM);
-    expect(snap.entities.npc_lin?.name).toBe("林月");
+    for (const bad of ['{"v":1', JSON.stringify(env(2, "entity.created", {}))]) {
+      const original = good + "\n" + bad;
+      await writeFile(file, original);
+      await expect(store.snapshot(ROOM)).rejects.toMatchObject({ code: "E_STORE_FAULT" });
+      expect(await readFile(file, "utf8")).toBe(original);
+    }
+    await writeFile(file, good + "\n");
+    expect((await store.snapshot(ROOM)).entities.npc_lin?.name).toBe("林月");
+  });
+
+  it("裁决生成的长关系 ID 及删除事件在重启后仍能回放", async () => {
+    const dir = await tempDir();
+    const store = new FileStore(dir);
+    const arbiter = new DefaultArbiter({ store, registry: emptyRegistry() });
+    const from = "npc_" + "a".repeat(48);
+    const to = "npc_" + "b".repeat(48);
+    const cause = env(1, "turn.input", {});
+    const created = await arbiter.apply(ROOM, [
+      { op: "entity.create", args: { id: from, kind: "npc", name: "A", tags: ["t".repeat(40)] } },
+      { op: "entity.create", args: { id: to, kind: "npc", name: "B" } },
+      { op: "link.create", args: { kind: "knows", from, to, audience: [""] } },
+      { op: "plot.upsert", args: { goal: "g".repeat(130), actors: [from, to] } },
+    ], cause);
+    expect(created.ok).toBe(true);
+    const state = await store.snapshot(ROOM);
+    const linkId = state.links[0]!.id;
+    expect(linkId.length).toBeGreaterThan(96);
+    expect(state.links[0]?.audience).toEqual([""]);
+    expect(await new FileStore(dir).snapshot(ROOM)).toEqual(state);
+
+    const removed = await arbiter.apply(ROOM, [{ op: "link.remove", args: { linkId } }], cause);
+    expect(removed.ok).toBe(true);
+    expect((await new FileStore(dir).snapshot(ROOM)).links).toEqual([]);
+  });
+
+  it("v2 私信旧档（gossip 转发、message 自带 seq/visibility）可直接载入，无需迁移", async () => {
+    const dir = await tempDir();
+    const file = path.join(dir, `${ROOM}.jsonl`);
+    // 0a862d9 首次引入 msg.sent 时的载荷形状：message.seq 与 visibility 都在，
+    // 没有后续版本新增的顶层字段。严格校验不能把这种合法旧档判成坏档。
+    const legacy = [
+      env(1, "entity.created", { entity: npc }),
+      {
+        v: 1, id: "evt_2", roomId: ROOM, seq: 2, ts: 20, actorId: "npc_lin", type: "msg.sent",
+        audience: ["npc_lin", "plr_me"],
+        payload: {
+          message: {
+            id: `msg_${ROOM}_evt_1_1`, roomId: ROOM, from: "npc_lin", to: "plr_me",
+            kind: "gossip", content: "旧档里的转发私信", hop: 1, confidence: 0.8,
+            visibility: "private", createdAt: 5, seq: 1,
+          },
+        },
+      },
+    ];
+    const original = legacy.map((event) => JSON.stringify(event)).join("\n") + "\n";
+    await writeFile(file, original, "utf8");
+
+    const store = new FileStore(dir);
+    expect(await store.load(ROOM)).toBe(2);
+    expect((await store.snapshot(ROOM)).entities.npc_lin?.name).toBe("林月");
+    expect(await readFile(file, "utf8")).toBe(original);
   });
 
   it("replay 用的是同一套 applyEvent（与内存版逐字段相等）", () => {

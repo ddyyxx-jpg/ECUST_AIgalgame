@@ -1,0 +1,20 @@
+{
+  "id": "study",
+  "name": "自习",
+  "version": "0.1.0",
+  "apiVersion": 3,
+  "dependsOn": [],
+  "capabilities": {
+    "intents": ["study.quiz"],
+    "keywords": ["自习", "学习", "复习", "刷题", "做题"],
+    "tools": ["study.quiz"],
+    "triggers": ["night"],
+    "views": [],
+    "contentFiles": []
+  },
+  "priority": 60,
+  "costWeight": 0,
+  "budget": { "maxLlmCallsPerRoomHour": 0, "maxTokensPerTurn": 0 },
+  "limits": { "proposalsPerTurn": 1, "maxArrayItems": 4 },
+  "entryLocations": []
+}

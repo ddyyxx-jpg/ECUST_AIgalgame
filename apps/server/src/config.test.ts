@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { hasAudit, hasLlm, loadConfig } from "./config.ts";
 
-const KEYS = ["GALGAME_ADMIN_TOKEN", "GALGAME_LLM_BASE_URL", "GALGAME_LLM_MODEL", "GALGAME_LLM_API_KEY", "GALGAME_AUDIT_BASE_URL", "GALGAME_AUDIT_MODEL", "GALGAME_AUDIT_API_KEY"];
+const KEYS = ["GALGAME_ADMIN_TOKEN", "GALGAME_LLM_BASE_URL", "GALGAME_LLM_MODEL", "GALGAME_LLM_API_KEY", "GALGAME_AUDIT_BASE_URL", "GALGAME_AUDIT_MODEL", "GALGAME_AUDIT_API_KEY", "GALGAME_HISTORY_LIMIT_MAX"];
 const saved = new Map<string, string | undefined>(KEYS.map((k) => [k, process.env[k]]));
 
 afterEach(() => {
@@ -70,5 +70,30 @@ describe("管理员令牌强度（复审 P1）", () => {
     const b = loadConfig().adminToken;
     expect(a.length).toBeGreaterThanOrEqual(16);
     expect(a).not.toBe(b);
+  });
+});
+
+describe("历史单次响应上限（issue #100）", () => {
+  it("默认 200；GALGAME_HISTORY_LIMIT_MAX 可覆盖，非法值回退默认", () => {
+    clearAudit();
+    expect(loadConfig().historyLimitMax).toBe(200);
+    process.env.GALGAME_HISTORY_LIMIT_MAX = "350";
+    expect(loadConfig().historyLimitMax).toBe(350);
+    process.env.GALGAME_HISTORY_LIMIT_MAX = "garbage";
+    expect(loadConfig().historyLimitMax).toBe(200);
+  });
+
+  it("PR #123 边界：0 / 负数 / 小数 / NaN / Infinity 都不再产生 NaN 或无上限", () => {
+    clearAudit();
+    for (const raw of ["0", "-5", "garbage", "NaN", "Infinity", ""]) {
+      process.env.GALGAME_HISTORY_LIMIT_MAX = raw;
+      expect(loadConfig().historyLimitMax, raw).toBe(200);
+    }
+    process.env.GALGAME_HISTORY_LIMIT_MAX = "3.7";
+    expect(loadConfig().historyLimitMax).toBe(3);
+    process.env.GALGAME_HISTORY_LIMIT_MAX = "1";
+    expect(loadConfig().historyLimitMax).toBe(1);
+    process.env.GALGAME_HISTORY_LIMIT_MAX = " 12 ";
+    expect(loadConfig().historyLimitMax).toBe(12);
   });
 });

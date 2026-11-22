@@ -43,6 +43,17 @@ export function estimateTokens(text: string): number {
 }
 
 /** 历史数据 salience 是 0~100，契约 3.1.0 起是 1~5：读时收敛，不丢信息 */
+/**
+ * 记忆 turn 口径统一为 day*100+tick。
+ * 事件带 `turnEra: 2` 时按新口径原样使用；旧事件（无标记）里 `<100` 的值是"第几天"，×100 归一。
+ * 不用"<100"单独判断新口径：day=0,tick=50 也是 50，静默放大 100 倍（审阅 P1-4）。
+ */
+export function normalizeTurn(raw: number, legacy = true): number {
+  if (!Number.isFinite(raw) || raw <= 0) return raw;
+  if (!legacy) return raw;
+  return raw < 100 ? raw * 100 : raw;
+}
+
 export function normalizeSalience(v: unknown): number {
   const n = typeof v === "number" && Number.isFinite(v) ? v : 3;
   const clamped = n > 5 ? Math.round(n / 20) : Math.round(n);
@@ -124,7 +135,11 @@ export class EventSourcedMemory implements Memory {
         about: Array.isArray(p.about) ? (p.about as string[]).filter((t): t is string => typeof t === "string") : [],
         visibility: normalizeVisibility(p.visibility),
         tier: normalizeTier(p.tier),
-        turn: typeof p.turn === "number" ? p.turn : typeof p.at === "number" ? p.at : 0,
+        // #135：旧存档写的是"第几天"（如 3），新口径是 day*100+tick；<100 一律视为旧值
+        turn: normalizeTurn(
+          typeof p.turn === "number" ? p.turn : typeof p.at === "number" ? p.at : 0,
+          p.turnEra !== 2,
+        ),
         createdAt: env.ts,
         status,
       };
@@ -205,9 +220,13 @@ export class EventSourcedMemory implements Memory {
     hits.sort((a, b) => Number(!!b.forced) - Number(!!a.forced) || b.score - a.score || a.record.id.localeCompare(b.record.id));
     const out: MemoryHit[] = [];
     let used = 0;
+    let forcedUsed = 0;
     for (const h of hits) {
       // forced（secret 强制注入）不占预算、不因预算被截断（docs/03 §2.6）
       if (h.forced) {
+        // 上限 3 条：secret 强制注入不占预算，但无上限会让提示词无界膨胀（审阅 P2）
+        if (forcedUsed >= 3) continue;
+        forcedUsed += 1;
         out.push(h);
         continue;
       }

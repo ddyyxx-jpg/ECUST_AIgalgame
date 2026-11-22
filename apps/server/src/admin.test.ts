@@ -445,4 +445,30 @@ describe("P2 草案授权收口（服务端再校验）", () => {
     expect(admin.json()).toMatchObject({ ok: false, code: "E_SCHEMA_INVALID" });
     await app.close();
   });
+
+  it("#105：草案列表/审核端点共用 AdminTokenGate —— 无会话 401，连续错误令牌 429", async () => {
+    const { app } = await makeApp();
+    // 匿名访问列表端点：登录门 401（与 POST 同口径）
+    const anon = await app.inject({ method: "GET", url: "/api/v1/map/drafts" });
+    expect(anon.statusCode).toBe(401);
+
+    // 10 次错误令牌打满 AdminTokenGate（限流按 ip 计），第 11 次起 429；
+    // 覆盖此前直接 adminTokenOf 绕过 gate 的 GET 列表与 POST /admin/* 审核面。
+    // 登录门先于 adminOnly：未带 cookie 的坏令牌请求会被 401 短路，需带玩家 cookie 才能到达 gate。
+    const { cookie } = await registerPlayer(app, "bob");
+    const BAD = { "x-admin-token": "definitely-wrong" };
+    for (let i = 0; i < 10; i++) {
+      await app.inject({ method: "GET", url: "/api/v1/map/drafts", headers: { ...BAD, cookie } });
+    }
+    const list = await app.inject({ method: "GET", url: "/api/v1/map/drafts", headers: { ...BAD, cookie } });
+    expect(list.statusCode).toBe(429);
+    expect(list.json()).toMatchObject({ ok: false, code: "E_RATE_LIMITED" });
+
+    const review = await app.inject({
+      method: "POST", url: "/api/v1/admin/map/drafts/draft_missing/review", headers: { ...BAD, ...ORIGIN, cookie }, payload: {},
+    });
+    expect(review.statusCode).toBe(429);
+    expect(review.json()).toMatchObject({ ok: false, code: "E_RATE_LIMITED" });
+    await app.close();
+  });
 });

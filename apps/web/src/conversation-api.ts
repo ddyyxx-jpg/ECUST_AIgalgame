@@ -25,7 +25,7 @@ export function conversationModesPath(roomId: string): string {
   return `/api/v1/rooms/${encodeURIComponent(roomId)}/conversation/modes`;
 }
 
-/** 只有 2xx 算「v2 可用」；404/405/401/403/5xx 都退回 v1（保守，宁可不接也不坏老流程）。 */
+/** 只有 2xx 算「v2 可用」；404/405 明确非 v2，其余状态由 detectConversation 返回 null 保持现模式（见下）。 */
 export function isConversationAvailable(status: number): boolean {
   return status >= 200 && status < 300;
 }
@@ -40,7 +40,7 @@ export function isConversationAvailable(status: number): boolean {
 export async function detectConversation(roomId: string, signal?: AbortSignal): Promise<boolean | null> {
   try {
     const r = await apiFetch(conversationProbePath(roomId), signal ? { signal } : undefined);
-    if (r.status >= 200 && r.status < 300) return true;
+    if (isConversationAvailable(r.status)) return true;
     if (r.status === 404 || r.status === 405) return false;
     return null;
   } catch {
@@ -100,11 +100,20 @@ export function validateUtteranceDraft(
   return { ok: true };
 }
 
+/**
+ * 只按服务端机器标记判定已结算（PR #147 P2-6 / PR #149 P2-6）。
+ *
+ * `conversation.notice` 的文案来自 `content/v2/conversation-policy.json`（可改语言），
+ * 文本匹配永远不可靠；唯一可信的是 `reason === "autoLimit"`，不再保留英文文案兜底死代码。
+ */
+
 export interface ConversationStreamHandlers {
   onEvent?: (ev: ConversationEvent) => void;
   onError?: (code: string, message: string, retryable?: boolean) => void;
   /** 流结束但既没 committed 也没 error：交给调用方按"未确认"处理，不盲目重发 */
   onUnconfirmed?: () => void;
+  /** auto 超限 notice（服务端已结算为 failed，无待重试）在客户端视作已结算 */
+  treatAutoLimitNoticeAsSettled?: boolean;
 }
 
 /** SSE 事件块 → ConversationEvent；坏 JSON / 未知类型直接忽略，不让一条坏事件断流。 */
@@ -153,6 +162,13 @@ async function postConversationStream(
     ...h,
     onEvent: (ev) => {
       if (ev.type === "conversation.committed" || ev.type === "conversation.error") settled = true;
+      // auto 超限时服务端回 notice(reason:"autoLimit") 且 ledger 已记 failed（见 routes.ts），
+      // 不能当「未确认」重试；blocked notice 没有该 reason，保持 unconfirmed 供玩家重试。
+      if (
+        h.treatAutoLimitNoticeAsSettled === true &&
+        ev.type === "conversation.notice" &&
+        ev.reason === "autoLimit"
+      ) settled = true;
       h.onEvent?.(ev);
     },
   };
@@ -193,6 +209,25 @@ export async function runConversationTurn(
     conversationTurnPath(roomId),
     { actorId, input, clientTurnId, ...(targetNpcId ? { targetNpcId } : {}) },
     h,
+    signal,
+  );
+}
+
+/**
+ * 让在场 NPC 自己聊一轮（#136 方案 a）：玩家不说话，服务端推进一次自主轮。
+ * 受服务端 `maxAutoRounds` 限制，超限返回 conversation.notice(autoLimit)，不报错。
+ */
+export async function runConversationAuto(
+  roomId: string,
+  actorId: string,
+  clientTurnId: string,
+  h: ConversationStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  await postConversationStream(
+    `/api/v1/rooms/${encodeURIComponent(roomId)}/conversation`,
+    { actorId, clientTurnId, auto: true },
+    { ...h, treatAutoLimitNoticeAsSettled: true },
     signal,
   );
 }

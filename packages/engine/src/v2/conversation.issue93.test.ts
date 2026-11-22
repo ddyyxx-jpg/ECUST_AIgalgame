@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 /**
  * Issue #93 五项行为回归（引擎侧）。
  * 只断言结构/计数与可见性标记，不断言任何 LLM 叙事文案。
@@ -22,7 +23,7 @@ import { ConversationHostV2 } from "./conversation.ts";
 import { projectConversationEvents } from "./conversation.view.ts";
 import { publicSceneText } from "./conversation.helpers.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
 const POLICY = `${ROOT}content/v2/conversation-policy.json`;
 const ROOM = "room_chat";
@@ -124,7 +125,7 @@ describe("Issue #93 行为修复", () => {
     const prompt = maTurn2.messages.map((m) => m.content).join("\n");
     // 用标记做存在性断言，不比较任何叙事文案
     expect(prompt).toContain(marker);
-    expect(prompt).toContain(`${LIN} → 你`);
+    expect(prompt).toContain("→ 你");
   });
 
   it("② 事件按观察者投影：目标与旁观者拿到不同投递，心理活动永不下发", async () => {
@@ -225,8 +226,8 @@ describe("Issue #93 行为修复", () => {
     const { host, session: a } = await setup({ llm, now: () => clock });
     const b = await host.open({ roomId: ROOM, participants: [PLR, LIN, MA] });
 
-    await collect(host.run(a.id, { clientTurnId: "ia", interject: PLR }));
-    await collect(host.run(b.id, { clientTurnId: "ib", interject: PLR }));
+    await collect(host.run(a.id, { clientTurnId: "ia", interject: LIN }));
+    await collect(host.run(b.id, { clientTurnId: "ib", interject: LIN }));
     expect(host.get(a.id)?.phase).toBe("listening");
     expect(host.get(b.id)?.phase).toBe("listening");
 

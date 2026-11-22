@@ -270,6 +270,54 @@ describe("HTTP：/rooms/:roomId/history 与 /me/saves", () => {
     }
   });
 
+  it("limit=201 夹到上限且可逐页翻完 >200 条历史，不重不漏（issue #100）", async () => {
+    const deps = await createApp(testConfig());
+    const { roomId, actorId } = await deps.createRoom("solo", "u_a");
+    const app = Fastify();
+    registerRoutes(app, deps);
+    try {
+      const line = {
+        formatVersion: 1 as const, roomId, actorId, committedSeq: 49,
+        input: "", narrative: "", speakers: [], facts: [], createdAt: 1,
+      };
+      const total = 451;
+      const records = Array.from({ length: total }, (_, index) => ({ ...line, turnId: `turn_${index}` }));
+      const file = deps.history.fileFor(roomId);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+
+      const url = `/api/v1/rooms/${roomId}/history`;
+      const headers = { "x-user-id": "u_a" };
+      const first = await app.inject({ url: `${url}?limit=201`, headers });
+      expect(first.statusCode).toBe(200);
+      const firstBody = first.json() as { history: { turnId: string }[]; hasEarlier: boolean; earlierCursor?: string };
+      // 超过上限的请求被夹到 200，且仍给出更早游标
+      expect(firstBody.history).toHaveLength(200);
+      expect(firstBody.hasEarlier).toBe(true);
+      expect(typeof firstBody.earlierCursor).toBe("string");
+
+      // 用 earlierCursor 逐页向前翻，收集全部 turnId（分页口径：游标所属条目不含在下一页）
+      const seen = new Set<string>();
+      for (const item of firstBody.history) seen.add(item.turnId);
+      let cursor: string | undefined = firstBody.earlierCursor;
+      let guard = 0;
+      while (cursor && guard++ < 20) {
+        const page = await app.inject({ url: `${url}?${new URLSearchParams({ before: cursor, limit: "201" })}`, headers });
+        expect(page.statusCode).toBe(200);
+        const body = page.json() as { history: { turnId: string }[]; hasEarlier: boolean; earlierCursor?: string };
+        for (const item of body.history) {
+          expect(seen.has(item.turnId)).toBe(false); // 不重
+          seen.add(item.turnId);
+        }
+        cursor = body.earlierCursor;
+      }
+      expect(guard).toBeLessThan(20);
+      expect(seen.size).toBe(total); // 不漏，覆盖全部
+    } finally {
+      await app.close();
+    }
+  });
+
   it("精确查询按回合与角色定位，即使多个历史条目共享提交序号", async () => {
     const deps = await createApp(testConfig());
     const { roomId, actorId } = await deps.createRoom("solo", "u_a");

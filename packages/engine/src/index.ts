@@ -25,6 +25,10 @@ export type { RealityKind, RealityPolicy } from "./reality.ts";
 export { TurnLlm } from "./turn.llm.ts";
 export type { AuditGateDeps, AuditGateResult, ReviewRequest } from "./audit.gate.ts";
 
+// ---- Turn 提交证据 / 跨重启幂等（issue #76）
+export { TURN_COMMITTED_TYPE, commitMarker, evidenceKey, parseCommitEvidence } from "./turn.evidence.ts";
+export type { TurnCommitEvidence } from "./turn.evidence.ts";
+
 // ---- 世界层永久记忆（P3，docs/08 §7）
 export { CanonizeJob, DEFAULT_CANONIZE_LIMITS, candidatesFromMemories } from "./canonize.ts";
 export type { CanonizeJudge, CanonizeLimits, CanonizeReport, MemoryIndex, PermanentCandidate } from "./canonize.ts";

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 /**
  * issue #90 回归：ConversationSessionV2 跨重启持久化 / 重放不重复 / seq 连续。
  * 快照落独立文件，不新增 EventLog 事件类型 → 契约版本不变（见 conversation-snapshot.ts）。
@@ -22,7 +23,7 @@ import { ConversationHostV2 } from "./conversation.ts";
 import { MessageIndex } from "./message.ts";
 import { loadSnapshot, saveSnapshot, sessionSnapshotPath } from "./conversation-snapshot.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
 const POLICY = `${ROOT}content/v2/conversation-policy.json`;
 const ROOM = "room_chat";
@@ -90,7 +91,7 @@ describe("issue #90：会话快照跨重启恢复", () => {
     seed(store1);
     const { host: host1 } = await makeHost(store1, [], { t: 1000 });
     const s1 = await host1.open({ roomId: ROOM, participants: [PLR, LIN, MA] });
-    await collect(host1.run(s1.id, { clientTurnId: "before-interject", interject: PLR }));
+    await collect(host1.run(s1.id, { clientTurnId: "before-interject", interject: LIN }));
 
     // 覆盖 queue/injected/sceneMemory（正常流程暂不写这两个字段，但持久化必须原样保留）
     const u: Utterance = { id: "utt_queue", speaker: PLR, mode: "broadcast", content: "排队发言" };
@@ -150,6 +151,14 @@ describe("issue #90：会话快照跨重启恢复", () => {
     const loaded = await loadSnapshot(file);
     expect(loaded.ok && loaded.snapshot).toEqual(snap);
 
+    // #106：并发/重复保存使用独立 tmp 名，不残留固定 .tmp 覆盖邻居；落盘内容仍是最后一份
+    const { readdir } = await import("node:fs/promises");
+    const before = (await readdir(path.dirname(file))).filter((f) => f.endsWith(".tmp"));
+    expect(before).toHaveLength(0); // 原子 rename 后不留临时文件
+    await Promise.all([saveSnapshot(file, snap), saveSnapshot(file, snap)]);
+    const after = (await readdir(path.dirname(file))).filter((f) => f.endsWith(".tmp"));
+    expect(after).toHaveLength(0);
+
     const store2 = new EventSourcedStore({ worldId: "w1", locId: GATE });
     seed(store2);
     const { host: host2 } = await makeHost(store2, [], { t: 1000 });
@@ -160,7 +169,9 @@ describe("issue #90：会话快照跨重启恢复", () => {
     const store3 = new EventSourcedStore({ worldId: "w1", locId: GATE });
     seed(store3);
     const { host: host3 } = await makeHost(store3, [], { t: 1000 });
-    expect(host3.restoreSessions(snap, "room_other").restored).toBe(0); // 房间隔离
+    const mismatched = host3.restoreSessions(snap, "room_other");
+    expect(mismatched.restored).toBe(0); // 房间隔离
+    expect(mismatched.degraded).toBe(true); // #106：错档会话计入 degraded，不静默吞掉
     expect(host3.getByRoom(ROOM)).toBeUndefined();
 
     // turn 达上限的旧会话恢复为 closed，不会被 getByRoom 当成可续聊会话
@@ -193,6 +204,51 @@ describe("issue #90：会话快照跨重启恢复", () => {
     expect(await loadSnapshot(file)).toEqual({ ok: false, reason: "invalid" });
     expect(host.restoreSessions({ version: 1, sessions: "bad" })).toMatchObject({ degraded: true });
   });
+
+  it("#123 P1-1：幂等缓存随快照跨重启恢复，同 clientTurnId 原样重放不生成新回合", async () => {
+    const store1 = new EventSourcedStore({ worldId: "w1", locId: GATE });
+    seed(store1);
+    const { host: h1 } = await makeHost(store1, [speak("utt_replay", "第一回合"), think("第一回合心想")], { t: 1000 });
+    const s1 = await h1.open({ roomId: ROOM, participants: [PLR, LIN, MA] });
+    const input = { clientTurnId: "turn-replay", utterance: { id: "utt_replay", speaker: PLR, mode: "broadcast" as const, content: "第一回合" } };
+    const first = await collect(h1.run(s1.id, input));
+    expect(first.some((e) => e.type === "conversation.committed" && e.turn === 1)).toBe(true);
+    expect(h1.hasCommitted(s1.id, PLR, "turn-replay")).toBe(true);
+
+    const snap = h1.exportSessions(ROOM);
+    expect(snap.seen?.length).toBeGreaterThan(0); // 快照真的带上了 seen
+    const dir = await mkdtemp(path.join(os.tmpdir(), "dsh-conv-"));
+    const file = sessionSnapshotPath(dir, ROOM);
+    await saveSnapshot(file, snap);
+    const loaded = await loadSnapshot(file);
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+
+    const store2 = new EventSourcedStore({ worldId: "w1", locId: GATE });
+    seed(store2);
+    const { host: h2, llm: llm2 } = await makeHost(store2, [speak("utt_should_not_run", "不该出现"), think("不该出现")], { t: 1000 });
+    expect(h2.restoreSessions(loaded.snapshot, ROOM)).toMatchObject({ restored: 1, degraded: false });
+    expect(h2.hasCommitted(s1.id, PLR, "turn-replay")).toBe(true);
+
+    const retry = await collect(h2.run(s1.id, input));
+    expect(retry).toEqual(first); // 原样缓存：事件、turn 全等
+    expect(llm2.calls).toBe(0); // 没调模型 → 没生成新回合 → 不会出现未计费的重复落库
+    expect(retry.filter((e) => e.type === "conversation.committed").map((e) => e.type === "conversation.committed" ? e.turn : -1)).toEqual([1]);
+  });
+
+  it("#123 P1-5：房间 B 坏档只降级 B，不关掉房间 A 已恢复的 open 会话", async () => {
+    const store = new EventSourcedStore({ worldId: "w1", locId: GATE });
+    seed(store);
+    const { host } = await makeHost(store, [], { t: 1000 });
+    const a = await host.open({ roomId: ROOM, participants: [PLR, LIN, MA] });
+    expect(host.get(a.id)?.status).toBe("open");
+
+    // 模拟 bootstrap 顺序：A 快照正常恢复 → B 坏档解析失败
+    const bad = host.restoreSessions({ version: 1, sessions: "bad" }, "room_bad");
+    expect(bad).toMatchObject({ restored: 0, degraded: true, reason: "invalid" });
+    expect(host.get(a.id)?.status).toBe("open"); // A 不能被 B 的坏档连带关闭
+    expect(host.getByRoom(ROOM)?.id).toBe(a.id); // 仍可被路由层 getByRoom 复用
+  });
 });
 
 describe("issue #90：MessageIndex rebuild 幂等 / msg.sent 回放不重复", () => {
@@ -208,4 +264,28 @@ describe("issue #90：MessageIndex rebuild 幂等 / msg.sent 回放不重复", (
     expect(index.byMessageId("msg_a")?.seq).toBe(6);
     expect(index.chain(ROOM, "msg_a")).toHaveLength(0); // 无 rootId，链为空
   });
+
+  it("#136 回归：autoRounds 进快照，重启后仍受 maxAutoRounds 限制", async () => {
+    const store1 = new EventSourcedStore({ worldId: "w1", locId: GATE });
+    seed(store1);
+    const { host: host1 } = await makeHost(store1, [speak("u1", "一"), speak("u2", "二"), speak("u3", "三"), speak("u4", "四"), speak("u5", "五")], { t: 1000 });
+    const s1 = await host1.open({ roomId: ROOM, participants: [PLR, LIN, MA] });
+    await collect(host1.run(s1.id, { clientTurnId: "auto-1", auto: true }));
+    await collect(host1.run(s1.id, { clientTurnId: "auto-2", auto: true }));
+    expect(host1.getByRoom(ROOM)?.autoRounds).toBe(2);
+
+    const store2 = new EventSourcedStore({ worldId: "w1", locId: GATE });
+    store2.append(ROOM, await store1.events(ROOM, 0));
+    const { host: host2 } = await makeHost(store2, [speak("u6", "六"), speak("u7", "七"), speak("u8", "八")], { t: 1000 });
+    expect(host2.restoreSessions(host1.exportSessions(ROOM), ROOM).restored).toBe(1);
+    const s2 = host2.getByRoom(ROOM)!;
+    expect(s2.autoRounds).toBe(2);
+
+    // 第 3 轮仍允许，第 4 轮应被 maxAutoRounds 拦住（且不调模型）
+    const third = await collect(host2.run(s2.id, { clientTurnId: "auto-3", auto: true }));
+    expect(third.some((e) => e.type === "conversation.committed")).toBe(true);
+    const fourth = await collect(host2.run(s2.id, { clientTurnId: "auto-4", auto: true }));
+    expect(fourth.some((e) => e.type === "conversation.notice")).toBe(true);
+  });
 });
+

@@ -2,7 +2,221 @@
 
 按合并到 `main` 的日期记录。提交 sha 可在 `git log` 中查；跨系统协议版本以 `CONTRACT_VERSION` 为准（产品版本见 `package.json`，当前 0.0.1）。
 
-版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）。
+版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）→ `v0.6.0` dev/v2 群聊 + 开放 issue 收口 + 像素 UI（PR #144 / #149 / #148，CONTRACT 3.6.2 → 3.8.0）。
+
+
+## v0.6.0 — 2026-11-22 像素风 UI + 开放 issue 收口 + dev/v2 群聊（PR #144 / #148 / #149；合入 main `657d6c5`；CONTRACT 3.6.2 → 3.8.0）
+
+> 本版把三段工作一起发版：**像素风 UI / 室内二级地图 / NPC 寻路**（#148）、**开放 issue 收口批**（#149，含夜间密谋秘密出口的 P0 修复与 19 个 issue 收口）、**dev/v2 群聊运行质量批**（#144，CONTRACT 3.7.0，细节见下方 3.7.0 段——它是本版第一个纳入 tag 的契约版本）。
+> `apiVersion` 3 / `SCHEMA_VERSION` 2 不变；13 个 op 闭集不变；`PROMPT_VERSION` 不变。
+> 发布前最终验证（main `657d6c5`）：`typecheck` 0 错 / `vitest` 124 文件 1000 例 / `check:contract` 8/8（CONTRACT 3.8.0）/ `build:web` 通过。
+
+### 像素风 UI / 室内二级地图 / NPC 寻路（PR #148，分支 `feat/campus-2d`）
+
+> 以表现层为主：不改契约、不新增 op 原语；`CONTRACT_VERSION` / `PROMPT_VERSION` / `apiVersion` 均不变。
+> 例外是信息馆一处**数据语义变更**（见下），已在 PR 描述中单独标注。
+
+#### 新增
+- **像素风 UI**：`pixel-ui.css` / `pixel-game.css`，HUD 与对话区改为像素风；配套 `zpix.ttf`（授权见 `apps/web/public/fonts/ZPIX-NOTICE.txt`）。
+- **室内二级地图**：`InteriorMap.tsx` + `interior.ts`，图书馆/宿舍/食堂/实验楼等室内场景；进入只切渲染，不改世界状态里的 `locId`。
+- **NPC 寻路与作息**：`pathfind.ts`（A*，600×450 网格、10 世界单位/格）+ 场景内 NPC 按作息换位置。
+- **新校园底图**：`/map/campus-wide.jpg`（6000×4500）替换原 `/map/ecust-campus.jpg`。
+
+#### 变更（数据 / 服务端语义，非纯美术）
+- **`loc_info_hall`（信息馆）：`status: planned → built`**。`apps/server/src/map.ts` 对 `status !== "built"` 的点位返回 `E_FORBIDDEN`，改为 `built` 后该点位**可 travel、可进入室内**。
+  同一批已把该点位的 `desc` / `tags` 从「图纸上的工地」改写为「已建成」，避免走进一个描述为工地的场所。
+
+#### 修复
+- **Windows 测试路径**：7 个 v2 测试文件把 `new URL(...).pathname` 换成 `fileURLToPath(...)`，修掉 Windows 下 `/D:/…` 被拼成 `D:\D:\…` 的 ENOENT。每文件 2+/1−，断言语义零变化。
+
+#### 已知限制
+- **前端不自动推进时间**：权威时间只由服务端推进（MapPanel「推进时段」或后续服务端定时），避免多 tab 叠加推进、以及挂机时白烧剧情成本（PR #148 审阅 P1-c）。
+- `zpix.ttf` 个人免费、商用需授权；商用前须取得授权或替换为可商用像素字体。
+
+### 开放 issue 收口批（PR #149，分支 `fix/pr147-review`；CONTRACT 3.7.0 → 3.8.0）
+
+> 把四个开放 PR（#124 引擎 / #125 后端 / #126 前端 / #127 UI）按分类合入本分支，并把各 issue 的遗留缺口补齐到「真实链路可用」。覆盖 #76 #90 #94 #95 #96 #97 #98 #99 #100 #104 #105 #106 #122 #128 #130 #138 #139 #140 #146；#84（真实部署冒烟）需目标机实测，保持开放。`apiVersion` / `SCHEMA_VERSION` 不变；`PROMPT_VERSION` 不变。
+
+#### 引擎（packages/、content/、契约文档）
+- **结算前置条件 `expectAttrs`（#138，PR #124）**：`ApplyOptions.expectAttrs`（`AttrExpectation[]`，可选）在 `apply` 前逐条比对当前快照 `{entityId, key, expected: AttrValue|null}`（`null` = 该属性必须不存在）；任一失配整批拒绝 `E_PRECONDITION`，不试算、不落库、不消耗回合预算；顺序为先 `expectedSeq` 后本项；只承诺标量精确相等，不做深比较。空数组/未传时行为与 3.7.0 完全一致。**本批已接生产调用方**：`packages/engine/src/attr-expect.ts` 的 `expectAttrsFor(state, ops)` 只对 `attr.delta`/`attr.set` 产条件并按 `entityId+key` 去重，`Turn.applyBatch` 主批与记忆被拒重提批、v2 `commitStep` 都显式传入；`packages/engine/src/turn.expect-wiring.test.ts` 与 `conversation.test.ts` 断言真实 apply 入口带条件，`arbiter.expect.test.ts` 覆盖失配不耗预算 / 首失配整批拒 / 同房间并发串行 / 重启后按持久化值校验四问。`CONTRACT_VERSION` → 3.8.0（docs/03 §2.3、§10.28）。
+- **后台任务协作式中止（#140）**：`canonize.retireRoom(roomId, {signal})`、`GossipHost.step(roomId, {signal})` 在候选循环、judge 前、落库前设检查点；`CanonizeReport.aborted` 标记中止，gossip 用既有 `gossip.dropped{reason:"aborted"}`，不新增事件类型/op。已落库批次不回滚。
+- **密谋导演（#96/#128）**：`discoveryProposals(ctx, plot, kind, {attitudeAttr?})` 改为显式传键（引擎无 `moduleState` 写入口，旧写法永远读不到值），未传键不产 `attr.delta`；新增 `content/modules/investigate/`（`investigate.probe`，态度键来自 `data/config.json`），是 `activePlots`/`discoveryProposals` 的首个生产调用方。
+- **存档导出/导入 fixture 修正（#99）**：`save-archive.test.ts` 的样例事件从 `turn.commit`（SSE 事件，从不落盘）改为真实的 `turn.committed` marker，并新增「导入 → 新 `FileStore` 实例读回 → `parseCommitEvidence`」探针；docs/02 §7.0 记录该约束。
+- **#146 小项**：`llm.traceId` 优先 `x-ds-trace-id`；`fitMemoryContent` 导出后 `ownSpeechLines` 与落库同一截断口径去重；docs/03 的 `routes.ts` 行号锚点改为函数名锚点。
+
+#### 后端（apps/server）
+- **夜间密谋编排（#128）**：`map.tick()` 仅在真正进入夜间那一拍跑 `runNightPlot`：用进入夜间前的在场存活 NPC（≥2），`DialogueHost.open("npc.plot") → step → close`，提案单独第二批 `arbiter.apply(..., cause.type="dialogue")`，fail-soft；不碰 #38 的 `time.advance` 原子批；同夜重复 tick 不重复落账。`plot-night.route.test.ts` 用 `app.inject` 验证真实 `plot.upserted`/`memory.written`(private)/`attr.changed` 与 LLM 抛错时 tick 仍 ok。
+- **后台任务账本与接管（#140，PR #125）**：`JobLedger` + `BackgroundCycle`（同房间单飞、generation 令牌、stall 看门狗强制接管、`takeovers`/`watchdogFires`/`terminalPersistFailures` 遥测、启动 `reconcileBackgroundJobs` 对账）；`bootstrap.ts` 两个扫描定时器仍走 `scanRoomJobs` 逐房隔离，并把 `{signal}` 传进任务体。`save-durability.test.ts` 的后台扫描用例改为串行触发（单飞锁下两种扫描不再并发），验收目标不变。
+- **#146-1 结算断言**：`conversation.route.test.ts` 新增审核 blocked → `unconfirmed`、`maxAutoRounds:0` 的 auto 回合 → `failed` 两例。
+- 复核已落地项：#90 会话快照被 `openOrReuse` 真正复用、#104 `/conversation` 共用 `TurnLedger` 且淘汰先 `host.close`、#105 地图草案共用 admin gate、#122 索引重建 merge 单调 + `.bak`、#100 历史上限可配（`GALGAME_HISTORY_LIMIT_MAX`）、#98 多槽存档、#95/#94/#97 验收。
+
+#### 前端（apps/web，PR #126）
+- 客户端前台恢复与三态探测：`conversation-api.ts` 的 `detectConversation`/`convModeAfterProbe`/`runConversationAuto`/`runConversationUtterance`，`App.tsx` 恢复时 `loadRoomThenReset` + `holdResumedBusy`；docs/09 §10。#106 MINOR 项复核已落地（URL `encodeURIComponent`、快照 tmp 名带 pid、SSE 15s 心跳）。
+
+#### UI（apps/web 候选面板，PR #127 + #139）
+- 候选行动面板 + 数字键 1–6 快选（输入框内不抢键）。**#139**：建议改为 `{text, kind}` 由来源侧给出（出口→`move`、在场 NPC→`talk`、`openings.json` 作者标注），删除中文前缀启发式；旧字符串仍可读，回退 `action`；`kind` 只影响分组/配色。docs/03 §5.2.6 登记形状与兼容策略。
+
+#### 验证（本分支实跑）
+- `npm run typecheck` → 0 错；`npx vitest run` → **120 文件 / 945 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过。
+- 未做：#84 的 compose/Nginx TLS/证书/备份恢复目标机冒烟（`deploy:smoke` 只覆盖应用层局部链路）。
+
+#### 审阅修复（PR #147 全量审阅的 P2/P3）
+- **P2-1 delta 假接线**：`discoveryProposals` opts 增加 `delta?: number`，investigate 模块传 `config.delta`；测试断言 `delta === configJson.delta`。`kindFrom` 的中文关键词同步挪进 `config.json` 的 `kindPatterns`（数据驱动，参照 §4.7）。
+- **P2-2 接管后写隔离**：`canonize.publish.ts` 与 `canonize.tombstone` 的 `arbiter.apply` 补 `expectedSeq`（load 到的 seq）；新增竞态用例（load 与 apply 之间世界房被推进 → 整批 `E_SEQ_GAP`，无交错写入）；docs/09 §9 写明「generation 只保锁/账本，world 写隔离靠检查点 + expectedSeq」。
+- **P3**：docs/03 `AttrExpectation` 注释 3.7.0→3.8.0；v2 `StoreRetry` 带上 `expectAttrs`（重试批与首批同口径）；`conversation-api.ts` 三态注释修正；`npc.plot.ts` 拆出 `npc.plot.discovery.ts`（262+92 行）、`background-cycle.ts` 拆出 `background-cycle.types.ts`（279+76 行），均 ≤300 行且重导出保持调用路径。
+
+#### 审阅修复第二轮（PR #147 被 revert 后重提：huaaaji 全量审阅 P0/P1/P2/P3）
+
+> 背景：PR #147 合并后被发现 1 个 P0（夜间密谋秘密从玩家出口泄露）与 3 个 P1，已 revert；本批在 `fix/pr147-review` 逐条修复后重提。审阅原文要点：测试全绿≠功能正确，夜间链路只读 EventLog、不断言 HTTP 响应体。
+
+- **P0 出口裁秘密**：新增 `apps/server/src/outbound-secrets.ts`，`/state`、`/events`、`POST /map/tick` 响应与 v1 `turn.patch` 的 SSE 全部过同一投影——`plot.upserted` 走引擎 `stripPlotSecrets`（`SECRET_PLOT_KEYS` 扩到含 `goal`，并与 dev/v2 共用同一份字段清单）；`memory.written` 只留 `public` 或 `ownerId===viewer`（viewer 由登录账号绑定解析，不信 query）；`/events` 的 `lastSeq` 取裁剪后最后一条。`plot-night.route.test.ts` 直接断言三处**响应体字符串**不含 `forbidReveal`/`leakPoints`/秘密原文，并反向断言 plot 的 `id/actors/status` 仍在（不是整条删掉蒙测试）。docs/04 §3.2 补出口口径。
+- **P1-1 私忆 id 跨夜碰撞**：夜间 `cause.seq` 不再是常量 0，`memoryId` 因此跨夜唯一；用真实 5 次 tick 走完一天再进第二夜，断言两夜 4 条 `memoryId` 互不相同。
+- **P1-2 夜间私忆没进索引**：`runNightPlot` 落库后逐条 `memory.ingest`，tick 后立刻可从 `MemoryIndex.all(roomId)` 召回（不再等下一回合或重启）。
+- **P1-3 第 7 夜起永久失效**：`MapService.closablePlots` 在 active 配额将满时把**往夜**剧情 `plot.upsert(status:"resolved")` 与本次提案同批提交；没有可结案的往夜剧情时跳过本夜密谋并 `console.warn`（不再白调 LLM、也不静默失败）。investigate 侧补 `status:"leaked"` 收口（见 P2-4）。
+- **P2-1 并发 `/map/tick`**：房间级串行队列（同一房间的 tick 排队、不同房间并行），入夜判定与 `expectedSeq` 都在锁内取值；`Promise.all([tick(),tick()])` 只产生 1 条 `plot.upserted`、只推进一天。
+- **P2-2 canonize 的 `expectedSeq` 是虚假保证**：`basedOnSeq` 在任务开始 `load` 时捕获、每次成功 apply 后推进；`E_SEQ_GAP` 有界重试（≤2）只对未 abort 的活动任务生效，被 stall 接管的僵尸任务体遇到 `E_SEQ_GAP` 直接记错跳过，绝不重新 load 新 seq 插到新世代之后；tombstone 走同一 helper。竞态用例改为在 apply 入口注入 + abort signal，并新增僵尸任务体用例（apply 只 1 次、无交错写入）。
+- **P2-3 后台对账逐房隔离**：`JobLedger` 按文件名校验 `roomId`（缺/错按坏行跳过并 warn），`reconcileBackgroundJobs` 逐房 try/catch，单房抛错只计入新字段 `JobReconcileSummary.skipped`，其余房间照常对账；测试覆盖缺 `roomId`、错放 `roomId` 不跨房写、整房抛错。
+- **P2-4 investigate 无幂等**：probe 先用 fact 实体的 `tags` 记已查 leak 下标（同批 atomic 提交，`{plot}_{actor}` 隔离多人），重复调查不再写证据、不再 `attr.delta`，仍 `ok:true` 并给「已查过」fact；全部查完时产出 `plot.upsert(status:"leaked")`。选 fact 标记而非 `x.*` 属性：不占 `xWritesPerTurn`、不额外产生 `attr.changed`、随存档落盘可跨重启判重。
+- **P2-5 前台恢复挂死**：新增 `timeout.ts`（`TimeoutError`/`ROOM_LOAD_DEADLINE_MS=8s`/`createDeadline`），`fetchState`/`fetchHistory`/`resume` 全链路透传 `signal`，超时给可重试提示并归还 `busyHold`；`room-enter` 加 `isLoading` 守卫避免迟到数据 reset 新房间；`dispose` 中止在途请求。
+- **P2-6 auto 超限 notice 被当未确认**：`conversation.notice` 增加可选机器字段 `reason:"autoLimit"`（3.8.0，docs/03 §5.3 登记），客户端优先按 `reason` 判定已结算，文本匹配只作老服务端兜底——notice 文案来自 `content/v2/conversation-policy.json`（可改语言），不能作为协议。
+- **P2-7 v2 下没有动态候选**：`playedTurns` 同时数 v1 `lines` 与 v2 `convLines`；v2 有 `view.position` 用服务端位置，否则从 `state.room.scene.presentIds` 推导在场 NPC 生成候选（`exits` 不编造）。
+- **P3 收口**：`types.ts`/docs/03 的「与 3.6.0 一致」改回基线 3.7.0；docs/09 的 `#124 合入后为 3.7.0` 改为以 `version.ts` 为准，stallMs 口径统一为「配置下限 1000ms、构造参数下限 1ms（测试用）」；`CanonizeReport.aborted` 登记进 docs/03 且中止报告的 `candidates` 不再恒 0；`manifest.limits` 由宿主强制执行（`limitProposals`：`proposalsPerTurn` 截断 + warn 含 `E_OVER_LIMIT`，`maxArrayItems` 截数组 args；map 的声明上限按「每 NPC 一条 move」调到 64）；`isConversationAvailable` 接回探测路径；`ViewPatch.lists` 补进 docs/03 并注明前端未消费。
+
+#### 验证（第二轮审阅修复后实跑）
+- `npx tsc --noEmit` → 0 错；`npx vitest run` → **123 文件 / 978 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过（`index-A8yziaL-.js` 387.81 kB）。
+
+#### 审阅修复第三轮（PR #149 审阅：3×P0 / 1×P1 / 7×P2 / P3）
+
+> 背景：第二轮重提后 huaaaji 打回，指出「秘密出口还漏了三处，tick 的 `expectedSeq` 取值时机仍会让旧快照覆盖并发写」。本轮把**所有**玩家可达出口收进同一投影，并用「把修复还原后测试必须失败」的反向验证确认回归测试不是空转。
+
+- **P0-1 `/map/travel` 的 Turn 事件**：`TravelResult.events` 里的 `turn.patch` 带着整份 `WorldState`（含 `plots`），旧代码只 `maskTurnEvents` 遮人名。现在 `MapService.outbound()` 对 `events` 逐条过 `projectTurnEventForPlayer`（travel 与 tick 共用）。
+- **P0-2 `turn.patch.ops`**：v1 `/turns` 的 SSE 只裁了 `state`，`ops` 原样下发——含 NPC 私有 `memory.write`、`status:"tombstoned"` 的旧工作记忆正文、investigate 查完时的 `plot.upsert`（args 带 `forbidReveal`/`leakPoints`）。现在 `projectTurnEventForPlayer` 同时重建 `state` 与 `ops`（复用 dev/v2 的 `projectProposals`：非 public 的 `memory.write` 整条丢弃、`plot.upsert` 剥 GM args）。
+- **P0-3 `memory.tombstoned.payload.reason`**：撤回事件的 `reason` 就是被撤回记忆的正文（`arbiter.ops.ts` 写入），玩家侧只留 `memoryId`/`supersedes`。
+- **P1 tick 与并发写**：`expectedSeq` 改为在**取快照之前**捕获（原先在 `modules.tick`/`dryRun` 之后取值），tick 期间 `turns` 提交的 `scene.set` 不再被旧快照覆盖；并发场景由 `modules.tick` 内真实 `arbiter.apply` 模拟，断言 tick 返回 `E_SEQ_GAP` 且最终位置是并发那次写入。
+- **P2-1 v2 前台恢复清空会话行**：`room-local-state` 新增 `convLines` 捕获/回填（同房 resumed 保留，换房/新开局清空），`room-enter` 的 capture→reset→restore 顺序有集成用例。
+- **P2-2 v2 候选不完整**：`positionFromState` 不再硬写 `exits:[]`——从 `state.links` 推导双向 `located_in`（两端都是活跃 loc），在场者只认 `kind==="npc" && status==="active"`；新增 `candidatePosition` 在服务端 `pos` 为空时回落到 state 投影（travel 后的旧 pos 不再让候选整块消失）。
+- **P2-3 canonize 重试窗口**：`applyWithSeqRetry` 在循环顶部与 `await store.load(...)` 之后都检查 `signal.aborted`（abort 可能发生在 load 内部），中止时返回内部哨兵 `E_ABORTED`，`publishCandidates` 记为 `skipped:aborted` 并出 `aborted` 报告——不再以新 seq 插到新世代之后。测试用受控 promise 把 abort 精确投在重试窗口内。
+- **P2-4 tombstone 错误语义**：撤回改用 `tombstoneWithReason`；并发冲突 `E_SEQ_GAP` → `503 retryable`（此前一律报 409 `E_MEMORY_IMMUTABLE`，运维看到 409 不会重试），真不可变仍 409。取码顺序统一为批次级 `error` 优先。
+- **P2-5 `manifest.limits.maxArrayItems` 在 intent/tool 路径失效**：`limitOutcome` 曾用「长度没变就返回原 out」判断，数组被裁剪时长度不变 → 裁剪被丢弃；现在一律以 `limitProposals` 结果为返回来源，intent/tool/tick 三条路径都有用例。
+- **P2-6 auto 超限 notice**：客户端只认服务端机器字段 `reason:"autoLimit"`，删除英文文案兜底死代码（服务端文案来自 `content/v2/conversation-policy.json`，可改语言）。
+- **P2-7 blocked auto 回合重试**：`retrySubmission(last)` 保留 `auto` 标记，重试走真正的自主轮，不再被空输入守卫吃掉。
+- **P3**：`/map/tick` 的 viewer 改按登录账号解析（联机房不再用「1 号玩家」替别人过滤私忆）；v2 `playedTurns` 只数已提交的自身 utterance；候选位置按 `kind` 过滤（不再生成「和地点说话」）；`http.ts` 的 `TimeoutError` import 移到文件顶部；新增 `/turns`、`/map/travel`、`/events` 的响应体回归断言与 tombstone 503/409 路由用例。
+
+#### 验证（第三轮审阅修复后实跑）
+- `npx tsc --noEmit` → 0 错；`npx vitest run` → **124 文件 / 994 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过（`index-CMLyLKtQ.js` 388.62 kB）。
+- 反向验证：把 `expectedSeq` 取值挪回旧位置 → 并发用例失败；把 outbound 投影还原 → 三处 P0 用例失败（证明断言真的盯着出口，而不是只读 EventLog）。
+
+#### 审阅修复第四轮（PR #149 复审剩余 2×P2 + P3）
+
+- **P2-1 v2 前台恢复重放开场 / `playedTurns` 归零**：新增 `shouldReplayOpening({restoredLineCount, keptConvLines})` 与 `playedTurnsOf(convMode, lines, convLines)` 两个纯函数——v2 房间没有 v1 history，但本地保留了 `convLines` 时不再重放「身份 → 正文」；回合数改数 `convLines` 的玩家行（`convView` 会被 reset，数它必归零）。三条用例覆盖「保留会话行 / v1 有 history / 真新开局」。
+- **P2-2 v2 travel 后候选停在旧地点**：`candidatePosition` 先比 `pos.locId` 与 `state.room.scene.locId`——不在同一场景就以 state 投影为准（`enterScene` 只改 `locId`，旧 `actors/exits` 是上个地点的）；同场景且非空仍用服务端 `pos`。
+- **P3 重启后首拍 tick 假 `E_SEQ_GAP`**：`seqOf` 改为 `await store.load(roomId)`（`seq()` 在未载入时只会给 0）；夜间第二批同样走它。新增「新 store 实例只持有磁盘事件 → 直接 tick」探针，反向验证：改回 `seq()` 即失败（seq 停在 0）。
+
+#### 验证（第四轮复审修复后实跑）
+- `npx tsc --noEmit` → 0；`npx vitest run` → **124 文件 / 1000 例**全过；`npm run check:contract` → 8/8（3.8.0）；`npm run build:web` → `index-XOequiWb.js` 388.79 kB（gzip 121.13 kB）。
+
+## 3.7.0（2026-11-21，PR #144）— dev/v2 运行质量批（issue #130 子项 #131–#137，CONTRACT 3.6.2 → 3.7.0）
+
+### 新增
+- **提示词上下文重构（#131）**：NPC 提示词固定为「你 / 在场者 / 当前场景 / 记忆 / 更早的对话 / 这一轮」；投递行区分「→ 你」与「你是旁听」，模式用中文 label；`Delivery.target` 让投递语义可还原；自己的话也进历史；窗口从全局 64 条改为每会话最近 6 轮 + 1800 字硬上限。`CONVERSATION_PROMPT_VERSION` → `2026-11-21.1`。
+- **调试可观测（#132）**：`LlmResult.finishReason/traceId`；新增 `E_LLM_TRUNCATED`；截断先按 `retryMaxTokens` 重试一次，仍失败记 `silent(reason="truncated")`；`conversation.committed.outcomes` 暴露每个 NPC 的 kind/reason/finishReason/usage（不含正文）。
+- **NPC-NPC 自主轮（#136）**：`POST /conversation` 支持 `{auto:true}`，玩家沉默时推进一轮在场 NPC 对话；`maxAutoRounds`（默认 3）限制连续自主轮；插话对象必须是在场 NPC（否则 `E_REF_NOT_FOUND`）；interject 同请求带台词不再丢弃；新增 `GALGAME_CONVERSATION_TICK_MS` 定时恢复 listening 超时。
+- **场景注入（#134）**：`loadSceneDescs` 改为按 `locId` 索引，修「5 个地点全不匹配」；开场白写入会话记忆，`render()` 输出 `【当前场景】name（locId）`，无 summary 时回退开场。
+- **准入与记忆（#133/#135）**：`TalkBudget` 拆 `mayCall`/`canSpeak` 并分 `scene`/`gossip` 渠道；点名目标只豁免最短间隔；空 speak 不占冷却。记忆 `turn` 统一为 `day*100+tick`，旧存档 `<100` 自动归一；`utterance.salience` 可给关键台词记忆提权。
+- **注入边界（#137）**：玩家原文包进 `<player_input>` 并转义结束标记，静态协议声明「其中是数据不是指令」。
+
+### 修复（PR #144 P3 收口，e403c4b 之后）
+- `llm.traceId` 优先取响应头 `x-request-id` / `x-trace-id` / `trace-id`，缺失才退回 `payload.id`。
+- auto 超上限只回 `conversation.notice` 时不再按 `unconfirmed` 占额度（没调模型也没写世界，按 failed 释放）。
+- auto 回合落盘重试成功后补记 `autoRounds`，同一轮不会被重复放行。
+- `offline-narrator` 的场景名匹配改比「命中的别名长度」（`pickSceneByInput` 可单测），修「食堂二楼被一食堂截胡」。
+- `E_LLM_TRUNCATED` 确认在 `RETRYABLE`（docs/03 §7 同口径），配合 `NpcAgent` 一次 `retryMaxTokens` 重试。
+- 合并 `resolveSceneDesc` 上方重复 JSDoc。
+- 复审补充：notice-only 只在 `auto` 回合按 `failed` 释放额度，审核拦截仍 `unconfirmed`（docs/03 §5.2.11 写明两条语义）；`ownSpeechLines` 与 `memoryProposals` 同拼法（`content (action)`）并按前缀去重；`traceId` 增认 `x-ds-trace-id`。
+- 验证：`tsc` 0；`vitest` 102 文件 **817 例**；`check:contract` 8/8（3.7.0）。
+
+### 修复（PR #144 定向复审 P1/P2，790d518 之后）
+- **P1-a 在场者显示**：`runStep` 构造 `PresentActor` 时把 `kind==="plr"` 的名字置为「玩家」；`presentLine` 玩家行输出 `- plr_x（玩家）`，其余显示中文 `NPC`。
+- **P1-b 插话后当轮可答**：玩家带 utterance 时先 `restorePhase` 切回 `speaking`，再 `decideStep`——不再让 NPC 读到 `listening` 并把 `hardCapReached` 置真。
+- **P1-c 当天台词占位**：`memoryLinesFor()` 把最近一轮的 1–2 条固定置顶，5 条高分旧记忆不再挤掉当天台词；行内带 `[第N天·地点] 你说过：` 来源标签。
+- **P2**：`utterance.salience` 补进 `ConversationBodySchema`（docs/03 已登记却 `.strict()` 拒收）；`conversation-policy.json` 的 `llm.maxTokens` 600 → 1600；审核拒绝/不可用分别记 `audit_blocked`/`audit_unavailable`；台词记忆写地点 tag（不再零重叠）；secret forced 注入上限 3 条；docs/v2 开场广播口径改为「写进 SceneMemory、首轮起半常驻注入」。
+
+### 修复（PR #144 遗留项）
+- **#134 名字回退**：新增 `resolveSceneDesc(descs, canonIdByName, {locId, locName})`——只拿到 canon 名（如「图书馆」）时先经 canon 名→id 解析再取地图描述，不再 5 个地点全 miss；`describe` 改用该函数。
+- **#136 前端自主轮**：`runConversationAuto()` + ChatPanel「让他们继续聊」按钮（v2 时可见），玩家不说话也能推进一轮 NPC 对话，受服务端 `maxAutoRounds` 限制。
+
+### 修复（PR #144 复核）
+- **投递行玩家标注**：`nameFor` 把 `kind === "plr"` 的实体显示为「玩家」（不再露出实体名「你」）；自己的台词显示「你说 → X」/「你公开说」，不再误标「你是旁听」；定向通知里的 `nameOf` 同步走该映射，`{target}` 替换为「玩家」。
+
+### 变更
+- 验证：`tsc` 0 错；`vitest` 101 文件 **810 例**全过；`build:web` 通过；`check:contract` 8/8（3.7.0）。
+- `CONTRACT_VERSION` 3.6.2 → 3.7.0（只增可选字段 `Delivery.target`、`Utterance.salience`、`LlmResult.finishReason/traceId`、`committed.outcomes`、请求体 `auto`，新增错误码 `E_LLM_TRUNCATED`；见 docs/03 §10.27）。
+
+## 3.6.1 → 3.6.2（2026-11-21，PR #120 / #121，CONTRACT 3.6.0 → 3.6.2；未新增发版号）
+
+> 合并顺序 #120（merge `b41c7e7`）→ #121（merge `48dbfd1`）。两笔都是数据层安全性修复，不新增 op、错误码、HTTP 端点；`apiVersion` / `SCHEMA_VERSION` / `PROMPT_VERSION` 不变。**本次只按契约版本记账，不新增产品发版号、不打 tag。**
+
+### 3.6.1（PR #120，#115）：坏档隔离校验
+
+- 房间日志载入改为**整份严格校验**：Envelope 结构、房间归属、seq 连续、私信负载与房间归属、以及逐条投影；任一失败 → 保留原日志文件不动、该房间端点返回 `503 E_STORE_FAULT`，健康房间照常启动。
+- 前置 #114（PR #118，已随 3.6.0 合入）把读取 / 列目录收敛为**仅 `ENOENT` 按缺失**、其余故障上抛且不置 `loaded`；本版在其上把"半截行 / 结构不符 / 投影失败"也纳入同一口径：整份校验失败 → 503 且保留原件，启动期重建遇到非 `ENOENT` 直接失败（fail-fast，不再静默当空表）。
+- `scripts/replay.ts` 复用同一套投影校验，坏档不再"回放通过"。
+- 契约：`CONTRACT_VERSION 3.6.0 → 3.6.1`；文档见 docs/03 §2 纪律 #3、§10.25 与 docs/10 的坏档恢复步骤。
+
+### 3.6.2（PR #121，#117）：提交持久性与结果待核对
+
+- 新增 `RoomLogWriter`：临时文件写入（flush）→ 原子 `rename` → 同步所在目录；替换前失败可安全重试。
+- 替换后目录同步失败 → `StoreCommitUnknownError`（`E_STORE_FAULT`）：房间进入待核对状态（`RoomStorageBlockedError`），**已提交的回合仍按本批 seq 与投影确认**，不被后续故障抹掉；当次额度记 `unconfirmed`，`turn.error.retryable=false`。
+- `apply` 新增 `captureState` / `stateAfter`：返回本批投影的独立快照，避免落盘后读 store 与另一批交错。
+- 后台扫描按房隔离（`apps/server/src/room-jobs.ts`）：单个坏房间不再中断整轮 canonize / gossip。
+- 契约：`CONTRACT_VERSION 3.6.1 → 3.6.2`；文档见 docs/03 §2 纪律 #1、§7、§10.26 与 docs/10 §7.1。
+
+### 验证（2026-11-21 在 main `48dbfd1` 复跑）
+
+- `npm run typecheck` → 0 错。
+- `npx vitest run` → **100 files / 775 tests** 全过。
+- `npm run check:contract` → **8/8**（CONTRACT 3.6.2）。
+- `npm run build:web` → 成功（`379.91 kB`，gzip `117.78 kB`）。
+
+### 已知边界
+
+- 单进程单写者；不提供跨进程锁 / 租约（沿用 docs/10）。
+- 目录同步失败后的"待核对"标记只在进程内：重启不会消解可疑结果，须先人工核对存档。
+- 3.7.0 批（PR #144，issue #130 子项）已在 main，并记录在本文件下方 `## 3.7.0` 段（随 v0.6.0 一起发版）；本段只覆盖 3.6.1 / 3.6.2，不重复记账。
+- `turn.committed` 登记已在 v0.5.6 完成（`content/registry/events.json` 共 11 条；payload `{clientTurnId,turnId,actorId,committedSeq,narrative?,facts?,usage?}` 与 `packages/engine/src/turn.evidence.ts` 对齐），本 PR 只复核、未改动。
+
+## v0.5.6（候选 tag，尚未打；发版时决定）— 2026-11-20 PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）
+
+> 合并前登记。基线 `6524420` → PR #123 head `2183828`；14 commit 覆盖 #76/#84/#90/#94/#95/#96/#97/#98/#99/#100/#104/#105/#106/#122。按「只增登记、不改契约」执行：13 op、`apiVersion`、`CONTRACT_VERSION`、`PROMPT_VERSION`、§7 错误码集合均未变（逐条见 docs/03 §10.24）。
+
+### 新增
+
+- **槽位存档（#98）**：`GET/POST/PUT/DELETE /api/v1/me/saves/slots`、`SaveSlot`、`SaveEntry.slotId` 与 `/me/saves` 的 `slots[]`；只删槽映射，不删房间事件日志/历史。拒绝路径复用已有错误码（400 `E_SCHEMA_INVALID` / 404 `E_REF_NOT_FOUND` / 409 `E_ID_TAKEN` / `E_OVER_LIMIT`）。
+- **存档导出/导入归档（#99）+ 只读重建（#122）**：`scripts/export-save.ts`、`scripts/import-save.ts`、`scripts/rebuild-saves.ts`；归档格式见 docs/02 §7.0，重复导入按 id 跳过。
+- **历史行上限可配（#100）**：`history.limitMax` / `GALGAME_HISTORY_LIMIT_MAX`（默认 200），限制单次响应行数，更早历史用 `earlierCursor` / `before` 翻页。
+- **玩法/导演补口（#96/#97）**：npc.plot 密谋导演、study 最小模块；只加内容，不改引擎。
+- **部署冒烟入口（#84）**：`npm run deploy:smoke`（`scripts/deploy-smoke.ts`），覆盖鉴权/CSRF/限流/邀请码/数据卷持久化。
+
+### 修复 / 变更
+
+- **跨重启幂等（#76）**：引擎在成功批次末尾写 `turn.committed` marker（payload `{clientTurnId,turnId,actorId,committedSeq,narrative?,facts?,usage?}`），重启从 EventLog 重建 `seen` 并补齐历史；本批把该事件补登记到 `content/registry/events.json` 并同步 docs/03 §4、docs/04 §3.2、docs/11（此前文档称「从未发射」已过时）。只增登记，不 bump 版本。
+- **会话快照端到端恢复（#90）**：恢复的会话由路由 `openOrReuse` 复用，不再是孤儿；坏档只降级该房为新会话。
+- **群聊额度统一（#104）**：`/conversation` 与 v1 `/turns` 共用 `TurnLedger`，预留/结算同房间串行；超额度 429 `E_RATE_LIMITED`、冲突 409 `E_PRECONDITION`/`E_TURN_BUSY`。
+- **interject 口径对齐（#106）**：无绑定角色 → 400 `E_SCHEMA_INVALID`；有绑定角色的 interject-only 预留额度并落 `unconfirmed`（文档不再写「不计入额度」），长流每 15s 发 SSE 注释心跳。
+- **管理端点鉴权统一（#105）**、验收测试补口（#94/#95）：不改契约。
+
+### 验证（lead 在 PR #123 修复分支实跑）
+
+- `npm test` → **93 files / 725 tests** 全过；`npm run check:contract` → **8/8**（CONTRACT 3.6.0）；`npm run deploy:smoke` → **12/12**。
+- 本批为纯文档/契约登记改动；文档 worktree 的 `npm run typecheck`、`npm test`、`npm run check:contract` 复跑输出见交付报告。
+
+### 已知边界
+
+- `turn.committed` 只补登记（事件已在代码发射），**不 bump `CONTRACT_VERSION`**；registry 中 `broadcast:false`，只进 EventLog，不向客户端广播。
+- 每回合因 `attr.changed` + marker 共多 1 条 seq；`commit.seq == marker.seq == committedSeq`，历史 `earlierCursor`/分页按此口径。
+- 有绑定 `actorId` 的 interject-only 落 `unconfirmed`，额度仍占占用态，需后续对账结案（不是免费）。
+- `deploy:smoke` 12/12 只证明应用层局部链路，**不覆盖** Docker compose、Nginx TLS/域名隔离、自签证书与备份恢复，后者仍须目标机实测。
+- 单进程单写者、`actionsEnabled` 全局暂停、`unconfirmed` 需人工对账等沿用 v0.5.5 已知边界。
 
 ## 3.7.0（未合并，PR #124 / `pr/engine`；CONTRACT 3.6.0 → 3.7.0）
 

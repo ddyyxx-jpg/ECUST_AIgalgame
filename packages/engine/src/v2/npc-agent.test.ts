@@ -1,10 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { MockLlm } from "../../../llm/src/mock.ts";
 import { loadConversationPolicy, loadModes } from "./delivery.ts";
 import { NpcAgent, buildNpcPrompt } from "./npc-agent.ts";
 import { createInitialState } from "../projection.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const modes = await loadModes(`${ROOT}content/v2/utterance-modes.json`);
 const policy = await loadConversationPolicy(`${ROOT}content/v2/conversation-policy.json`);
 
@@ -82,7 +83,7 @@ describe("v2 NPC agent（每个 NPC 独立一次 LLM）", () => {
     const r = await new NpcAgent({ llm, modes, policy }).decide({ ...base });
     expect(r.decision.kind).toBe("silent");
     const prompt = buildNpcPrompt({ ...base, memoryText: "私人记忆" }, modes, policy);
-    expect(prompt.indexOf("只输出 JSON")).toBeLessThan(prompt.indexOf("【本轮收到】"));
+    expect(prompt.indexOf("只输出 JSON")).toBeLessThan(prompt.indexOf("【这一轮】"));
     expect(prompt).toContain("私人记忆");
     expect(prompt).toContain("玩家在场");
   });

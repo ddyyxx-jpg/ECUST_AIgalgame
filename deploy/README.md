@@ -118,6 +118,9 @@ curl -k -X POST https://<公网IP>/api/v1/rooms \
 
 管理员冒烟：用初始化的账号在站点登录，然后在同一浏览器会话访问 `https://<公网IP>/api/v1/admin/users`。确认返回 HTTP 200，且列表中 `campus_admin` 的 `role` 为 `admin`。如需验证一次性邀请，用该会话调用 `POST /api/v1/admin/invites`，再用返回的邀请码注册测试账号。
 
+**本地可离线跑的冒烟**（无需 Docker/Nginx，node 直跑真服务 + 临时 dataDir）：`npm run deploy:smoke`。
+覆盖 health、登录门 401、CSRF Origin、admin 创建一次性邀请码并验证不可重复、注册/登录/Cookie 会话、登录失败限流 429、普通用户 admin 403、同 dataDir 重建后账号仍在（卷持久化语义）。脚本输出 `12/12 通过` **只证明应用层局部链路（本地 node 直跑真服务 + 临时 dataDir）通过**，不能据此声称部署已验证。**它不能替代上面的目标机实测**：Docker compose、Nginx TLS 与域名隔离、自签证书、备份恢复演练仍须按 §3–§5 在目标机完成。
+
 ## 6. 注意 / 部署约束
 
 - 单实例；`FileStore` 没有多进程锁，不要扩副本。

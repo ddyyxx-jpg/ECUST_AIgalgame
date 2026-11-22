@@ -9,6 +9,8 @@ import type { AuditPolicy, AuditPort, AuditVerdict } from "./audit.ts";
 import { DEFAULT_AUDIT_POLICY, NoopAudit, formatWarning, labelOf } from "./audit.ts";
 import type { DefaultArbiter } from "./arbiter.ts";
 import type { EventLog } from "./store.ts";
+import type { TurnCommitEvidence } from "./turn.evidence.ts";
+import { isRoomSyncFault } from "./store-write.ts";
 
 export type AuditGateResult =
   | { kind: "ok" }
@@ -81,6 +83,7 @@ export class AuditGate {
     verdict: AuditVerdict,
     state: WorldState,
     seq: number,
+    evidence?: TurnCommitEvidence,
   ): Promise<TurnEvent[]> {
     const policy = this.policy;
     const plr = state.entities[args.actorId];
@@ -151,7 +154,9 @@ export class AuditGate {
     }
 
     // 处置信封必须是 engine.* 来源：memory.write 的代写资格只看信封，不看 proposal.by
-    const applied = await this.deps.arbiter.apply(args.roomId, ops, { ...cause, type: "engine.audit" }, { expectedSeq: seq, mode: "atomic" });
+    const applied = await this.deps.arbiter.apply(args.roomId, ops, { ...cause, type: "engine.audit" }, {
+      expectedSeq: seq, mode: "atomic", ...(evidence ? { commitEvidence: evidence } : {}), captureState: true,
+    });
 
     const events: TurnEvent[] = [];
     if (!applied.ok) {
@@ -177,11 +182,12 @@ export class AuditGate {
         : "信誉属性未配置（跳过扣分）",
     ];
     events.push({ type: "turn.facts", facts });
-    const afterState = await this.deps.store.snapshot(args.roomId);
+    const afterState = applied.stateAfter ?? await this.deps.store.snapshot(args.roomId);
     events.push({ type: "turn.patch", state: afterState, ops: applied.applied });
     try {
       await this.deps.store.flush(args.roomId);
     } catch (e) {
+      if (isRoomSyncFault(e)) throw e;
       events.push({
         type: "turn.error",
         code: "E_STORE_FAULT",
@@ -190,7 +196,7 @@ export class AuditGate {
       });
       return events;
     }
-    events.push({ type: "turn.commit", turnId: `turn_${args.clientTurnId}`, seq: this.deps.store.seq(args.roomId) });
+    events.push({ type: "turn.commit", turnId: `turn_${args.clientTurnId}`, seq: applied.seq });
     return events;
   }
 }

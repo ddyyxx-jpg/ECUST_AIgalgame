@@ -111,6 +111,11 @@ export class GossipAgent {
   }
 }
 
+/** 协作式中止参数：不传 signal 时 step 行为与旧签名完全一致 */
+export interface GossipStepOptions {
+  signal?: AbortSignal;
+}
+
 export interface GossipHostDeps {
   store: EventLog;
   arbiter: DefaultArbiter;
@@ -220,10 +225,20 @@ export class GossipHost {
     });
   }
 
-  /** 一次后台波次：每个有未读消息的 NPC 独立决策；先预算后调用 */
-  step(roomId: RoomId, viewer?: ActorId): Promise<GossipEvent[]> {
+  /**
+   * 一次后台波次：每个有未读消息的 NPC 独立决策；先预算后调用。
+   *
+   * 中止是**协作式**的：每个 NPC 迭代之间/每次 LLM 调用前检查 signal.aborted，
+   * abort 后尽快返回。已经过 Arbiter 落库的批次保持真实、不回滚；返回结构仍是
+   * GossipEvent[]（可附带一个 aborted 标记，消费者按类型过滤即可）。
+   * 不传 opts 时行为与旧签名完全一致。
+   */
+  step(roomId: RoomId, viewerOrOpts?: ActorId | GossipStepOptions): Promise<GossipEvent[]> {
+    const viewer = typeof viewerOrOpts === "string" ? viewerOrOpts : undefined;
+    const signal = viewerOrOpts && typeof viewerOrOpts === "object" ? viewerOrOpts.signal : undefined;
     return this.serial(roomId, async () => {
-      this.deps.budget.beginTick(roomId);
+      this.deps.budget.beginTick(roomId, "gossip");
+      if (signal?.aborted) return [{ type: "gossip.dropped", id: roomId, reason: "aborted" }];
       const state: WorldState = this.deps.store.state(roomId);
       const out: GossipEvent[] = [];
       const proposals: { op: "msg.send" | "memory.write"; args: Record<string, unknown>; reason: string; by: string }[] = [];
@@ -242,6 +257,8 @@ export class GossipHost {
       }
 
       for (const npc of npcs) {
+        // 协作式中止：迭代之间检查，abort 后立刻返回，已落库消息不回滚
+        if (signal?.aborted) return [...out, { type: "gossip.dropped", id: roomId, reason: "aborted" }];
         if (calls >= Math.min(this.deps.policy.maxNpcCallsPerTick, auto?.maxTurnsPerTick ?? this.deps.policy.maxNpcCallsPerTick)) break;
         const inbox = this.deps.messages.inbox(roomId, npc.id, 5)
           .filter((m) => !this.deps.messages.hasReplyTo(roomId, m.id))
@@ -251,18 +268,20 @@ export class GossipHost {
             return fresh;
           });
         if (inbox.length === 0) continue;
-        const reason = this.deps.budget.canSpeak(roomId, npc.id, this.now());
+        const reason = this.deps.budget.canSpeak(roomId, npc.id, "gossip", this.now());
         if (reason !== "ok") {
-          out.push({ type: "gossip.dropped", id: npc.id, reason, nextAt: this.deps.budget.nextEligible(roomId, npc.id, this.now()) });
+          out.push({ type: "gossip.dropped", id: npc.id, reason, nextAt: this.deps.budget.nextEligible(roomId, npc.id, "gossip", this.now()) });
           continue;
         }
-        this.deps.budget.recordCall(roomId);
+        this.deps.budget.recordCall(roomId, npc.id, "gossip");
         calls += 1;
         const prompt = buildGossipPrompt({
           npcId: npc.id, npcName: npc.name, inbox,
           fromName: (id) => state.entities[id]?.name ?? id,
           policy: this.deps.policy,
         });
+        // 每次 LLM 调用前检查：abort 与该调用排在同一 tick 时不再发起付费请求
+        if (signal?.aborted) return [...out, { type: "gossip.dropped", id: roomId, reason: "aborted" }];
         const { decision } = await this.deps.agent.decide(prompt, npc.id, roomId);
         if (!decision || decision.kind === "ignore") {
           out.push({ type: "gossip.dropped", id: inbox[0]?.id ?? npc.id, reason: decision?.reason ?? "invalid-decision" });
@@ -325,6 +344,8 @@ export class GossipHost {
       }
 
       if (proposals.length === 0) return out;
+      // LLM 调用是异步间隙：abort 可能在此期间发生，落库前再确认一次
+      if (signal?.aborted) return [...out, { type: "gossip.dropped", id: roomId, reason: "aborted" }];
       const expectedSeq = this.deps.store.seq(roomId);
       const result = await this.deps.arbiter.apply(roomId, proposals, cause(roomId, "gossip", `tick_${state.clock.tick}_${expectedSeq}`, "gossip.spread"), { expectedSeq });
       if (!result.ok || result.rejected.length) {
@@ -332,7 +353,7 @@ export class GossipHost {
       }
       this.deps.messages.ingest(result.events);
       for (const m of recordsOf(result.events)) {
-        this.deps.budget.recordSent(roomId, m.from);
+        this.deps.budget.recordSent(roomId, m.from, "gossip");
         if (viewer === undefined || viewer === m.from || viewer === m.to) out.push({ type: "gossip.message", message: m });
       }
       await this.deps.store.flush(roomId);

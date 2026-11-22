@@ -136,6 +136,8 @@ export interface DeliverOptions {
   modes: Map<string, UtteranceModeDef>;
   /** @公开时给非目标的提示文案生成器 */
   noticeFor?: (target: ActorId) => string;
+  /** 目标 id → 显示名：数据模板里的 {target} 替换成名字，而不是裸 id */
+  nameOf?: (target: ActorId) => string;
 }
 
 /** 按模式定义算每个接收方看到的通道；玩家也在 recipients 里，规则对所有人一致 */
@@ -150,12 +152,15 @@ export function deliver(u: Utterance, opts: DeliverOptions): Delivery[] {
   for (const to of opts.recipients) {
     const channels = isTarget(to) ? mode.targetChannels : mode.otherChannels;
     if (channels.length === 0) continue;
+    const targets = targetsOf(u);
     const payload: Delivery = {
       to,
       speaker: u.speaker,
       utteranceId: u.id,
       mode: u.mode,
       channels: [...channels],
+      // 语义目标：收到者本人是目标时就是他；旁听者看到的是"这句话本来对谁说"
+      ...(targets.length ? { target: targets.includes(to) ? to : targets[0] } : {}),
     };
     for (const ch of channels) {
       if (ch === "content" && u.content) payload.content = u.content;
@@ -165,9 +170,13 @@ export function deliver(u: Utterance, opts: DeliverOptions): Delivery[] {
         if (text) payload.action = text;
       }
       if (ch === "notice") {
-        if (mode.addressedNotice && targetsOf(u).length) {
-          const list = targetsOf(u);
-          payload.notice = list.map((t) => opts.noticeFor?.(t) ?? mode.addressedNoticeText?.replace("{target}", t) ?? `to ${t}`).join("、");
+        if (mode.addressedNotice && targets.length) {
+          // 数据模板优先（addressedNoticeText 以前是死配置）；没有模板才回落到调用方的生成器
+          payload.notice = targets
+            .map((t) => (mode.addressedNoticeText
+              ? mode.addressedNoticeText.replaceAll("{target}", opts.nameOf?.(t) ?? t)
+              : (opts.noticeFor?.(t) ?? `to ${t}`)))
+            .join("、");
         } else if (u.notice) payload.notice = u.notice;
       }
     }

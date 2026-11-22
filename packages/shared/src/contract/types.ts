@@ -350,7 +350,7 @@ export interface Rejected {
 /** 一批提案的提交语义：atomic=全成功或全回滚（默认）；partial=逐条丢弃坏条目（少数场景显式选择） */
 export type ApplyMode = "atomic" | "partial";
 
-/** 属性前置条件（3.7.0）：apply 前逐条比对当前快照 */
+/** 属性前置条件（3.8.0）：apply 前逐条比对当前快照 */
 export interface AttrExpectation {
   entityId: string;
   key: string;
@@ -366,7 +366,7 @@ export interface ApplyOptions {
   /**
    * 结算前置条件：apply 前逐条比对当前快照，任一不满足 → 整批拒绝
    * E_PRECONDITION，不落库、不消耗回合预算；用于后台结算基于旧值的场景。
-   * 空数组/未传 → 行为与 3.6.0 完全一致；先校验 expectedSeq，再校验本项。
+   * 空数组/未传 → 行为与 3.7.0 完全一致；先校验 expectedSeq，再校验本项。
    */
   expectAttrs?: AttrExpectation[];
 }
@@ -546,6 +546,10 @@ export interface LlmResult {
   usage: Usage;
   model: string;
   latencyMs: number;
+  /** 上游返回的结束原因；"length" 表示被 max_tokens 截断（#132 不能当普通格式错误） */
+  finishReason?: string;
+  /** 本次调用追踪号（可选；网关/日志排查用） */
+  traceId?: string;
 }
 
 export interface LlmPort {

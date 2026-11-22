@@ -20,6 +20,17 @@ export interface SaveEntry {
   /** 建房时服务端签发的角色 id；3.3 之前的老存档没有，恢复时从房间成员表兜底 */
   actorId?: string;
   formatVersion: number;
+  /** issue #98：命名槽归属（缺省 = 历史默认存档） */
+  slotId?: string;
+}
+
+/** issue #98：账号内命名房间槽映射（服务端 SaveSlot 同形） */
+export interface SaveSlot {
+  slotId: string;
+  label: string;
+  roomId: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 /** 旧房间/旧存档的角色 id：只用于兼容，不在新流程里猜身份 */
@@ -54,8 +65,9 @@ export interface TurnStreamHandlers {
   onUnconfirmed?: (clientTurnId: string) => void;
 }
 
-export async function fetchState(roomId: string): Promise<WorldState> {
-  const r = await apiFetch(`/api/v1/rooms/${roomId}/state`);
+/** @param signal 进房整体 deadline / 切房作废时中止底层 fetch；不传则保持旧行为 */
+export async function fetchState(roomId: string, signal?: AbortSignal): Promise<WorldState> {
+  const r = await apiFetch(`/api/v1/rooms/${roomId}/state`, signal ? { signal } : undefined);
   if (!r.ok) {
     if (r.status === 404) throw new GameError("E_ROOM_NOT_FOUND", "房间不存在或事件日志不可读");
     throw await httpErrorFrom(r, "state");
@@ -83,11 +95,54 @@ export async function createSoloRoom(scenarioId?: string): Promise<RoomSession> 
 // ---------------------------------------------------------------- 存档 / 历史（issue #7）
 
 /** 本人的存档索引；401/403/5xx 抛错交给 UI 区分"请先登录/无法加载"，只有真空列表才返回 [] */
-export async function fetchSaves(): Promise<SaveEntry[]> {
+export interface SavesPayload {
+  saves: SaveEntry[];
+  slots: SaveSlot[];
+}
+
+export async function fetchSaves(): Promise<SavesPayload> {
   const r = await apiFetch(`/api/v1/me/saves`);
   if (!r.ok) throw await httpErrorFrom(r, "saves");
-  const d = (await r.json()) as { saves?: SaveEntry[] };
-  return Array.isArray(d.saves) ? d.saves : [];
+  const d = (await r.json()) as { saves?: SaveEntry[]; slots?: SaveSlot[] };
+  return {
+    saves: Array.isArray(d.saves) ? d.saves : [],
+    // 旧服务端没有 slots 字段 → 空数组，UI 不新增槽交互
+    slots: Array.isArray(d.slots) ? d.slots : [],
+  };
+}
+
+/** issue #98：列出 / 建 / 改 / 删命名槽；只操作索引映射，不碰房间数据 */
+export async function fetchSlots(): Promise<SaveSlot[]> {
+  const r = await apiFetch(`/api/v1/me/saves/slots`);
+  if (!r.ok) throw await httpErrorFrom(r, "slots");
+  const d = (await r.json()) as { slots?: SaveSlot[] };
+  return Array.isArray(d.slots) ? d.slots : [];
+}
+
+export async function createSlot(label: string, roomId: string, slotId?: string): Promise<SaveSlot> {
+  const r = await apiFetch(`/api/v1/me/saves/slots`, {
+    method: "POST",
+    ...jsonHeaders,
+    body: JSON.stringify({ label, roomId, ...(slotId ? { slotId } : {}) }),
+  });
+  if (!r.ok) throw await httpErrorFrom(r, "create slot");
+  return ((await r.json()) as { slot: SaveSlot }).slot;
+}
+
+export async function updateSlot(slotId: string, patch: { label?: string; roomId?: string }): Promise<SaveSlot> {
+  const r = await apiFetch(`/api/v1/me/saves/slots/${slotId}`, {
+    method: "PUT",
+    ...jsonHeaders,
+    body: JSON.stringify(patch),
+  });
+  if (!r.ok) throw await httpErrorFrom(r, "update slot");
+  return ((await r.json()) as { slot: SaveSlot }).slot;
+}
+
+export async function deleteSlot(slotId: string): Promise<boolean> {
+  const r = await apiFetch(`/api/v1/me/saves/slots/${slotId}`, { method: "DELETE" });
+  if (!r.ok) throw await httpErrorFrom(r, "delete slot");
+  return ((await r.json()) as { removed?: boolean }).removed === true;
 }
 
 /** 只删索引（房间与历史保留）；返回服务端是否真的删掉了一条 */
@@ -127,9 +182,10 @@ export function buildHistoryQuery(cursor: HistoryCursor = {}): string {
   return q.toString();
 }
 
-/** 已提交回合历史：默认恢复最新片段；`before` 向更早翻页（docs/03 §5.2.9） */
-export async function fetchHistory(roomId: string, cursor: HistoryCursor = {}): Promise<HistoryPage> {
-  const r = await apiFetch(`/api/v1/rooms/${roomId}/history?${buildHistoryQuery(cursor)}`);
+/** 已提交回合历史：默认恢复最新片段；`before` 向更早翻页（docs/03 §5.2.9）
+ *  @param signal 与 fetchState 共享进房 deadline，避免历史请求半开挂住 busy */
+export async function fetchHistory(roomId: string, cursor: HistoryCursor = {}, signal?: AbortSignal): Promise<HistoryPage> {
+  const r = await apiFetch(`/api/v1/rooms/${roomId}/history?${buildHistoryQuery(cursor)}`, signal ? { signal } : undefined);
   if (r.status === 404) throw new GameError("E_ROOM_NOT_FOUND", "房间不存在或没有可恢复的历史");
   if (!r.ok) throw await httpErrorFrom(r, "history");
   const d = (await r.json()) as Partial<HistoryPage> & { history?: HistoryLine[] };

@@ -1,8 +1,9 @@
 /**
- * 候选行动面板：把纯文本 suggestions 渲染成一组带数字键的候选条（PR-4）。
+ * 候选行动面板：把 suggestions 渲染成一组带数字键的候选条（PR-4 / issue #139）。
  *
  * 这里只负责展示与点击转发：不发请求、不读全局状态、不推导候选；
- * 分级与编号来自 candidates.ts，点击后仍走 ChatPanel 的 onPick。
+ * kind 来自来源（openings 数据 / turnSuggestions），分组与编号在 candidates.ts 归一化，
+ * 点击后仍走 ChatPanel 的 onPick。
  * 禁用条件统一是「回合进行中」或「权威状态未就绪」，避免点了没反应。
  */
 import type { Candidate } from "./candidates.ts";

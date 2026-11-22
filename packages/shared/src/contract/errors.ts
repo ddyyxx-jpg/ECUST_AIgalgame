@@ -14,6 +14,7 @@ export const ERROR_CODES = [
   "E_ILLEGAL_OP",
   "E_LLM_FORMAT",
   "E_LLM_TIMEOUT",
+  "E_LLM_TRUNCATED",
   "E_MEMORY_IMMUTABLE",
   "E_MEMORY_TAINT",
   "E_MEMORY_WORLD_MISMATCH",
@@ -50,5 +51,6 @@ export function isErrorCode(x: unknown): x is ErrorCode {
 export const RETRYABLE: readonly ErrorCode[] = [
   "E_LLM_TIMEOUT",
   "E_LLM_FORMAT",
+  "E_LLM_TRUNCATED",
   "E_RATE_LIMITED",
 ];

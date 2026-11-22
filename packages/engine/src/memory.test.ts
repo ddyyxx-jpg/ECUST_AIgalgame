@@ -135,7 +135,7 @@ describe("EventSourcedMemory", () => {
     mem.ingest(memEvent(1, { memoryId: "mem_a", ownerId: NPC, content: "他借走了我的书", userId: "u_a", about: [PLR], aboutUserIds: ["u_a"], tags: ["书"], salience: 4, tier: "long", turn: 3, at: 3 }));
     const p = await mem.profile("u_a", NPC, ROOM);
     expect(p?.familiarity).toBeGreaterThan(0);
-    expect(p?.firstMetTurn).toBe(3);
+    expect(p?.firstMetTurn).toBe(300); // #135：旧存档 turn=3 → day*100 归一
     expect(p?.lastTopics).toContain("书");
   });
 

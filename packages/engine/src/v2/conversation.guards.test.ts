@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 /** PR #51 review 回归：审核扩面 / 落盘重试 / zod 边界 / 数据驱动 / 幂等键 */
 import { describe, expect, it } from "vitest";
 import type { ConversationEvent, ConversationPolicy, ConversationSessionV2, Entity, Envelope, LlmPort, LlmResult, Utterance } from "../../../shared/src/index.ts";
@@ -15,7 +16,7 @@ import { NpcAgent, parseDecision } from "./npc-agent.ts";
 import { ConversationAudit } from "./audit.ts";
 import { ConversationHostV2 } from "./conversation.ts";
 
-const ROOT = new URL("../../../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MODES = `${ROOT}content/v2/utterance-modes.json`;
 const POLICY = `${ROOT}content/v2/conversation-policy.json`;
 const ROOM = "room_chat";
@@ -179,7 +180,10 @@ describe("PR#51 P1 回归", () => {
     expect(first.some((e) => e.type === "conversation.error" && e.code === "E_STORE_FAULT" && e.retryable)).toBe(true);
     expect((llm as MockLlm).calls).toBe(2);
     const second = await collect(host.run(session.id, input));
-    expect(second.some((e) => e.type === "conversation.committed")).toBe(true);
+    const committed = second.find((e) => e.type === "conversation.committed");
+    expect(committed).toBeDefined();
+    // 重试也必须带回第一轮的 outcomes（审阅 P2）
+    if (committed?.type === "conversation.committed") expect((committed.outcomes ?? []).length).toBeGreaterThan(0);
     expect((llm as MockLlm).calls).toBe(2); // 重试没有再问模型
     expect((await store.events(ROOM, 0)).filter((e) => e.type === "memory.written")).toHaveLength(3); // 玩家 + NPC 发言 + 心理活动，没有重复落库
   });
@@ -213,7 +217,7 @@ describe("PR#51 P1 回归", () => {
   it("②listenTimeoutMs 到期可恢复，resumeExpired 返回会话 id", async () => {
     let now = 1000;
     const { host, session } = await setup({ now: () => now, responses: [] });
-    await collect(host.run(session.id, { clientTurnId: "i1", interject: PLR }));
+    await collect(host.run(session.id, { clientTurnId: "i1", interject: LIN }));
     expect(host.get(session.id)?.phase).toBe("listening");
     now = 1000 + 31_000;
     expect(host.resumeExpired()).toContain(session.id);
@@ -272,7 +276,7 @@ describe("PR#51 P2 回归", () => {
   it("幂等缓存有上限（≤256），不会无限增长", async () => {
     const { host, session } = await setup({});
     for (let i = 0; i < 260; i++) {
-      await collect(host.run(session.id, { clientTurnId: `i${i}`, interject: PLR }));
+      await collect(host.run(session.id, { clientTurnId: `i${i}`, interject: LIN }));
     }
     expect(host.idempotencySize).toBeLessThanOrEqual(256);
   });
@@ -310,7 +314,7 @@ describe("PR#51 二审回归", () => {
   it("H：resumeExpiredEvents 带回 phase 事件", async () => {
     let now = 1000;
     const { host, session } = await setup({ now: () => now, responses: [] });
-    await collect(host.run(session.id, { clientTurnId: "i1", interject: PLR }));
+    await collect(host.run(session.id, { clientTurnId: "i1", interject: LIN }));
     now += 31_000;
     const evs = host.resumeExpiredEvents();
     expect(evs.some((e) => e.type === "conversation.phase" && e.phase === "speaking")).toBe(true);
@@ -343,7 +347,10 @@ describe("PR#51 二审回归", () => {
     expect(first.filter((e) => e.type === "conversation.error" && e.code === "E_STORE_FAULT")).toHaveLength(1);
     const second = await collect(host.run(session.id, input));
     expect(second.filter((e) => e.type === "conversation.error")).toHaveLength(0);
-    expect(second.some((e) => e.type === "conversation.committed")).toBe(true);
+    const committed = second.find((e) => e.type === "conversation.committed");
+    expect(committed).toBeDefined();
+    // 重试也必须带回第一轮的 outcomes（审阅 P2）
+    if (committed?.type === "conversation.committed") expect((committed.outcomes ?? []).length).toBeGreaterThan(0);
   });
 
   it("四审：flush 重试成功后前移 lastLocId，下一轮不重复唤醒同一移动", async () => {
@@ -365,6 +372,27 @@ describe("PR#51 二审回归", () => {
     expect(host.get(session.id)?.lastLocId).toBe("loc_cafe");
     const again = await collect(host.run(session.id, { clientTurnId: "t-again", utterance: { id: "u-again", speaker: PLR, mode: "broadcast", content: "继续" } }));
     expect(again.some((e) => e.type === "conversation.scene")).toBe(false);
+  });
+
+  it("P3：auto 回合落盘重试成功后也补记 autoRounds（同一轮不被重复放行）", async () => {
+    const store = new FailOnceStore({ worldId: "w1", locId: GATE });
+    store.append(ROOM, [
+      env(1, "entity.created", { entity: entity(GATE, "loc", "图书馆") }),
+      env(2, "entity.created", { entity: entity(PLR, "plr", "我") }),
+      env(3, "entity.created", { entity: entity(LIN, "npc", "林月") }),
+      env(4, "entity.created", { entity: entity(MA, "npc", "马骁") }),
+      env(5, "scene.changed", { locId: GATE, presentIds: [PLR, LIN, MA] }),
+    ]);
+    const { host, session } = await setup({ store, responses: [
+      JSON.stringify({ kind: "speak", utterance: { id: "a1", mode: "broadcast", content: "我先说" } }),
+      JSON.stringify({ kind: "speak", utterance: { id: "a2", mode: "broadcast", content: "我接着说" } }),
+    ] });
+    const input = { clientTurnId: "t-auto-retry", auto: true as const };
+    const first = await collect(host.run(session.id, input));
+    expect(first.some((e) => e.type === "conversation.error" && e.code === "E_STORE_FAULT")).toBe(true);
+    const retry = await collect(host.run(session.id, input));
+    expect(retry.some((e) => e.type === "conversation.committed")).toBe(true);
+    expect(host.get(session.id)?.autoRounds).toBe(1);
   });
 
   it("五审：会话淘汰跳过仍有 pendingFlush 的会话", async () => {

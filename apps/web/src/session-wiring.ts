@@ -12,6 +12,7 @@
  */
 import { decideSessionSync } from "./session-signal.ts";
 import type { SessionSyncDecision, SessionSyncTrigger } from "./session-signal.ts";
+import { ROOM_LOAD_DEADLINE_MS, createDeadline } from "./timeout.ts";
 
 /** 事件挂载点：可见性挂 document，focus/online 挂 window */
 export type ResyncEventTarget = "document" | "window";
@@ -27,10 +28,16 @@ export interface SessionResyncDeps {
   screen: () => "title" | "game";
   roomId: () => string;
   busy: () => boolean;
-  /** 重走一次「权威状态 + 历史 + 事件回放」；失败 reject（App 保证失败时不 reset） */
-  enterRoom: (roomId: string) => Promise<void>;
+  /** 重走一次「权威状态 + 历史 + 事件回放」；signal 在 deadline/注销时中止 fetch */
+  enterRoom: (roomId: string, signal: AbortSignal) => Promise<void>;
   /** 恢复失败提示（复用 eventsNotice 降级提示位）；失败同样计入一次同步 */
   onNotice: (error: unknown) => void;
+  /**
+   * 可选整体 deadline：enterRoom 应把 signal 贯通到底层 fetch；超时 reject 时
+   * resyncing 归还，避免前台恢复挂住后永远不再尝试（PR #147 P2-5）。
+   * 默认 8s；测试可注入短 deadline 或假时钟。
+   */
+  loadTimeoutMs?: number;
   minAwayMs?: number;
   minIntervalMs?: number;
 }
@@ -59,6 +66,8 @@ export function createSessionResync(deps: SessionResyncDeps): SessionResync {
   let lastSyncAt = 0;
   let resyncing = false;
   let disposed = false;
+  /** dispose/新进房时中止在途恢复 fetch，避免半开请求继续占 busy（超时提示由 onNotice 负责） */
+  let abortActive: (() => void) | null = null;
   const offs: Array<() => void> = [];
 
   const attempt = (trigger: SessionSyncTrigger): SessionSyncDecision | null => {
@@ -87,13 +96,19 @@ export function createSessionResync(deps: SessionResyncDeps): SessionResync {
     lastSyncAt = now;
     resyncing = true;
     const roomId = deps.roomId();
+    const deadline = createDeadline(deps.loadTimeoutMs ?? ROOM_LOAD_DEADLINE_MS);
+    const active = () => deadline.abort();
+    abortActive = active;
     void (async () => {
       try {
-        await deps.enterRoom(roomId);
+        await deps.enterRoom(roomId, deadline.signal);
       } catch (error) {
         // 失败不抛：交给 App 的提示位；旧画面、草稿与可重试状态由 App 保留
+        // 超时同样走 onNotice（App 会显示可重试提示），finally 归还 resyncing 占位。
         if (!disposed) deps.onNotice(error);
       } finally {
+        deadline.clear();
+        if (abortActive === active) abortActive = null;
         resyncing = false;
       }
     })();
@@ -129,6 +144,7 @@ export function createSessionResync(deps: SessionResyncDeps): SessionResync {
     dispose: () => {
       if (disposed) return;
       disposed = true;
+      abortActive?.();
       for (const off of offs.splice(0)) off();
     },
   };

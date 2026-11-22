@@ -66,6 +66,33 @@ describe("JobLedger", () => {
     expect(await ledger.transition("room_a", "j1", { status: "done" })).toMatchObject({ status: "failed" });
   });
 
+  it("list 跳过缺 roomId 或 roomId 与文件名不一致的记录（PR #147 P2-3）", async () => {
+    const dir = tempDir("job-ledger-");
+    await mkdir(dir, { recursive: true });
+    const { roomId: _roomId, ...missingRoomId } = rec("bad_missing");
+    await appendFile(path.join(dir, "room_a.jsonl"), [
+      JSON.stringify(missingRoomId),
+      JSON.stringify(rec("bad_mismatch", { roomId: "room_b" })),
+      JSON.stringify(rec("good")),
+    ].join("\n") + "\n");
+    // 另一个房间文件里只有一条本房记录，用来验证错放记录不会写过去
+    await appendFile(path.join(dir, "room_b.jsonl"), JSON.stringify(rec("b_only", { roomId: "room_b" })) + "\n");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const ledger = new JobLedger(dir);
+      expect((await ledger.list("room_a")).map((r) => r.id)).toEqual(["good"]);
+      expect((await ledger.reconcile("room_b")).orphaned).toEqual([]);
+      // transition 读不到错放记录，返回 null；room_b 文件不被追加
+      expect(await ledger.transition("room_a", "bad_mismatch", { status: "failed" })).toBeNull();
+      const rawB = await readFile(path.join(dir, "room_b.jsonl"), "utf8");
+      expect(rawB.trim().split("\n")).toHaveLength(1);
+      expect(rawB).not.toContain("bad_mismatch");
+      expect(warn.mock.calls.flat().join(" ")).toContain("跳过 roomId 不匹配记录");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("坏行跳过并 warn，不影响好记录", async () => {
     const dir = tempDir("job-ledger-");
     await mkdir(path.join(dir), { recursive: true });

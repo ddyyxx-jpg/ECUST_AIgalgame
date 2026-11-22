@@ -61,6 +61,9 @@ export class JobLedger {
       if (e.code === "ENOENT") return "";
       throw e;
     });
+    // 文件名是房间的权威来源：只允许读取 roomId 与所在文件一致的记录，
+    // 防止错放的记录被 transition 写进别的房间（PR #147 P2-3）。
+    const expectedRoomId = path.basename(file, ".jsonl");
     const latest = new Map<string, JobRecord>();
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
@@ -73,6 +76,10 @@ export class JobLedger {
       }
       if (!rec || typeof rec !== "object" || !isJobRecord(rec)) {
         console.warn(`[job-ledger] 跳过非法记录：${line.slice(0, 120)}`);
+        continue;
+      }
+      if (rec.roomId !== expectedRoomId) {
+        console.warn(`[job-ledger] 跳过 roomId 不匹配记录：期望 ${expectedRoomId}，实际 ${String(rec.roomId)}`);
         continue;
       }
       latest.set(rec.id, rec);
@@ -124,5 +131,13 @@ export class JobLedger {
 
 function isJobRecord(v: object): v is JobRecord {
   const r = v as Partial<JobRecord>;
-  return typeof r.id === "string" && r.id.length > 0 && typeof r.status === "string" && STATUSES.has(r.status as JobStatus);
+  return (
+    typeof r.id === "string" &&
+    r.id.length > 0 &&
+    // roomId 必须是非空字符串；与文件名的比对在 list() 中按所在文件完成
+    typeof r.roomId === "string" &&
+    r.roomId.length > 0 &&
+    typeof r.status === "string" &&
+    STATUSES.has(r.status as JobStatus)
+  );
 }

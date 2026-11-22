@@ -12,7 +12,7 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import type { Store, Turn, TurnEvent, TurnRequest } from "../../../packages/shared/src/contract/types.ts";
+import type { Store, Turn, TurnEvent, TurnRequest, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import type { SaveIndex } from "./saves.ts";
 
 /** 与 docs/09 §3 对齐；narrative/speakers 由引擎事件投影而来 */
@@ -87,7 +87,11 @@ export class TurnHistory {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly known = new Map<string, Set<string>>();
 
-  constructor(private readonly roomsDir: string) {}
+  /**
+   * @param maxLimit 单次 list 的上限（默认 200，来自 GALGAME_HISTORY_LIMIT_MAX）；
+   *   200 只是单次响应大小，不是历史总量上限——更早的历史靠 earlierCursor 翻页。
+   */
+  constructor(private readonly roomsDir: string, private readonly maxLimit = 200) {}
 
   fileFor(roomId: string): string {
     return path.join(this.roomsDir, `${safeRoomFile(roomId)}.history.jsonl`);
@@ -120,7 +124,7 @@ export class TurnHistory {
   async list(roomId: string, query: HistoryQuery = {}): Promise<HistoryPage> {
     const all = await this.readAll(roomId);
     const rawLimit = query.limit ?? 50;
-    const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), 200);
+    const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), this.maxLimit);
     let end = all.length;
     let start = Math.max(0, end - limit);
     if (query.match) {
@@ -215,6 +219,7 @@ async function* recordRun(
 ): AsyncIterable<TurnEvent> {
   const facts: string[] = [];
   let narrative = "";
+  let committedPatch: WorldState | undefined;
   let committed: { turnId: string; seq: number } | undefined;
 
   try {
@@ -223,6 +228,8 @@ async function* recordRun(
         narrative = narrative ? `${narrative}\n${event.text}` : event.text;
       } else if (event.type === "turn.facts") {
         facts.push(...event.facts);
+      } else if (event.type === "turn.patch") {
+        committedPatch = event.state;
       } else if (event.type === "turn.commit") {
         committed = { turnId: event.turnId, seq: event.seq };
       }
@@ -232,7 +239,7 @@ async function* recordRun(
     // 消费者 break 时这里由 return() 触发；await 会延迟 return() 完成，
     // 所以路由 reply.raw.end() 之前历史已经落盘。
     if (committed) {
-      const userId = await resolveUserId(req, deps.store);
+      const userId = await resolveUserId(req, deps.store, committedPatch);
       const line: TurnHistoryLine = {
         formatVersion: 1,
         roomId: req.roomId,
@@ -264,10 +271,12 @@ async function* recordRun(
 }
 
 /** 账号兜底：单机房间的成员表里有 userId（3.1.0 起），与 Turn 的解析口径一致 */
-async function resolveUserId(req: TurnRequest, store: Store): Promise<string | undefined> {
+async function resolveUserId(
+  req: TurnRequest, store: Store, patch?: WorldState,
+): Promise<string | undefined> {
   if (req.userId) return req.userId;
   try {
-    const state = await store.snapshot(req.roomId);
+    const state = patch ?? await store.snapshot(req.roomId);
     return state.room.members.find((member) => member.actorId === req.actorId)?.userId;
   } catch {
     return undefined;

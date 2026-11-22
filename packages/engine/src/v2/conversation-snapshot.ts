@@ -56,15 +56,27 @@ const sessionSchema = z.object({
   sceneBeats: z.array(sceneBeatSchema),
   sceneMemory: sceneMemorySchema.optional(),
   npcSpeechStreak: z.number().int().nonnegative(),
+  autoRounds: z.number().int().nonnegative().optional(),
   listenSince: z.number().optional(),
   lastLocId: z.string().optional(),
   visibility: z.enum(["private", "scene", "public"]),
+});
+
+/**
+ * #123 P1-1：幂等缓存按会话一并持久化。
+ * events 用 z.unknown() 是因为它们已在提交时按 ConversationEvent 强类型构造过，
+ * 这里的 zod 只负责识别文件损坏/版本漂移；读出后由 host 内部再收窄为目标类型。
+ */
+const seenEntrySchema = z.object({
+  key: z.string(),
+  events: z.array(z.unknown()),
 });
 
 export const conversationSnapshotSchema = z.object({
   version: z.literal(1),
   savedAt: z.number().optional(),
   sessions: z.array(sessionSchema),
+  seen: z.array(seenEntrySchema).optional(),
 });
 
 export type ConversationSnapshot = z.infer<typeof conversationSnapshotSchema>;
@@ -74,6 +86,8 @@ export interface RestoreResult {
   /** true = 快照缺失/坏档/版本不符，已降级：旧会话 closed，改由调用方 open() 新会话 */
   degraded: boolean;
   sessions: string[];
+  /** 降级原因，供调用方打日志；"invalid"=解析失败，"mismatched-room"=会话房间不符 */
+  reason?: "invalid" | "mismatched-room";
 }
 
 export type LoadSnapshotResult =
@@ -110,10 +124,13 @@ export async function loadSnapshot(filePath: string): Promise<LoadSnapshotResult
   return { ok: false, reason: version !== undefined && version !== 1 ? "bad-version" : "invalid" };
 }
 
-/** 原子落盘（tmp + rename）：写一半崩了也不会留下半份快照 */
+/**
+ * 原子落盘（tmp + rename）：写一半崩了也不会留下半份快照。
+ * #106：tmp 名带 pid + 随机后缀，避免同一房间并发保存（或崩溃残留的 .tmp）互相覆盖。
+ */
 export async function saveSnapshot(filePath: string, snapshot: ConversationSnapshot): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp`;
+  const tmp = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
   await writeFile(tmp, JSON.stringify(snapshot), "utf8");
   await rename(tmp, filePath);
 }

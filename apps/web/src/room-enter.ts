@@ -8,6 +8,8 @@
 export interface LoadRoomThenResetDeps<TState, THistory, TCaptured> {
   fetchState: () => Promise<TState>;
   fetchHistory: () => Promise<THistory>;
+  /** 单次 await 后的兜底：deadline 超时也必须当作作废，不能拿超时数据 reset UI */
+  isLoading?: () => boolean;
   /** 每个 await 之后调用：切房/登出/新请求会让旧流程作废，作废时不得 reset */
   isCurrent: () => boolean;
   /** 数据齐了、reset 之前调用：捕获要跨重进房保留的本地 UI 状态（草稿/convMode 等） */
@@ -27,9 +29,9 @@ export async function loadRoomThenReset<TState, THistory, TCaptured>(
   deps: LoadRoomThenResetDeps<TState, THistory, TCaptured>,
 ): Promise<TCaptured | null> {
   const state = await deps.fetchState();
-  if (!deps.isCurrent()) return null;
+  if (!deps.isCurrent() || deps.isLoading?.() === false) return null;
   const history = await deps.fetchHistory();
-  if (!deps.isCurrent()) return null;
+  if (!deps.isCurrent() || deps.isLoading?.() === false) return null;
   const captured = deps.capture(state, history);
   deps.reset();
   deps.restore(captured);

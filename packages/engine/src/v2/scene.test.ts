@@ -9,12 +9,13 @@ const agent: SceneAgentPort = {
 };
 
 describe("v2 场景 agent", () => {
-  it("开场广播一次后下线：只有 opening beat，没有常驻记忆", async () => {
+  it("开场广播一次后下线：opening 进 memories，render 有场景说明", async () => {
     const m = new SceneManager(agent, () => 1);
-    const beat = await m.open("dlg_1", "room_1", "图书馆", ["plr_self", "npc_lin"]);
+    const beat = await m.open("dlg_1", "room_1", { locName: "图书馆" }, ["plr_self", "npc_lin"]);
     expect(beat.kind).toBe("opening");
-    expect(m.memory("dlg_1")).toBeUndefined();
-    expect(m.render("dlg_1")).toBe("");
+    // #134：开场写进 memories，render 立即可用（以前是空串）
+    expect(m.memory("dlg_1")?.text).toContain("开场");
+    expect(m.render("dlg_1")).toContain("【当前场景】图书馆");
   });
 
   it("@全体 / @多人 唤醒；@单人（含悄悄话）不唤醒", () => {
@@ -28,7 +29,7 @@ describe("v2 场景 agent", () => {
 
   it("唤醒产出 summary、写半常驻记忆，渲染稳定且含最新一条", async () => {
     const m = new SceneManager(agent, () => 1);
-    await m.open("dlg_1", "room_1", "图书馆", []);
+    await m.open("dlg_1", "room_1", { locName: "图书馆" }, []);
     const beat = await m.wake("dlg_1", "room_1", "multi", ["林月说了谎"]);
     expect(beat.order).toBe("after");
     expect(beat.kind).toBe("summary");

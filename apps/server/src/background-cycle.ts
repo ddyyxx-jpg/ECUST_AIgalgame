@@ -1,81 +1,18 @@
 /**
  * 每房间单飞的后台工作循环：prepare → inflight → done/failed，带看门狗与 idle 等待。
  *
- * 单飞锁的边界（PR #125 P1-1）：一次 run() 的返回（含 stalled/aborted）只结束"本次结果"，
- * 不代表任务体停了。任务体（canonize.retireRoom / gossip.step）只收 roomId、不接 signal，
- * abort 之后仍会继续跑；锁必须保留到任务体真正 settle 才释放，否则超时后同房再 run 会与
- * 旧任务并发推进同一房间。跨重启的遗留状态由 JobLedger.reconcile 处理。
+ * 单飞锁的边界（issue #140）：一次 run() 的返回（含 stalled/aborted）只结束"本次结果"，
+ * 不代表任务体停了。任务体现在接 AbortSignal 并做协作式检查点；但即使任务体不响应 abort
+ * （例如 LLM 连接永久挂起），stall 看门狗也会**强制接管**：abort 旧任务并把锁交给同房间新的
+ * run。并发由 generation 令牌保护：旧 run 的任务体 settle 时不得清掉新 run 的锁、不得覆盖
+ * 新 run 的终态/遥测。跨重启的遗留状态由 JobLedger.reconcile 处理。
  */
 import { randomBytes } from "node:crypto";
 import type { JobLedger, JobRecord } from "./job-ledger.ts";
+import { ABORTED_ERROR, errorText, type BackgroundTelemetry, type CycleOptions, type CycleOutcome, type CycleReason, type CycleTaskContext, type Entry, type Settled, type TerminalGate } from "./background-cycle.types.ts";
 
-export type CycleReason = "busy" | "stalled" | "error";
-
-export interface CycleOutcome {
-  ok: boolean;
-  reason?: CycleReason;
-  jobId?: string;
-  error?: string;
-}
-
-export interface CycleOptions {
-  kind: string;
-  basedOnSeq: number;
-  stallMs?: number;
-}
-
-export interface CycleTaskContext {
-  signal: AbortSignal;
-  jobId: string;
-}
-
-/**
- * 后台调度运行期遥测（PR #125 复审 P3 可观测性）：进程内累计、随任务运行增长。
- * 终态投影写失败只 warn 不重试，因此必须留下计数与固定日志关键字，否则排障时看不到。
- */
-export interface BackgroundTelemetry {
-  /** 终态投影（done/failed）写失败次数；固定日志关键字 `[bg] terminal persist failed` */
-  readonly terminalPersistFailures: number;
-  /** 看门狗触发次数（含任务恰好已完成、因而未 abort 的触发） */
-  readonly watchdogFires: number;
-}
-
-/**
- * 关停中止的统一文案：run 的 abort 分支写这一条，abortAll 自己不再写投影，
- * 因此"inflight → failed"只发生一次，lastError 也只有一个来源。
- */
-export const ABORTED_ERROR = "aborted: shutdown 中止在途任务";
-
-interface Entry {
-  kind: string;
-  jobId: string;
-  startedAt: number;
-  controller: AbortController;
-  waiters: Set<(idle: boolean) => void>;
-  /** run() 已返回并写完终态后 resolve；abortAll 只等它，不等任务体 settle */
-  runFinished: Promise<void>;
-  markRunFinished: () => void;
-}
-
-type Settled =
-  | { status: "done"; value: Record<string, unknown> | void }
-  | { status: "error"; error: string }
-  | { status: "stalled" | "aborted" };
-
-/**
- * 终态投影写入的"只写一次"闸门（PR #125 复审 P3）：
- * - `writing` 表示已有一次写入在进行，并发收尾者必须直接跳过，不能提前把 `written` 置真冒充"已写完"；
- * - `written` 只在写入真正结束（含失败）后置位；写失败不再重试——投影写失败只 warn，重试反而可能
- *   让迟到的 done 覆盖已写的 failed，产生结果与落盘错位。
- */
-interface TerminalGate {
-  writing: boolean;
-  written: boolean;
-}
-
-function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+export { ABORTED_ERROR } from "./background-cycle.types.ts";
+export type { BackgroundTelemetry, CycleOptions, CycleOutcome, CycleReason, CycleTaskContext } from "./background-cycle.types.ts";
 
 export class BackgroundCycle {
   private readonly ledger?: JobLedger;
@@ -85,6 +22,8 @@ export class BackgroundCycle {
   private readonly active = new Map<string, Entry>();
   private terminalPersistFailures = 0;
   private watchdogFires = 0;
+  private takeovers = 0;
+  private generationCounter = 0;
 
   constructor(opts: {
     ledger?: JobLedger;
@@ -104,7 +43,11 @@ export class BackgroundCycle {
 
   /** 运行期遥测快照（bootstrap 通过 App.backgroundTelemetry 暴露给运维/测试） */
   get telemetry(): BackgroundTelemetry {
-    return { terminalPersistFailures: this.terminalPersistFailures, watchdogFires: this.watchdogFires };
+    return {
+      terminalPersistFailures: this.terminalPersistFailures,
+      watchdogFires: this.watchdogFires,
+      takeovers: this.takeovers,
+    };
   }
 
   inflight(roomId: string): { kind: string; jobId: string; startedAt: number } | null {
@@ -147,11 +90,15 @@ export class BackgroundCycle {
     }
   }
 
-  /** 任务体真正 settle 后才调用：释放单飞锁并唤醒 waitForIdle */
+  /**
+   * 任务体 settle 后的收尾：仅当代际令牌仍是当前 run 时才释放锁、唤醒 waitForIdle。
+   * 被 stall 接管的旧 run settle 时 active 已换成新 entry，这里直接跳过——不会丢新锁。
+   */
   private release(roomId: string, entry: Entry): void {
     if (this.active.get(roomId) !== entry) return;
     this.active.delete(roomId);
     for (const w of [...entry.waiters]) w(true);
+    entry.waiters.clear();
   }
 
   async run(
@@ -173,6 +120,7 @@ export class BackgroundCycle {
       jobId,
       startedAt,
       controller,
+      generation: ++this.generationCounter,
       waiters: new Set(),
       runFinished,
       markRunFinished,
@@ -218,6 +166,14 @@ export class BackgroundCycle {
         this.watchdogFires += 1;
         if (taskSettled) return;
         stalled = true;
+        // 强制接管：旧任务体即使不响应协作式 abort，也必须把锁让给同房间的下一次 run。
+        // 代际令牌保证旧 run 的迟到 settle 不能清掉新锁或覆盖新 run 的终态/遥测。
+        if (this.active.get(roomId) === entry) {
+          this.active.delete(roomId);
+          this.takeovers += 1;
+          for (const w of [...entry.waiters]) w(false); // 等"当前 generation"的 waitForIdle 不等旧 run
+          entry.waiters.clear();
+        }
         controller.abort(`stalled: 超过 ${stallMs}ms 未完成`);
       }, stallMs);
       timer.unref?.();
@@ -233,7 +189,8 @@ export class BackgroundCycle {
         }
       })();
 
-      // 锁只在任务体真正 settle 后释放：stalled/aborted 时 run 已先行返回，这里补收尾。
+      // 任务体 settle 后的补收尾。stalled/aborted 时 run 已先行返回，这里写终态（gate 保证
+      // 只写一次）+ 仅在仍是当前 generation 时释放锁。被接管的旧 run 不碰新锁与新状态。
       const finished = taskResult.then(async (result) => {
         if (result.status === "done") {
           const receipt = result.value && typeof result.value === "object" ? result.value : undefined;
@@ -264,7 +221,8 @@ export class BackgroundCycle {
         });
         return { ok: false, reason: "stalled", jobId };
       }
-      // aborted：任务体可能还在跑，锁由 finished 在真正 settle 后释放。
+      // aborted：shutdown 触发时任务体可能还在跑，锁由 finished 在真正 settle 后释放
+      // （关停语义不变：abortAll 不等任务体 settle）。
       await this.writeTerminal(roomId, jobId, gate, { status: "failed", lastError: ABORTED_ERROR });
       return { ok: false, reason: "error", error: ABORTED_ERROR, jobId };
     } finally {
@@ -272,6 +230,10 @@ export class BackgroundCycle {
     }
   }
 
+  /**
+   * 等当前 generation 空闲：锁被 stall 接管后，老的 waitForIdle 等不到旧任务体 settle——
+   * 看门狗会让这些等待者以 false 立即返回（需重新检查/重试），新 run 的等待者挂在新 entry 上。
+   */
   async waitForIdle(roomId: string, timeoutMs: number): Promise<boolean> {
     const entry = this.active.get(roomId);
     if (!entry) return true;
@@ -294,6 +256,7 @@ export class BackgroundCycle {
    * 关停时中止全部在途 run：这里只 abort、不写投影——终态由各 run 的 abort 分支写一次
    * （旧实现 abortAll 再写一条 failed，与 run 重复）。返回时各 run 的终态已写完，
    * 但不等任务体 settle：关停不能被一个不响应 abort 的任务体无限拖住。
+   * 注意：abort ≠ 接管——shutdown 不释放锁，进程即将退出，由重启后的 reconcile 收拾遗留。
    */
   async abortAll(reason = "shutdown"): Promise<void> {
     const entries = [...this.active.values()];
