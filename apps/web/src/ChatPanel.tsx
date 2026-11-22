@@ -6,6 +6,7 @@
  * 输入框的提示也跟着换 —— 但输入仍然是自然语言，不受对话对象限制。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { hudStats } from "./hud-stats.ts";
 import type { ViewPatch, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import CampusMap from "./CampusMap.tsx";
 import CandidatePanel from "./CandidatePanel.tsx";
@@ -267,7 +268,7 @@ const PHASE_META: Record<string, { name: string; icon: string; color: string }> 
   evening: { name: "傍晚", icon: "◐", color: "#ff8f63" },
   night: { name: "夜里", icon: "☾", color: "#7ea6ff" },
 };
-const stats = (Object.values(panels ?? {})[0] ?? []).slice(0, 4);
+const stats = hudStats(Object.values(panels ?? {})[0] ?? []);
 
   // 室内视图：当前场景是否挂了室内地图，以及馆内的 NPC（位置按索引落到馆内座位点）
   const insideInterior = inside ? interiorFor(inside) : null;

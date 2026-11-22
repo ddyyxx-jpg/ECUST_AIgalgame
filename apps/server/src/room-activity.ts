@@ -7,6 +7,13 @@
  * 把"玩家正在写状态"广播给时钟与 tick。玩家回合用 acquire 等待，时钟用 tryAcquire
  * 拿不到就跳过；锁的范围只覆盖执行期，不覆盖排队等待。
  */
+export class RoomBusyError extends Error {
+  constructor(roomId: string, message = `房间 ${roomId} 正在推进时间，请稍后重试`) {
+    super(message);
+    this.name = "RoomBusyError";
+  }
+}
+
 export class RoomActivity {
   private readonly active = new Map<string, number>();
 
@@ -27,8 +34,13 @@ export class RoomActivity {
    * 玩家回合用：等到房间空闲再进入。返回的释放函数与 enter 相同。
    * 自动时钟用 tryAcquire：拿不到就跳过本拍，绝不等待。
    */
-  async acquire(roomId: string): Promise<() => void> {
+  async acquire(roomId: string, timeoutMs = 30_000, signal?: AbortSignal): Promise<() => void> {
+    const deadline = Date.now() + timeoutMs;
     while (this.isBusy(roomId)) {
+      if (signal?.aborted) throw new RoomBusyError(roomId, `房间 ${roomId} 等待已取消`);
+      if (Date.now() >= deadline) {
+        throw new RoomBusyError(roomId, `房间 ${roomId} 正在推进时间，等待超时，请稍后重试`);
+      }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     return this.enter(roomId);

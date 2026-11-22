@@ -29,6 +29,7 @@ import {
 } from "../../../packages/engine/src/v2/index.ts";
 import { createApp, type App } from "./bootstrap.ts";
 import { registerRoutes } from "./routes.ts";
+import { RoomBusyError } from "./room-activity.ts";
 import type { ServerConfig } from "./config.ts";
 
 const CONTENT = "content";
@@ -217,6 +218,25 @@ function viewState(roomId: string, known: string, unknown: string): WorldState {
 }
 
 describe("dev/v2 群聊 HTTP 端点（issue #89）", () => {
+  it("等锁失败返回 409，不写 SSE 头", async () => {
+    const { app, deps, roomId, actorId } = await appWith();
+    deps.roomActivity = {
+      acquire: async () => { throw new RoomBusyError(roomId, "等待超时"); },
+      tryAcquire: () => null,
+      enter: () => () => {},
+      isBusy: () => true,
+    } as never;
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: payload(actorId, "lock-busy"),
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ ok: false, code: "E_TURN_BUSY" });
+    await app.close();
+  });
+
   it("正常回合：SSE 推 opened/utterance/committed，speaker 绑定为调用者", async () => {
     const { app, roomId, actorId } = await appWith();
     const res = await app.inject({

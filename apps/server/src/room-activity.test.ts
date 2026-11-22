@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RoomActivity } from "./room-activity.ts";
+import { RoomActivity, RoomBusyError } from "./room-activity.ts";
 
 describe("RoomActivity", () => {
   it("进入/释放成对计数，释放幂等", () => {
@@ -39,6 +39,24 @@ describe("RoomActivity", () => {
     expect(activity.isBusy("room_a")).toBe(true);
     release();
     expect(activity.isBusy("room_a")).toBe(false);
+  });
+
+  it("acquire 超时会抛 RoomBusyError，且不会偷偷进入", async () => {
+    const activity = new RoomActivity();
+    const leave = activity.enter("room_a");
+    await expect(activity.acquire("room_a", 10)).rejects.toBeInstanceOf(RoomBusyError);
+    expect(activity.isBusy("room_a")).toBe(true);
+    leave();
+  });
+
+  it("acquire 可以被 AbortSignal 取消", async () => {
+    const activity = new RoomActivity();
+    const leave = activity.enter("room_a");
+    const ac = new AbortController();
+    const pending = activity.acquire("room_a", 30_000, ac.signal);
+    ac.abort();
+    await expect(pending).rejects.toBeInstanceOf(RoomBusyError);
+    leave();
   });
 
   it("并发进入时最后一个释放才清空", () => {

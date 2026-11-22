@@ -17,6 +17,7 @@ import type { LlmPort, LlmRequest, LlmResult } from "../../../packages/shared/sr
 import { createApp } from "./bootstrap.ts";
 import type { ServerConfig } from "./config.ts";
 import { registerRoutes } from "./routes.ts";
+import { RoomBusyError } from "./room-activity.ts";
 
 const ORIGIN = { origin: "https://galgame.test" };
 
@@ -77,6 +78,21 @@ async function counts(store: EventLog, roomId: string) {
     seq: store.seq(roomId),
   };
 }
+
+describe("房间锁等待失败", () => {
+  it("等锁超时/取消时返回 409，而不是先写 200 SSE 头", async () => {
+    const { app, deps, roomId, turn } = await setup();
+    deps.roomActivity = {
+      acquire: async () => { throw new RoomBusyError(roomId, "等待超时"); },
+      tryAcquire: () => null,
+      enter: () => () => {},
+      isBusy: () => true,
+    } as never;
+    const res = await turn("c_room_busy");
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ ok: false, code: "E_TURN_BUSY" });
+  });
+});
 
 describe("审核阻断回合的 HTTP 幂等（PR #123 P0-B / P1-3）", () => {
   it("消费器在 turn.commit 处 break 后同 key 重发：惩罚/记忆/seq 都不再增长", async () => {
