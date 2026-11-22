@@ -5,8 +5,10 @@
  * 为什么单独成文件：这些字段是"漏一次就毁玩法"的秘密通道，散落在各路由里容易漏改；
  * 收在一处让后续新增出口能复用同一函数，也让测试只需盯一个模块。
  * 与 dev/v2 的 `projectWorldState` / `projectConversationEvents` 同口径
- * （由 packages/engine/src/v2/conversation.view.ts 的 stripPlotSecrets 提供字段清单），
- * 但本模块不裁剪 attrs/links——那些走既有的 maskNamesDeep / 观察者投影。
+ * （由 packages/engine/src/v2/conversation.view.ts 的 stripPlotSecrets 提供字段清单）。
+ * attrs 基本原样返回（docs/03 §5.2.5 的 issue #74 口径），唯一例外是引擎内部属性
+ * `sim_lease`：它是 NPC 的动作租约（含下一步目标/剩余 tick），不属于玩家可见状态，
+ * 任何出站投影都必须剥掉；否则 /state、/events、turn.patch 都会泄露 NPC 下一步。
  */
 import type { Envelope, Plot, Proposal, WorldState } from "../../../packages/shared/src/index.ts";
 import { projectProposals, stripPlotSecrets } from "../../../packages/engine/src/v2/index.ts";
@@ -57,10 +59,31 @@ export function projectEventsForPlayer(events: readonly Envelope[], viewer?: str
   return out;
 }
 
-/** /state 用的状态投影：只剥 plot 的 GM 字段，其余交给出站掩码 */
+const ENGINE_INTERNAL_ATTRS = ["sim_lease"] as const;
+
+/** 剥掉引擎内部属性；不改原对象，返回同一引用当且仅当没有可剥字段。 */
+function stripEngineInternalAttrs(state: WorldState): WorldState {
+  let changed = false;
+  const entities: WorldState["entities"] = {};
+  for (const [id, entity] of Object.entries(state.entities)) {
+    const attrs = entity.attrs as Record<string, unknown>;
+    if (!ENGINE_INTERNAL_ATTRS.some((key) => key in attrs)) {
+      entities[id] = entity;
+      continue;
+    }
+    const nextAttrs = { ...attrs };
+    for (const key of ENGINE_INTERNAL_ATTRS) delete nextAttrs[key];
+    entities[id] = { ...entity, attrs: nextAttrs as typeof entity.attrs };
+    changed = true;
+  }
+  return changed ? { ...state, entities } : state;
+}
+
+/** /state 用的状态投影：剥 plot 的 GM 字段与引擎内部属性，其余交给出站掩码 */
 export function projectStateForPlayer(state: WorldState): WorldState {
-  if (state.plots.length === 0) return state;
-  return { ...state, plots: state.plots.map(stripPlotSecrets) };
+  const clean = stripEngineInternalAttrs(state);
+  if (clean.plots.length === 0) return clean;
+  return { ...clean, plots: clean.plots.map(stripPlotSecrets) };
 }
 
 /**

@@ -51,6 +51,7 @@ import { TurnHistory, withTurnRecording } from "./turn-history.ts";
 import { LlmAudit } from "./audit.ts";
 import { MapService } from "./map.ts";
 import { loadSimPolicy } from "./sim.policy.ts";
+import { RoomActivity } from "./room-activity.ts";
 import { SimClock } from "./sim-clock.ts";
 import { AuthStore } from "./auth-store.ts";
 import { SessionStore } from "./sessions.ts";
@@ -123,6 +124,8 @@ export type App = AppDeps & {
   background: BackgroundCycle;
   /** 自动时钟（D22）：默认关闭；只推 phase 内 tick，不切 phase */
   simClock: SimClock;
+  /** 房间活动计数：玩家回合执行期间为忙，自动时钟/地图 tick 据此让路。 */
+  roomActivity: RoomActivity;
   /** 本次启动的对账结果（PR-2）：inflight→failed 计数 + prepared backlog 计数，供运维/测试断言 */
   jobReconcile: JobReconcileSummary;
   /** 后台调度运行期遥测（PR #125 复审可观测性）：终态投影写失败/看门狗触发次数，进程内累计 */
@@ -555,6 +558,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     timer.unref?.();
   }
 
+  const roomActivity = new RoomActivity();
   const map = new MapService({
     store,
     turn,
@@ -576,7 +580,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     store,
     map,
     policy: simPolicy?.clock ?? { enabled: false, intervalMs: 60_000, ticksPerBeat: 1, maxTick: 24 },
-    isBusy: (roomId) => background.isBusy(roomId),
+    isBusy: (roomId) => background.isBusy(roomId) || roomActivity.isBusy(roomId),
   });
   simClock.start();
 
@@ -630,6 +634,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     turn,
     map,
     simClock,
+    roomActivity,
     settings,
     registry,
     scenarios,

@@ -22,6 +22,7 @@ import { registerAdminRoutes } from "./admin.routes.ts";
 import { dailyLimitFor } from "./auth-store.ts";
 import type { TurnLedger } from "./quota.ts";
 import type { AdminLog } from "./admin-log.ts";
+import type { RoomActivity } from "./room-activity.ts";
 import { makeRoomExists } from "./room-exists.ts";
 import { isSafeRoomId } from "../../../packages/engine/src/store.ts";
 import { clampLimit } from "./limit.ts";
@@ -101,6 +102,8 @@ export interface AppDeps {
   debugGate?: DebugGate | null;
   /** 单次历史/事件响应行数上限（默认 200，GALGAME_HISTORY_LIMIT_MAX） */
   historyLimitMax?: number;
+  /** 房间活动计数：玩家回合执行期间为忙，自动时钟/地图 tick 据此让路。 */
+  roomActivity?: RoomActivity;
   version: string;
 }
 
@@ -573,7 +576,16 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const turnChains = new Map<string, Promise<void>>();
     const serializeTurn = <T>(roomId: string, fn: () => Promise<T>): Promise<T> => {
       const prev = turnChains.get(roomId) ?? Promise.resolve();
-      const next = prev.then(fn, fn);
+      // 只在回合真正执行时标记忙（排队等待不算），让自动时钟在排队阶段仍可推进。
+      const run = async (): Promise<T> => {
+        const leave = deps.roomActivity?.enter(roomId);
+        try {
+          return await fn();
+        } finally {
+          leave?.();
+        }
+      };
+      const next = prev.then(run, run);
       const tail = next.then(() => undefined, () => undefined);
       turnChains.set(roomId, tail);
       void tail.finally(() => {
@@ -998,7 +1010,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     });
     let committed = false;
     let errored = false;
+    let leaveTurn: (() => void) | undefined;
     try {
+      leaveTurn = deps.roomActivity?.enter(roomId);
       // 玩家点的是某个 NPC：前端会把「对<展示名>说：…」写进行动语义。未认识时展示名是
       // 外貌占位名（appearance）或「第N位陌生的同学」，这里换回真名只影响喂给模型的 input，
       // 不影响下发给玩家的显示；否则模型看到一段外貌描述，根本不知道在跟谁说话。
@@ -1132,6 +1146,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         retryable: !committed && !roomSyncFault,
       });
     } finally {
+      leaveTurn?.();
       reply.raw.end();
     }
     return reply;
@@ -1280,6 +1295,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf, { actorId: parsed.data.actorId });
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
+    // 玩家回合/对话回合执行期间不接受地图写操作，避免与 Turn/Dialogue 抢同一份状态。
+    if (deps.roomActivity?.isBusy(roomId)) {
+      return reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: "房间正在处理玩家回合，稍后再试" });
+    }
     return safe(reply, () => deps.map.travel(roomId, parsed.data.actorId, parsed.data.locId));
   });
 
@@ -1291,6 +1310,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
+    if (deps.roomActivity?.isBusy(roomId)) {
+      return reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: "房间正在处理玩家回合，稍后再推进时间" });
+    }
     // viewer：出站事件按调用者自己的视角裁私忆（PR #149 P3）；未登录时由 MapService 回退到玩家角色
     const viewer = access.userId ? playerOf(access.state, access.userId) : undefined;
     return safe(reply, () => deps.map.tick(roomId, { ...parsed.data, ...(viewer ? { viewer } : {}) }));

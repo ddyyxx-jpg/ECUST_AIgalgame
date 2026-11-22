@@ -63,7 +63,7 @@
 - 没有租约：按 `npc-schedules.json` 的当前 phase 目标，决定“走完整条最短路 + 占用 1 tick”或“原地停留 2 tick”；
 - phase 变了：旧租约作废，按新 phase 重排；
 - `action:"talk"`：玩家对话中，map tick 整段跳过（不递减、不接新动作；空闲 NPC 也会写 talk，`resume` 为空）；`resume` 保存原租约（原 lease JSON 字符串），对话回合结束由服务端恢复；talk 跨 phase 视为过期，清空重排；另带 `expiresAt`（绝对 tick），到点即使没换 phase 也作废，兜底进程崩溃/恢复失败。
-- `sim_lease` 的 `visibility:self` + `hidden` 只影响 UI 与图鉴；`/state` 是权威原状态通道，仍会原样返回租约（含 `resume`）。不要把不该让客户端看到的机密写进租约。
+- `sim_lease` 的 `visibility:self` + `hidden` 只影响 UI 与图鉴；出站投影还会整体剥掉该属性，`/state`、`/events`、`turn.patch.state` 都不返回租约（含 `resume`）。
 
 这样自动 tick 不会让 NPC 每拍重新决策，也不会在玩家对话中途开始新动作；玩家打断后，租约的剩余占用时间仍在，走完才接下一个动作。
 
