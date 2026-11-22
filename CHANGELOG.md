@@ -13,12 +13,17 @@
 - **P1-1 回合 streaming 中走到点位会发 travel**：`CampusMap` 的 160ms probe 原来只看距离，不看 `busy`（`busy` 只用于按钮 disabled），且 `busy` 是 props、interval 闭包读不到最新值。现在 probe 同步 `busyRef`，自动进入 / 自动 travel 都过新的纯函数 `stepEntryDwell` / `shouldAutoTravel`：`busy` 期间不累计入口 dwell、不发 `travel`；回合结束后仍站在入口会重新数满 1.5 秒再进一次。
 - **P1-2 室内站出口时回合没结束就切回大地图**：`InteriorMap` 的出口 dwell 同样加 `busy` 门禁（`stepExitDwell`）：`busy` 时清零计时、不触发 `onExit`；回合结束后重新数满 1.5 秒才退出一次。
 
+### 复审补充（PR #152 复审 P3-2）
+- 场景级自动 travel 原先只在「刚进入点位范围」那一拍评估：回合 streaming 中蹭进范围、回合结束后原地不动，就再也不会自动到达（入口 dwell 却会重新计时，两条路行为不一致）。现在被 busy 挡下的点位记入 `pendingTravelRef`，回合结束后仍站在旁边补发一次；判定抽成 `decideTravel`（`skip` / `defer` / `go`），`shouldAutoTravel` 退化成 `travelIntent && !busy`。
+- 传送失败仍是「离开再靠近才重试」——不会原地每 160ms 重发。
+
 ### 测试
-- 新增 `apps/web/src/map-autoenter.test.ts`（9 例）：busy 时站满不触发、busy 结束后重新计时并只触发一次、离开范围重新武装、同场景/已 travel 不重复发。
+- 新增 `apps/web/src/map-autoenter.test.ts`（15 例）：busy 时站满不触发、busy 结束后重新计时并只触发一次、离开范围重新武装、同场景/已 travel 不重复发；`decideTravel` 的 `defer → go` 补发、pending 命中别的点位不发、补发后清零。
 - 这两段逻辑原先埋在 rAF/interval 闭包里只能靠真人走查，抽成纯函数后可在 node 断言。
+- #151 的其余非阻断项（`ENTER_DIST` 手感、`CandidatePanel` waiting 态、`pathfind`/`interior` 零单测、字体授权、资产体积、CSS 作用域）与本节新增的人工走查清单已落进 #150。
 
 ### 验证
-- `npm run typecheck` 0；`npx vitest run` **125 文件 / 1009 例**全过；`npm run check:contract` 8/8（3.8.0）。
+- `npm run typecheck` 0；`npx vitest run` **125 文件 / 1015 例**全过；`npm run check:contract` 8/8（3.8.0）。
 
 
 ## v0.6.0 — 2026-11-22 像素风 UI + 开放 issue 收口 + dev/v2 群聊（PR #144 / #148 / #149；合入 main `657d6c5`；CONTRACT 3.6.2 → 3.8.0）

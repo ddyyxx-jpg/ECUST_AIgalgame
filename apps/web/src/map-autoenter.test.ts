@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldAutoTravel, stepEntryDwell, stepExitDwell, type DwellState } from "./map-autoenter.ts";
+import { decideTravel, shouldAutoTravel, stepEntryDwell, stepExitDwell, travelIntent, type DwellState } from "./map-autoenter.ts";
 
 const NONE: DwellState = { id: "", since: 0, fired: false };
 const DWELL_MS = 1500;
@@ -89,5 +89,39 @@ describe("stepExitDwell · 室内站出口自动离开（#151 P1-2）", () => {
     expect(left.armed).toBe(true);
     expect(left.since).toBe(0);
     expect(left.fired).toBe(false);
+  });
+});
+
+describe("decideTravel · 被 busy 挡下的点位在回合结束后补发（PR #152 复审 P3-2）", () => {
+  const base = { sceneId: "loc_lib", playerLocId: "loc_canteen", enteredId: "" };
+
+  it("刚进范围且不忙 → go", () => {
+    expect(decideTravel({ ...base, busy: false, enteredRange: true, pendingId: "" })).toBe("go");
+  });
+
+  it("busy 时进范围 → defer（不发请求，但要记住点位）", () => {
+    expect(decideTravel({ ...base, busy: true, enteredRange: true, pendingId: "" })).toBe("defer");
+  });
+
+  it("回合结束后原地不动（enteredRange=false）也能补发一次", () => {
+    expect(decideTravel({ ...base, busy: false, enteredRange: false, pendingId: "loc_lib" })).toBe("go");
+    // 补发后 pending 被清空，再站多久都不会重发
+    expect(decideTravel({ ...base, busy: false, enteredRange: false, pendingId: "" })).toBe("skip");
+  });
+
+  it("不是被挡下的点位 → 不因 pending 其它点位而发", () => {
+    expect(decideTravel({ ...base, busy: false, enteredRange: false, pendingId: "loc_lab" })).toBe("skip");
+  });
+
+  it("同场景 / 已发过 / 传送到别处 → skip（即使 busy）", () => {
+    expect(decideTravel({ ...base, playerLocId: "loc_lib", busy: false, enteredRange: true, pendingId: "" })).toBe("skip");
+    expect(decideTravel({ ...base, enteredId: "loc_lib", busy: true, enteredRange: true, pendingId: "" })).toBe("skip");
+    expect(decideTravel({ ...base, sceneId: null, busy: false, enteredRange: true, pendingId: "" })).toBe("skip");
+  });
+
+  it("travelIntent 与 shouldAutoTravel 的分工：后者只是加 busy 门", () => {
+    expect(travelIntent(base)).toBe(true);
+    expect(shouldAutoTravel({ ...base, busy: true })).toBe(false);
+    expect(shouldAutoTravel({ ...base, busy: false })).toBe(true);
   });
 });

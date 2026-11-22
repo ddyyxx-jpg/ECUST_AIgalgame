@@ -70,12 +70,43 @@ export interface AutoTravelInput {
   enteredId: string | null;
 }
 
-/** 大地图：走到 built 点位旁自动静默 travel；busy 期间不发请求（P1-1） */
-export function shouldAutoTravel(input: AutoTravelInput): boolean {
-  const { busy, sceneId, playerLocId, enteredId } = input;
-  if (busy || !sceneId) return false;
+/** 只看「该不该为这个点位 travel」，不看 busy（busy 时由上层记成待补，回合结束后再发） */
+export function travelIntent(input: Omit<AutoTravelInput, "busy">): boolean {
+  const { sceneId, playerLocId, enteredId } = input;
+  if (!sceneId) return false;
   if (sceneId === playerLocId) return false;
   return enteredId !== sceneId;
+}
+
+/** 大地图：走到 built 点位旁自动静默 travel；busy 期间不发请求（P1-1） */
+export function shouldAutoTravel(input: AutoTravelInput): boolean {
+  if (input.busy) return false;
+  return travelIntent(input);
+}
+
+export type TravelDecision = "skip" | "defer" | "go";
+
+export interface TravelDecisionInput extends AutoTravelInput {
+  /** 本拍是否刚进入该点位范围（与上一拍的 sceneKey 不同） */
+  enteredRange: boolean;
+  /** busy 期间记下的待补点位（空串 = 没有） */
+  pendingId: string;
+}
+
+/**
+ * 自动 travel 的完整判定：
+ * - `defer`：busy 期间不发请求，但把点位记成待补——回合结束后仍站在旁边就补一次
+ *   （与入口 dwell「回合后重新计时」的行为对齐，PR #152 复审 P3-2）；
+ * - `go`：刚进范围，或本拍就是之前被 busy 挡下的那个点位；
+ * - `skip`：同场景 / 已发过 / 传送到别处去了。
+ *
+ * 传送失败时上层会清 `enteredId`，但**不会**因此在原地每 160ms 重试——必须离开再靠近。
+ */
+export function decideTravel(input: TravelDecisionInput): TravelDecision {
+  if (!travelIntent(input)) return "skip";
+  if (input.busy) return "defer";
+  if (input.enteredRange || input.pendingId === input.sceneId) return "go";
+  return "skip";
 }
 
 export interface ExitDwellInput {

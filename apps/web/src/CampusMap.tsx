@@ -17,7 +17,7 @@ import type { MapScene, MapView } from "./api.ts";
 import { fetchGallery, muttersByNpcId } from "./api-gallery.ts";
 import type { GalleryNpc } from "./api-gallery.ts";
 import { interiorFor } from "./interior.ts";
-import { shouldAutoTravel, stepEntryDwell } from "./map-autoenter.ts";
+import { decideTravel, stepEntryDwell } from "./map-autoenter.ts";
 
 const W = 6000;
 const H = 4500;
@@ -186,6 +186,8 @@ export default function CampusMap({
   // probe 跑在 interval 里，闭包里读不到最新的 props.busy（回合 streaming 期间不能偷偷 travel）
   const busyRef = useRef(busy);
   busyRef.current = busy;
+  /** busy 期间蹭到的新点位：回合结束后补发一次自动到达 */
+  const pendingTravelRef = useRef("");
   /** 进室内：靠近入口满 0.5 秒自动进入；先离开一次范围才会再次触发（防止刚出来又被吸进去） */
   const ENTRY_DWELL_MS = 1500;
   const entryArmedRef = useRef(false);
@@ -499,32 +501,41 @@ export default function CampusMap({
         }
       }
       const sceneKey = bestScene?.id ?? "";
-      if (sceneKey !== nearSceneRef.current) {
+      const enteredRange = sceneKey !== nearSceneRef.current;
+      if (enteredRange) {
         nearSceneRef.current = sceneKey;
         setNearScene(bestScene);
-        if (
-          bestScene &&
-          shouldAutoTravel({
-            busy: busyRef.current,
-            sceneId: bestScene.id,
-            playerLocId: live.player.locId,
-            enteredId: enteredRef.current,
-          })
-        ) {
-          enteredRef.current = bestScene.id;
-          // 传送失败就把"已进入"标记清掉，让人还能再试一次，而不是永远卡在门口
-          const pending = onEnterRef.current(bestScene.id);
-          if (pending && typeof (pending as Promise<unknown>).then === "function") {
-            (pending as Promise<{ ok: boolean }>)
-              .then((r) => {
-                if (!r || !r.ok) enteredRef.current = "";
-              })
-              .catch(() => {
-                enteredRef.current = "";
-              });
-          }
+      }
+      const goTravel = (scene: MapScene) => {
+        enteredRef.current = scene.id;
+        pendingTravelRef.current = "";
+        // 传送失败就把"已进入"标记清掉，让人还能再试一次，而不是永远卡在门口
+        const pending = onEnterRef.current(scene.id);
+        if (pending && typeof (pending as Promise<unknown>).then === "function") {
+          (pending as Promise<{ ok: boolean }>)
+            .then((r) => {
+              if (!r || !r.ok) enteredRef.current = "";
+            })
+            .catch(() => {
+              enteredRef.current = "";
+            });
         }
-        if (!bestScene) enteredRef.current = "";
+      };
+      if (!bestScene) {
+        enteredRef.current = "";
+        pendingTravelRef.current = "";
+      } else {
+        const decision = decideTravel({
+          busy: busyRef.current,
+          enteredRange,
+          pendingId: pendingTravelRef.current,
+          sceneId: bestScene.id,
+          playerLocId: live.player.locId,
+          enteredId: enteredRef.current,
+        });
+        // 回合 streaming：不发请求，但记住这个点位；回合结束后仍站在旁边就补一次（与入口 dwell 对齐）
+        if (decision === "defer") pendingTravelRef.current = bestScene.id;
+        else if (decision === "go") goTravel(bestScene);
       }
 
       let bestNpc: { id: string; name: string } | null = null;
