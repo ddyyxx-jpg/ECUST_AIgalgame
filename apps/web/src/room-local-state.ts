@@ -71,3 +71,25 @@ export function restoreRoomLocalState(local: RoomLocalState): RoomLocalStateActi
     convLines: local.convLines,
   };
 }
+
+/**
+ * 恢复后要不要重放开场白（PR #149 复审 P2-1）。
+ *
+ * v2 房间的回合不在 v1 history 里，`restoreConversation` 还原出来是空的——如果只看
+ * `lines.length === 0` 就放开场白，每次切后台回来都会把「身份 → 正文」重放一遍。
+ * 只要本地还留着 v2 会话行，就不是新开局。
+ */
+export function shouldReplayOpening(input: { restoredLineCount: number; keptConvLines: number }): boolean {
+  return input.restoredLineCount === 0 && input.keptConvLines === 0;
+}
+
+/**
+ * 已进行的玩家回合数（候选面板用）。
+ *
+ * v1 数 history 还原的玩家行；v2 数 convLines——前台恢复时 convView 会被 reset，
+ * 但 convLines 被保留，数 convView 会让 playedTurns 归零、候选退回开局建议。
+ */
+export function playedTurnsOf(convMode: ConvMode, lines: readonly Line[], convLines: readonly Line[]): number {
+  const source = convMode === "v2" ? convLines : lines;
+  return source.filter((l) => l.kind === "player").length;
+}

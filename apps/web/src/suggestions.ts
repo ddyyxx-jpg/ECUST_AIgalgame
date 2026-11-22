@@ -63,6 +63,9 @@ export function positionFromState(state: WorldState | null, selfId: string): Pos
  * （App.enterScene 只改 locId/name），此时有 state 投影就用 state 的，避免候选整块消失。
  */
 export function candidatePosition(pos: Pos | undefined, state: WorldState | null, selfId: string): Pos | undefined {
+  // 位置也会过期：enterScene 只改 locId/name，旧 pos 的 actors/exits 仍是上一个地点的。
+  // 只要 pos 和权威 state 不在同一场景，就以 state 投影为准（PR #149 复审 P2-2）。
+  if (state && pos && pos.locId !== state.room.scene.locId) return positionFromState(state, selfId) ?? pos;
   if (pos?.actors.length || pos?.exits.length) return pos;
   return positionFromState(state, selfId) ?? pos;
 }

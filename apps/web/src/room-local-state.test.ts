@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { keepRoomLocalState, restoreRoomLocalState, shouldKeepRoomUi } from "./room-local-state.ts";
+import { keepRoomLocalState, playedTurnsOf, restoreRoomLocalState, shouldKeepRoomUi, shouldReplayOpening } from "./room-local-state.ts";
 
 const BASE = {
   resumed: true,
@@ -91,5 +91,27 @@ describe("restoreRoomLocalState（reset 之后回填什么）", () => {
       convMode: null,
       convLines: null,
     });
+  });
+});
+
+describe("恢复后不重放开场、回合数不归零（PR #149 复审 P2-1）", () => {
+  it("v2 房间保留了会话行：不放开场白，playedTurns 按 convLines 计", () => {
+    const kept = [
+      { id: 1, kind: "player" as const, text: "我们谈谈" },
+      { id: 2, kind: "npc" as const, text: "林静：好啊" },
+    ];
+    expect(shouldReplayOpening({ restoredLineCount: 0, keptConvLines: kept.length })).toBe(false);
+    expect(playedTurnsOf("v2", [], kept)).toBe(1);
+  });
+
+  it("v1 仍有 history：不放开场，按 lines 计", () => {
+    const lines = [{ id: 1, kind: "player" as const, text: "去图书馆" }];
+    expect(shouldReplayOpening({ restoredLineCount: lines.length, keptConvLines: 0 })).toBe(false);
+    expect(playedTurnsOf("v1", lines, [])).toBe(1);
+  });
+
+  it("真正的新开局：两处都没有东西才放开场白", () => {
+    expect(shouldReplayOpening({ restoredLineCount: 0, keptConvLines: 0 })).toBe(true);
+    expect(playedTurnsOf("v2", [], [])).toBe(0);
   });
 });

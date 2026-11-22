@@ -78,6 +78,15 @@
 - `npx tsc --noEmit` → 0 错；`npx vitest run` → **124 文件 / 994 例**全过；`npm run check:contract` → **8/8**（CONTRACT 3.8.0，13 op，37 错误码）；`npm run build:web` 通过（`index-CMLyLKtQ.js` 388.62 kB）。
 - 反向验证：把 `expectedSeq` 取值挪回旧位置 → 并发用例失败；把 outbound 投影还原 → 三处 P0 用例失败（证明断言真的盯着出口，而不是只读 EventLog）。
 
+### 审阅修复第四轮（PR #149 复审剩余 2×P2 + P3）
+
+- **P2-1 v2 前台恢复重放开场 / `playedTurns` 归零**：新增 `shouldReplayOpening({restoredLineCount, keptConvLines})` 与 `playedTurnsOf(convMode, lines, convLines)` 两个纯函数——v2 房间没有 v1 history，但本地保留了 `convLines` 时不再重放「身份 → 正文」；回合数改数 `convLines` 的玩家行（`convView` 会被 reset，数它必归零）。三条用例覆盖「保留会话行 / v1 有 history / 真新开局」。
+- **P2-2 v2 travel 后候选停在旧地点**：`candidatePosition` 先比 `pos.locId` 与 `state.room.scene.locId`——不在同一场景就以 state 投影为准（`enterScene` 只改 `locId`，旧 `actors/exits` 是上个地点的）；同场景且非空仍用服务端 `pos`。
+- **P3 重启后首拍 tick 假 `E_SEQ_GAP`**：`seqOf` 改为 `await store.load(roomId)`（`seq()` 在未载入时只会给 0）；夜间第二批同样走它。新增「新 store 实例只持有磁盘事件 → 直接 tick」探针，反向验证：改回 `seq()` 即失败（seq 停在 0）。
+
+### 验证（第四轮复审修复后实跑）
+- `npx tsc --noEmit` → 0；`npx vitest run` → **124 文件 / 1000 例**全过；`npm run check:contract` → 8/8（3.8.0）；`npm run build:web` → `index-XOequiWb.js` 388.79 kB（gzip 121.13 kB）。
+
 ## 3.7.0（2026-11-21，PR #144）— dev/v2 运行质量批（issue #130 子项 #131–#137，CONTRACT 3.6.2 → 3.7.0）
 
 ### 新增

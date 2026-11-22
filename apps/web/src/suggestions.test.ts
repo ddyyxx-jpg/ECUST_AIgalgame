@@ -124,3 +124,27 @@ describe("turnSuggestions（来源侧带 kind）", () => {
     expect(new Set([...first, ...second].map((s) => s.text)).size).toBe(4);
   });
 });
+
+describe("candidatePosition（travel 后的过期位置，PR #149 复审 P2-2）", () => {
+  it("pos 与权威 state 不在同一场景：用 state 投影，而不是旧地点的 NPC/出口", () => {
+    const stale = pos({ locId: "loc_lab", name: "实验楼 302", actors: [{ actorId: "npc_old", name: "旧地点的人", present: true }] });
+    const state2 = {
+      room: { scene: { locId: "loc_lib", presentIds: ["plr_self", "npc_lin"] } },
+      entities: {
+        loc_lib: { id: "loc_lib", kind: "loc", status: "active", name: "图书馆" },
+        plr_self: { id: "plr_self", kind: "plr", status: "active", name: "我" },
+        npc_lin: { id: "npc_lin", kind: "npc", status: "active", name: "林静" },
+      },
+      links: [],
+    } as unknown as WorldState;
+    const p = candidatePosition(stale, state2, "plr_self");
+    expect(p?.locId).toBe("loc_lib");
+    expect(p?.actors.map((a) => a.actorId)).toEqual(["npc_lin"]);
+  });
+
+  it("pos 与 state 同场景且非空：保留服务端下发的 pos", () => {
+    const same = pos({ actors: [{ actorId: "npc_lin", name: "林静", present: true }] });
+    const here = { room: { scene: { locId: "loc_lib", presentIds: ["plr_self"] } }, entities: {}, links: [] } as unknown as WorldState;
+    expect(candidatePosition(same, here, "plr_self")).toBe(same);
+  });
+});

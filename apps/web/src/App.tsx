@@ -29,7 +29,13 @@ import { loadRoomThenReset } from "./room-enter.ts";
 import { isTimeoutError } from "./timeout-error.ts";
 import { ROOM_LOAD_DEADLINE_MS, combineSignals, createDeadline, throwIfTimedOut } from "./timeout.ts";
 import { holdResumedBusy } from "./resumed-busy.ts";
-import { keepRoomLocalState, restoreRoomLocalState, type RoomLocalState } from "./room-local-state.ts";
+import {
+  keepRoomLocalState,
+  playedTurnsOf,
+  restoreRoomLocalState,
+  shouldReplayOpening,
+  type RoomLocalState,
+} from "./room-local-state.ts";
 import { fetchRoomEvents } from "./events-replay.ts";
 import { npcLocIdFromLinks, targetStillInScene } from "./npc-presence.ts";
 import { phaseLabel } from "./ui.ts";
@@ -427,11 +433,13 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
             // 历史里没有 v2 回合，恢复这些行才能避免重放开场、playedTurns 归零。
             if (local.convLines !== null) setConvLines(local.convLines);
             const restored = restoreConversation(entry.page.history, entry.sc, opts.resumed === true, () => ++lineId);
-            if (restored.lines.length > 0) {
-              setLines(restored.lines);
-            } else {
-              // 开场 = 对话流的第一屏：身份 → 正文。没有预设剧本时只留一行提示，不编造内容。
-              setLines([]);
+            setLines(restored.lines);
+            // 开场 = 对话流的第一屏：身份 → 正文。v2 房间没有 v1 history，但本地保留了
+            // 会话行（entry.local.convLines），那不是新开局，不能再放一遍（PR #149 复审 P2-1）。
+            if (shouldReplayOpening({
+              restoredLineCount: restored.lines.length,
+              keptConvLines: entry.local.convLines?.length ?? 0,
+            })) {
               getTw().enqueue(restored.opening);
             }
             setEarlier({ before: entry.page.earlierCursor ?? earlierCursor(entry.page.history), hasEarlier: entry.page.hasEarlier, loading: false });
@@ -1164,10 +1172,9 @@ await runTurn(
    * 只用 committed 视图避免乐观行被回退后仍然把 round 推进（PR #147 P2-7）。
    */
   const visibleLines = convMode === "v2" ? [...lines, ...convLines] : lines;
-  // v2 只数 convView 里的已提交自身 utterance 行；v1 沿用 history 还原的玩家行。
-  const playedTurns = convMode === "v2"
-    ? convView.current.lines.filter((l) => l.kind === "utterance" && l.speaker === actorId).length
-    : lines.filter((l) => l.kind === "player").length;
+  // v2 的玩家行只在 convLines 里（由 conversation.utterance 投回后渲染）；前台恢复时
+  // convView 会被 reset，但 convLines 被保留——所以数 convLines，恢复后 playedTurns 不归零。
+  const playedTurns = playedTurnsOf(convMode, lines, convLines);
   /**
    * 下一步能干什么：开局给剧本建议，之后按当前场景推导（出口 + 在场的人）。
    * v2 的 view.position 几乎为空，改用会话状态里的在场 NPC 投影（不编造出口）；
