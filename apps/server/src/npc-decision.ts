@@ -123,10 +123,12 @@ export function buildPerception(state: WorldState, npcId: string, options: Decis
   if (!npc || npc.kind !== "npc" || !locId) return null;
   const loc = state.entities[locId];
   if (!loc) return null;
-  const present = state.room.scene.presentIds
-    .filter((id) => id !== npcId)
-    .map((id) => state.entities[id]?.name)
-    .filter((name): name is string => typeof name === "string");
+  // 以 NPC 所在地点为准，而不是玩家镜头：决策的是"这个 NPC 此刻能看到谁"。
+  const present = Object.values(state.entities)
+    .filter((e) => e.id !== npcId && e.status === "active" && (e.kind === "npc" || e.kind === "plr"))
+    .filter((e) => locatedAt(state, e.id) === locId)
+    .map((e) => e.name)
+    .sort();
   const lines = [
     `你是${npc.name}。现在是第${state.clock.day}天${PHASE_LABEL[state.clock.phase] ?? state.clock.phase}，第${state.clock.tick}刻。`,
     `你在${loc.name}。`,
@@ -198,11 +200,11 @@ export class NpcDecisionService {
 
     const candidates = this.candidates(snapshot, policy.maxPerBeat);
     for (const npcId of candidates) {
-      if (!this.takeCallBudget(roomId, hour)) return;
       const options = buildDecisionOptions(snapshot, npcId, policy.maxOptions);
       if (options.length < 2) continue;
       const perception = buildPerception(snapshot, npcId, options);
       if (!perception) continue;
+      if (!this.takeCallBudget(roomId, hour)) return;
       const picked = await this.ask(roomId, perception);
       const open = picked ?? {
         choice: fallbackChoice(roomId, npcId, snapshot, options.length) + 1,

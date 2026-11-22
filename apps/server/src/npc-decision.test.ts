@@ -1,5 +1,10 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "@galgame/testkit";
 import type { WorldState } from "../../../packages/shared/src/contract/types.ts";
+import { DefaultArbiter } from "../../../packages/engine/src/arbiter.ts";
+import { JsonRegistry } from "../../../packages/engine/src/registry.ts";
+import { FileStore } from "../../../packages/engine/src/store.ts";
 import {
   NpcDecisionService,
   buildDecisionOptions,
@@ -43,11 +48,15 @@ function state(overrides: Partial<WorldState> = {}): WorldState {
 
 describe("npc-decision 纯函数", () => {
   it("菜单只给留下 + 相邻地点；感知只含公开信息", () => {
-    const options = buildDecisionOptions(state(), "npc_1", 4);
+    const s = state();
+    s.entities.npc_2 = { id: "npc_2", kind: "npc", name: "赵可", attrs: {}, tags: [], origin: "seed", canon: true, status: "active", createdAt: 0, updatedAt: 0 };
+    s.links.push({ id: "l5", kind: "located_in", from: "npc_2", to: "loc_a", createdAt: 0 });
+    const options = buildDecisionOptions(s, "npc_1", 4);
     expect(options.map((o) => o.locId)).toEqual(["loc_a", "loc_b"]);
-    const perception = buildPerception(state(), "npc_1", options)!;
+    const perception = buildPerception(s, "npc_1", options)!;
     expect(perception.text).toContain("图书馆");
     expect(perception.text).toContain("1. 留在图书馆");
+    expect(perception.text).toContain("赵可");
     expect(perception.text).not.toContain("secret");
   });
 
@@ -92,5 +101,43 @@ describe("NpcDecisionService", () => {
     });
     await service.run("room_a", state());
     expect(calls).toBe(0);
+  });
+});
+
+
+describe("NpcDecisionService 真实落盘", () => {
+  it("通过 DefaultArbiter 写入 FileStore，快照里能读到决策租约", async () => {
+    const dir = tempDir("galgame-npc-decision-");
+    const room = "room_probe";
+    const store = new FileStore(dir, { worldId: "w", locId: "loc_player" });
+    let seq = await store.load(room);
+    const entity = (id: string, kind: string, name: string) => ({
+      id, kind, name, attrs: {}, tags: [], origin: "seed", canon: true, status: "active", createdAt: 0, updatedAt: 0,
+    });
+    const append = async (type: string, payload: unknown) => {
+      seq += 1;
+      await store.append(room, [{ v: 1, id: `evt_probe_${seq}`, roomId: room, seq, ts: 1, actorId: "system", type, payload }]);
+    };
+    await append("entity.created", { entity: entity("loc_a", "loc", "图书馆") });
+    await append("entity.created", { entity: entity("loc_b", "loc", "食堂") });
+    await append("entity.created", { entity: entity("loc_player", "loc", "教学楼") });
+    await append("entity.created", { entity: entity("npc_1", "npc", "林") });
+    await append("entity.created", { entity: entity("plr", "plr", "我") });
+    await append("link.created", { link: { id: "l1", kind: "located_in", from: "npc_1", to: "loc_a", createdAt: 0 } });
+    await append("link.created", { link: { id: "l2", kind: "located_in", from: "plr", to: "loc_player", createdAt: 0 } });
+    await append("link.created", { link: { id: "l3", kind: "located_in", from: "loc_a", to: "loc_b", createdAt: 0 } });
+    await append("scene.changed", { locId: "loc_player", presentIds: ["plr"] });
+
+    const registry = await JsonRegistry.load(path.join(process.cwd(), "content", "registry"));
+    const arbiter = new DefaultArbiter({ store, registry });
+    const service = new NpcDecisionService({
+      store, arbiter, llm: { chat: async () => ({ raw: "", json: { choice: 2 }, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "fake", latencyMs: 1 }) },
+      policy: { enabled: true, maxPerBeat: 1, intervalTicks: 1, hourlyCalls: 5, maxOptions: 4 },
+      warn: () => {},
+    });
+    await service.run(room);
+    const snap = await store.snapshot(room);
+    const lease = JSON.parse(String(snap.entities.npc_1.attrs.sim_lease));
+    expect(lease).toMatchObject({ action: "move", target: "loc_b", remaining: 2, phase: "morning" });
   });
 });
