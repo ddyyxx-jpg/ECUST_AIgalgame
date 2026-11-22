@@ -184,6 +184,21 @@ function collectOpConsts(node: unknown, out: string[] = []): string[] {
   } else {
     ok("apply-error", "整批失败(error)/load()/写盘先行 已在 §2.3、§2.9 说明");
   }
+
+  // 5.4 ViewPatch.panels[].key 必须同时出现在 types 与 §5.2.5（PR #153 / 3.9.0）
+  const viewPatch = /export interface ViewPatch\b[^{]*\{([\s\S]*?)\n\}/.exec(typesSrc)?.[1] ?? "";
+  const codePanelsLine = viewPatch.split("\n").find((line) => line.trim().startsWith("panels?:"));
+  const docPanelsLine = doc.split("\n").find((line) => line.includes("panels?: Record<") && line.includes("key?: string"));
+  const codeHasPanelKey = codePanelsLine?.includes("key?: string") ?? false;
+  const docHasPanelKey = docPanelsLine !== undefined;
+  if (!codeHasPanelKey || !docHasPanelKey) {
+    fail(
+      "view-patch-panels",
+      `panels[].key? 不一致：types=${codeHasPanelKey ? "有" : "缺"} docs/03 §5.2.5=${docHasPanelKey ? "有" : "缺"}`,
+    );
+  } else {
+    ok("view-patch-panels", "ViewPatch.panels[].key? 在 types 与 §5.2.5 一致（3.9.0）");
+  }
 }
 
 /** 从 `export interface X { ... }` 里提取成员名（方法或字段，忽略注释/嵌套） */
@@ -220,4 +235,4 @@ if (failures.length > 0) {
   console.error(`\n契约体检未通过：${failures.length} 项失败（CONTRACT_VERSION=${CONTRACT_VERSION}）`);
   process.exit(1);
 }
-console.log(`\n全部通过：8 项契约检查（CONTRACT_VERSION=${CONTRACT_VERSION}）`);
+console.log(`\n全部通过：9 项契约检查（CONTRACT_VERSION=${CONTRACT_VERSION}）`);

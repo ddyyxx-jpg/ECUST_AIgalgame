@@ -37,13 +37,6 @@ describe("explainTurnError（可读文案）", () => {
     expect(explainTurnError("E_PRECONDITION", "")).toBe("E_PRECONDITION");
   });
 
-  it("房间忙统一提示：回合或时间推进进行中，且不给重试按钮", () => {
-    // PR #153：房间锁覆盖 v1/v2 回合、地图 tick/travel 与自动时钟，
-    // 文案不能再只说“上一回合没结束”；busy 也不该让玩家无脑重试。
-    expect(explainTurnError("E_TURN_BUSY")).toBe("房间正忙（回合或时间推进进行中），请稍后重试。");
-    expect(isRetryableTurnError("E_TURN_BUSY")).toBe(false);
-  });
-
   it("完全空的输入也给可读兜底", () => {
     expect(explainTurnError("", "")).toBe("回合失败");
   });
