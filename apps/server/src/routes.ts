@@ -993,7 +993,28 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     // 幂等作用域：账号 + 房间 + 逻辑请求 ID（P1-1）。未登录（本地无 auth）不结算额度。
     const turnScope = userId ? { userId, roomId, clientTurnId: body.clientTurnId } : undefined;
 
-    // 额度结算（收敛稿 B1，docs/03 §5.2.10）：按逻辑请求预留，拒绝也在 SSE 头之前
+    // 先拿锁再写 SSE 头：等锁失败必须还能回普通 409，不能先宣布 200 流再反悔。
+    let leaveTurn: (() => void) | undefined;
+    const acquireAbort = new AbortController();
+    const onClientClose = () => acquireAbort.abort();
+    req.raw.once("close", onClientClose);
+    const abandonTurn = () => {
+      leaveTurn?.();
+      leaveTurn = undefined;
+      req.raw.off("close", onClientClose);
+    };
+    try {
+      leaveTurn = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000, acquireAbort.signal) : undefined;
+    } catch (e) {
+      req.raw.off("close", onClientClose);
+      if (e instanceof RoomBusyError) {
+        return reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
+      }
+      throw e;
+    }
+
+    // 额度结算（收敛稿 B1，docs/03 §5.2.10）：拿锁成功后才 reserve。
+    // 等锁失败必须不留任何账本副作用；reserve 失败则释放锁再回 409/429。
     const ledger = userId ? deps.ledger : undefined;
     if (ledger && userId && turnScope) {
       const settings = deps.auth?.store.getSettings();
@@ -1003,6 +1024,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         dailyLimit, actionsEnabled: settings?.actionsEnabled ?? true,
       });
       if (!reserved.ok) {
+        abandonTurn();
         const status = reserved.code === "E_RATE_LIMITED" ? 429 : 409;
         return reply.code(status).send({ ok: false, code: reserved.code, message: reserved.message, ...(reserved.committedSeq !== undefined ? { committedSeq: reserved.committedSeq } : {}) });
       }
@@ -1011,24 +1033,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         await ledger.transitionDurable(turnScope, "running");
       } catch {
         ledger.transition(turnScope, "failed");
+        abandonTurn();
         return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "额度账本写入失败，行动未开始，可重试" });
       }
-    }
-
-    // 先拿锁再写 SSE 头：等锁失败必须还能回普通 409，不能先宣布 200 流再反悔。
-    let leaveTurn: (() => void) | undefined;
-    const acquireAbort = new AbortController();
-    const onClientClose = () => acquireAbort.abort();
-    req.raw.once("close", onClientClose);
-    try {
-      leaveTurn = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000, acquireAbort.signal) : undefined;
-    } catch (e) {
-      req.raw.off("close", onClientClose);
-      if (ledger && userId && turnScope) ledger.transition(turnScope, "failed");
-      if (e instanceof RoomBusyError) {
-        return reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
-      }
-      throw e;
     }
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
@@ -1322,11 +1329,25 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf, { actorId: parsed.data.actorId });
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    // 玩家回合/对话回合执行期间不接受地图写操作，避免与 Turn/Dialogue 抢同一份状态。
-    if (deps.roomActivity?.isBusy(roomId)) {
-      return reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: "房间正在处理玩家回合，稍后再试" });
-    }
-    return safe(reply, () => deps.map.travel(roomId, parsed.data.actorId, parsed.data.locId));
+    // 地图写操作必须和玩家回合/对话/自动时钟抢同一把房间锁，不能只做 isBusy 预检：
+    // 预检与真正写入之间还有调度窗口，玩家回合或时钟可以插进来。
+    return safe(reply, async () => {
+      let leave: (() => void) | undefined;
+      try {
+        leave = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000) : undefined;
+      } catch (e) {
+        if (e instanceof RoomBusyError) {
+          reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
+          return;
+        }
+        throw e;
+      }
+      try {
+        return await deps.map.travel(roomId, parsed.data.actorId, parsed.data.locId);
+      } finally {
+        leave?.();
+      }
+    });
   });
 
   app.post("/api/v1/rooms/:roomId/map/tick", async (req, reply) => {
@@ -1337,12 +1358,25 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    if (deps.roomActivity?.isBusy(roomId)) {
-      return reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: "房间正在处理玩家回合，稍后再推进时间" });
-    }
-    // viewer：出站事件按调用者自己的视角裁私忆（PR #149 P3）；未登录时由 MapService 回退到玩家角色
+    // 与 /turns、/conversation、自动时钟共用房间锁；只预检会被调度窗口穿透。
     const viewer = access.userId ? playerOf(access.state, access.userId) : undefined;
-    return safe(reply, () => deps.map.tick(roomId, { ...parsed.data, ...(viewer ? { viewer } : {}) }));
+    return safe(reply, async () => {
+      let leave: (() => void) | undefined;
+      try {
+        leave = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000) : undefined;
+      } catch (e) {
+        if (e instanceof RoomBusyError) {
+          reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
+          return;
+        }
+        throw e;
+      }
+      try {
+        return await deps.map.tick(roomId, { ...parsed.data, ...(viewer ? { viewer } : {}) });
+      } finally {
+        leave?.();
+      }
+    });
   });
 
   app.post("/api/v1/rooms/:roomId/map/dialogue", async (req, reply) => {
@@ -1353,9 +1387,23 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf, { actorId: parsed.data.actorId });
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    return safe(reply, () =>
-      deps.map.openDialogue(roomId, parsed.data.actorId, parsed.data.sceneId, parsed.data.dialogueId),
-    );
+    return safe(reply, async () => {
+      let leave: (() => void) | undefined;
+      try {
+        leave = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000) : undefined;
+      } catch (e) {
+        if (e instanceof RoomBusyError) {
+          reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
+          return;
+        }
+        throw e;
+      }
+      try {
+        return await deps.map.openDialogue(roomId, parsed.data.actorId, parsed.data.sceneId, parsed.data.dialogueId);
+      } finally {
+        leave?.();
+      }
+    });
   });
 
   app.post("/api/v1/map/drafts", (req, reply) => {

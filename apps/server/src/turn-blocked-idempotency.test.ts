@@ -94,6 +94,52 @@ describe("房间锁等待失败", () => {
   });
 });
 
+describe("锁等待失败不留账本副作用（复审 P1-2）", () => {
+  it("v1 /turns 等锁失败时 409，且账本没有 reserved/failed 记录", async () => {
+    const { app, deps, roomId } = await setup();
+    deps.roomActivity = {
+      acquire: async () => { throw new RoomBusyError(roomId, "等待超时"); },
+      tryAcquire: () => null,
+      enter: () => () => {},
+      isBusy: () => true,
+    } as never;
+    const res = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/turns`,
+      headers: { ...ORIGIN, "x-user-id": "u_ledger" },
+      payload: { actorId: "plr_1", input: "你好", clientTurnId: "c_lock_no_ledger" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ ok: false, code: "E_TURN_BUSY" });
+    expect(deps.ledger?.get({ userId: "u_ledger", roomId, clientTurnId: "c_lock_no_ledger" })).toBeUndefined();
+    await app.close();
+  });
+});
+
+describe("地图写端点与回合共用房间锁（复审 P1-3）", () => {
+  it("travel/tick 等锁失败返回 409，而不是绕过锁直接写", async () => {
+    const { app, deps, roomId } = await setup();
+    deps.roomActivity = {
+      acquire: async () => { throw new RoomBusyError(roomId, "等待超时"); },
+      tryAcquire: () => null,
+      enter: () => () => {},
+      isBusy: () => false,
+    } as never;
+    const travel = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/map/travel`,
+      headers: ORIGIN, payload: { actorId: "plr_1", locId: "loc_library" },
+    });
+    expect(travel.statusCode).toBe(409);
+    expect(travel.json()).toMatchObject({ ok: false, code: "E_TURN_BUSY" });
+    const tick = await app.inject({
+      method: "POST", url: `/api/v1/rooms/${roomId}/map/tick`,
+      headers: ORIGIN, payload: { advance: false },
+    });
+    expect(tick.statusCode).toBe(409);
+    expect(tick.json()).toMatchObject({ ok: false, code: "E_TURN_BUSY" });
+    await app.close();
+  });
+});
+
 describe("审核阻断回合的 HTTP 幂等（PR #123 P0-B / P1-3）", () => {
   it("消费器在 turn.commit 处 break 后同 key 重发：惩罚/记忆/seq 都不再增长", async () => {
     const { app, deps, roomId, turn } = await setup();

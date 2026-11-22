@@ -119,13 +119,12 @@ export class SimClock {
     const underlying = this.deps.map.tick(roomId, { ticks });
     this.running.set(roomId, underlying);
     const timeoutMs = this.deps.roomTimeoutMs ?? 30_000;
-    let hardTimer: NodeJS.Timeout | undefined;
     let released = false;
-    // 底层 Promise 结束后才释放占位与房间锁；超时只结束等待，不提前放锁。
+    // 底层 Promise 真正结束后才释放占位与房间锁。等待超时只让本次 beat 返回，
+    // 不释放锁：否则底层 arbiter 还在写 EventLog 时玩家回合就能进来，两边同时写。
     const settle = () => {
       if (released) return;
       released = true;
-      if (hardTimer) clearTimeout(hardTimer);
       if (this.running.get(roomId) === underlying) this.running.delete(roomId);
       releaseLock?.();
     };
@@ -143,13 +142,9 @@ export class SimClock {
       if (timer) clearTimeout(timer);
     }
     if (result === undefined) {
-      // 兜底：底层 map.tick 永不 settle 时，不能把整个房间永久锁死（玩家回合会一直 409）。
-      // 2×timeout 后强制释放并记一条错误级日志；底层若随后仍在写，属于已知的极小重叠窗口。
-      hardTimer = setTimeout(() => {
-        this.warn(`[sim-clock] 房间 ${roomId} 底层 tick 超过 ${timeoutMs * 2}ms 未结束，强制释放房间锁`);
-        settle();
-      }, timeoutMs * 2);
-      hardTimer.unref?.();
+      // 不强制放锁：宁可让该房间后续回合/推进拿到 409，也不能让两份写入交错。
+      // 底层若永久不 settle，这里只告警，房间保持锁定，等运维处理。
+      this.warn(`[sim-clock] 房间 ${roomId} 底层 tick 超过 ${timeoutMs}ms 未结束，保持房间锁定`);
     }
     return result;
   }
