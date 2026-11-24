@@ -286,6 +286,7 @@ export class NpcAgent {
           { role: "user", content: this.deps.policy.messages.userPrompt },
         ],
         json: true,
+        purpose: "conversation",
         temperature: this.deps.policy.llm.temperature,
         maxTokens,
         actorId: args.npcId,

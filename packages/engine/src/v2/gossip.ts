@@ -99,6 +99,7 @@ export class GossipAgent {
       const res = await this.deps.llm.chat({
         messages: [{ role: "system", content: prompt }],
         json: true,
+        purpose: "conversation",
         temperature: this.deps.conversation.llm.temperature,
         maxTokens: this.deps.conversation.llm.maxTokens,
         roomId,

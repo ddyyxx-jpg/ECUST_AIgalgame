@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "routes": {
+    "turn": { "maxTokens": 900 },
+    "conversation": { "maxTokens": 600 },
+    "decision": { "maxTokens": 120, "temperature": 0.8 },
+    "canonize": {}
+  }
+}

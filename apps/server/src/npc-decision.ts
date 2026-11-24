@@ -245,6 +245,7 @@ export class NpcDecisionService {
       const result = await this.deps.llm.chat({
         messages: [{ role: "system", content: perception.text }],
         json: true,
+        purpose: "decision",
         temperature: 0.8,
         maxTokens: 120,
         roomId,

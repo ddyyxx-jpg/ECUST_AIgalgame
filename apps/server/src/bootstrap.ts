@@ -51,6 +51,7 @@ import { TurnHistory, withTurnRecording } from "./turn-history.ts";
 import { LlmAudit } from "./audit.ts";
 import { MapService } from "./map.ts";
 import { loadSimPolicy } from "./sim.policy.ts";
+import { loadLlmRoutes } from "./llm-routes.ts";
 import { RoomActivity } from "./room-activity.ts";
 import { SimClock } from "./sim-clock.ts";
 import { NpcDecisionService } from "./npc-decision.ts";
@@ -266,6 +267,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
         proposals: [],
       }),
   });
+  const llmRoutes = await loadLlmRoutes(contentDir);
   const settingsFilePath = path.join(path.resolve(cfg.dataDir), "llm-settings.json");
   const saved = await loadPersistedLlmSettings(settingsFilePath);
   const fromEnv = hasLlm(cfg);
@@ -275,6 +277,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
         model: cfg.llm.model,
         apiKey: cfg.llm.apiKey,
         timeoutMs: cfg.llm.timeoutMs,
+        ...(llmRoutes ? { routes: llmRoutes } : {}),
       })
     : saved
       ? new OpenAiCompatClient({
@@ -282,6 +285,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
           model: saved.model,
           apiKey: saved.apiKey,
           timeoutMs: cfg.llm.timeoutMs,
+          ...(llmRoutes ? { routes: llmRoutes } : {}),
         })
       : null;
   const llm = new LlmSwitch(remoteClient ?? offlineLlm);

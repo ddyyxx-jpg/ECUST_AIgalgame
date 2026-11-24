@@ -529,6 +529,9 @@ export interface LlmMessage {
   content: string;
 }
 
+/** LLM 调用用途：网关按用途套用 `content/llm/routes.json` 的模型/预算（部署细节，引擎只声明"这是什么调用"） */
+export type LlmPurpose = "turn" | "conversation" | "decision" | "canonize";
+
 export interface LlmRequest {
   messages: LlmMessage[];
   /** 强 JSON 输出（DeepSeek 要求 prompt 含 "json" 且给样例） */
@@ -538,6 +541,8 @@ export interface LlmRequest {
   /** 用于成本归因与限流 */
   roomId?: RoomId;
   actorId?: ActorId;
+  /** 调用用途；缺省 = 客户端默认模型/预算 */
+  purpose?: LlmPurpose;
 }
 
 export interface LlmResult {

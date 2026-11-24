@@ -86,6 +86,7 @@ export class TurnLlm {
   private async askOnce(req: TurnRequest, state: WorldState, kind: RealityKind | null, mem?: MemoryContext): Promise<LlmProduct> {
     const res = await this.deps.llm.chat({
       json: true,
+      purpose: "turn",
       messages: [
         { role: "system", content: await this.prompt(state, req.actorId, req.input, kind, mem) },
         { role: "user", content: req.input },
@@ -113,6 +114,7 @@ export class TurnLlm {
     try {
       const res = await this.deps.llm.chat({
         json: true,
+        purpose: "turn",
         messages: [
           { role: "system", content: await this.prompt(state, req.actorId, req.input, kind, mem) },
           { role: "user", content: req.input },
