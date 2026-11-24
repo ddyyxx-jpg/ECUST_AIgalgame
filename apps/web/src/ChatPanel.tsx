@@ -14,7 +14,7 @@ import InteriorMap from "./InteriorMap.tsx";
 import MiniMap from "./MiniMap.tsx";
 import { candidateKeyIndex } from "./candidate-keys.ts";
 import { buildCandidates } from "./candidates.ts";
-import type { SuggestionInput } from "./candidates.ts";
+import type { Candidate, SuggestionInput } from "./candidates.ts";
 import { getMap } from "./api.ts";
 import type { MapView } from "./api.ts";
 import { interiorFor, interiorNpcSpot } from "./interior.ts";
@@ -129,6 +129,27 @@ export default function ChatPanel({
   const [talking, setTalking] = useState<{ id: string; name: string } | null>(null);
   /** 点击时记的是占位名；对方自报姓名解锁后，用权威状态里的真名覆盖标题/输入框 */
   const talkingName = talking ? (state?.entities[talking.id]?.name ?? talking.name) : "";
+  /**
+   * 候选自带 actorId 时按候选定向：否则在用「和X说话」候选时会沿用当前对话对象，
+   * 出现「对马骁说：和店主说话」这种目标与内容矛盾的台词。
+   */
+  /**
+   * 激活候选：talk 是“指名对象”，只切对话对象、不替玩家说话（否则会把「和店主说话」
+   * 本身当成一句台词发给对方，出现「对马骁说：和店主说话」这种自相矛盾的记录）。
+   */
+  const activateCandidate = (c: Candidate) => {
+    if (c.kind === "talk" && c.actorId) {
+      setTalking({ id: c.actorId, name: state?.entities[c.actorId]?.name ?? c.actorId });
+      return undefined;
+    }
+    return onPick(c.text, targetFor(c.actorId));
+  };
+  const targetFor = (actorId?: string) =>
+    actorId
+      ? { id: actorId, name: state?.entities[actorId]?.name ?? actorId }
+      : talking
+        ? { id: talking.id, name: talkingName }
+        : null;
   const [blocked, setBlocked] = useState<BlockedNpc | null>(null);
   /** 「前往 TA 所在地」成功后，等位置真的切过去再选中这个人（避免被换场景的清理 effect 覆盖） */
   const [pendingTalk, setPendingTalk] = useState<{ id: string; name: string; locId: string } | null>(null);
@@ -336,10 +357,7 @@ const PHASE_META: Record<string, { name: string; icon: string; color: string }> 
       e.preventDefault();
       // 发给父组件后本帧内不再接第二发：setBusy(true) 的提交慢于本次事件
       busyRef.current = true;
-      const picked = onPick(
-        candidates[index - 1].text,
-        talking ? { id: talking.id, name: talkingName } : null,
-      );
+      const picked = activateCandidate(candidates[index - 1]);
       // 父组件返回 send 的 Promise：成功、失败、守卫提前返回都会在 settle 后解除自锁。
       // 不改成「只依赖 busy prop」：第二次按键可能早于 effect 同步 busy，会重新同帧连发；
       // 因此保留 ref，并补上这条确定性的复位路径。onPick 返回 undefined 时交给 busy effect。
@@ -352,7 +370,7 @@ const PHASE_META: Record<string, { name: string; icon: string; color: string }> 
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [candidates, state, overlayOpen, talking, talkingName, onPick]);
+  }, [candidates, state, overlayOpen, talking, talkingName, onPick, activateCandidate]);
 
   return (
     <div className="world-page">
@@ -562,8 +580,7 @@ const PHASE_META: Record<string, { name: string; icon: string; color: string }> 
           candidates={candidates}
           disabled={busy}
           ready={Boolean(state)}
-          target={talking ? { id: talking.id, name: talkingName } : null}
-          onPick={onPick}
+          onActivate={activateCandidate}
         />
 
         {/* v2 demo：说话类型选择 + @谁（点场景里的 NPC 即 talking）。老流程无 v2Modes 时不显示。

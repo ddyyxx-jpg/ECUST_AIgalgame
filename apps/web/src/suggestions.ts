@@ -82,10 +82,22 @@ function buildPool(pos: Pos | undefined, selfId: string): Suggestion[] {
   const out: Suggestion[] = [];
   for (const a of pos.actors) {
     if (a.present && a.actorId !== selfId && a.name.length > 0) {
-      out.push({ text: `和${a.name}说话`, kind: "talk" });
+      out.push({ text: `和${speakableName(a.name)}说话`, kind: "talk", actorId: a.actorId });
     }
   }
   return out;
+}
+
+/**
+ * 候选里的称呼：未认识的 NPC 在 View 里只有外貌占位名（「围着围裙、袖口沾着油渍的店主」），
+ * 直接拼进「和…说话」会变成一句没法读的台词。这里取占位名最后一段身份词（“的X”→“X”）；
+ * 拿不到就截断。只影响候选文案，不影响服务端展示名。
+ */
+export function speakableName(name: string): string {
+  if (name.length <= 10) return name;
+  const tail = name.slice(name.lastIndexOf("的") + 1);
+  if (tail.length >= 2 && tail.length <= 8) return tail;
+  return `${name.slice(0, 8)}…`;
 }
 
 /**

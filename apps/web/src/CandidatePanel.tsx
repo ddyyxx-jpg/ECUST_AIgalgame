@@ -14,12 +14,14 @@ interface Props {
   disabled: boolean;
   /** 权威状态是否已就绪（老逻辑：!state 时禁点） */
   ready: boolean;
-  /** 当前对话对象：点了候选就按这个 target 说话；null = 没有选中的人 */
-  target: { id: string; name: string } | null;
-  onPick: (text: string, target?: { id: string; name: string } | null) => void;
+  /**
+   * 激活一条候选：talk 候选是“指名对象”（选中对话对象、等玩家自己说），
+   * 其余候选才直接发出去。判定放在 ChatPanel，面板只转发。
+   */
+  onActivate: (c: Candidate) => void;
 }
 
-export default function CandidatePanel({ candidates, disabled, ready, target, onPick }: Props) {
+export default function CandidatePanel({ candidates, disabled, ready, onActivate }: Props) {
   if (candidates.length === 0) return null;
 
   return (
@@ -30,9 +32,9 @@ export default function CandidatePanel({ candidates, disabled, ready, target, on
           key={c.id}
           type="button"
           className={"candidate-chip kind-" + c.kind}
-          title={`说出：${c.text}`}
+          title={c.kind === "talk" ? "点一下选中对话对象，再输入你想说的话" : `说出：${c.text}`}
           disabled={disabled || !ready}
-          onClick={() => onPick(c.text, target)}
+          onClick={() => onActivate(c)}
         >
           <kbd className="candidate-hint">{c.hint}</kbd>
           <span>{c.text}</span>

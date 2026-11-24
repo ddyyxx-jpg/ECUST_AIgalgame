@@ -18,6 +18,8 @@ export type CandidateKind = (typeof CANDIDATE_KINDS)[number];
 export interface Suggestion {
   text: string;
   kind: CandidateKind;
+  /** talk 候选指向的 NPC：点候选时按它定向，而不是按“当前选中的对话对象” */
+  actorId?: string;
 }
 export type SuggestionInput = Suggestion | string;
 
@@ -29,6 +31,8 @@ export interface Candidate {
   kind: CandidateKind;
   /** 数字键提示："1"…"6"；与数组下标一致 */
   hint: string;
+  /** 同 Suggestion.actorId：这条候选该说给谁听 */
+  actorId?: string;
 }
 
 export const DEFAULT_MAX_CANDIDATES = 6;
@@ -39,7 +43,7 @@ export const DEFAULT_MAX_CANDIDATES = 6;
  */
 export function normalizeSuggestion(input: SuggestionInput): Suggestion {
   if (typeof input === "string") return { text: input, kind: "action" };
-  return { text: input.text, kind: input.kind };
+  return { text: input.text, kind: input.kind, ...(input.actorId ? { actorId: input.actorId } : {}) };
 }
 
 /**

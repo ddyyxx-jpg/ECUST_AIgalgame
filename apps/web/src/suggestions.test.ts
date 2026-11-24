@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ViewPatch, WorldState } from "../../../packages/shared/src/contract/types.ts";
-import { candidatePosition, positionFromState, turnSuggestions } from "./suggestions.ts";
+import { candidatePosition, positionFromState, speakableName, turnSuggestions } from "./suggestions.ts";
 import { buildCandidates } from "./candidates.ts";
 
 function pos(over: Partial<ViewPatch["position"]> = {}): ViewPatch["position"] {
@@ -97,8 +97,12 @@ describe("turnSuggestions（来源侧带 kind）", () => {
       ],
     });
     // 池里只剩 1 条 talk：每轮都给同一句（无法再拆），但绝不出现 move
-    expect(turnSuggestions(p, 1, "plr_self", 5)).toEqual([{ text: "和林静说话", kind: "talk" }]);
-    expect(turnSuggestions(p, 2, "plr_self", 5)).toEqual([{ text: "和林静说话", kind: "talk" }]);
+    expect(turnSuggestions(p, 1, "plr_self", 5)).toEqual([
+      { text: "和林静说话", kind: "talk", actorId: "npc_lin" },
+    ]);
+    expect(turnSuggestions(p, 2, "plr_self", 5)).toEqual([
+      { text: "和林静说话", kind: "talk", actorId: "npc_lin" },
+    ]);
     // 渲染层直通，不重新分类
     expect(buildCandidates(turnSuggestions(p, 1, "plr_self", 5)).map((c) => c.kind)).toEqual(["talk"]);
   });
@@ -146,5 +150,21 @@ describe("candidatePosition（travel 后的过期位置，PR #149 复审 P2-2）
     const same = pos({ actors: [{ actorId: "npc_lin", name: "林静", present: true }] });
     const here = { room: { scene: { locId: "loc_lib", presentIds: ["plr_self"] } }, entities: {}, links: [] } as unknown as WorldState;
     expect(candidatePosition(same, here, "plr_self")).toBe(same);
+  });
+});
+
+describe("speakableName（未认识 NPC 的外貌占位名）", () => {
+  it("长占位名取最后一段身份词，短名原样保留", () => {
+    expect(speakableName("林静")).toBe("林静");
+    expect(speakableName("围着围裙、袖口沾着油渍的店主")).toBe("店主");
+    expect(speakableName("靠在窗边、手里捏着一张纸条的女生")).toBe("女生");
+  });
+
+  it("候选文案用短称呼，但 actorId 仍指向本人", () => {
+    const p = pos({
+      actors: [{ actorId: "npc_shop", name: "围着围裙、袖口沾着油渍的店主", present: true }],
+    });
+    const [c] = turnSuggestions(p, 1, "plr_self", 5);
+    expect(c).toEqual({ text: "和店主说话", kind: "talk", actorId: "npc_shop" });
   });
 });
