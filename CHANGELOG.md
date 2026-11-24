@@ -5,6 +5,97 @@
 版本与 tag 对应：`v0.1.0` M0 骨架 → `v0.1.1` 引擎 3.0.0 → `v0.1.2` 审核/锚定 → `v0.2.0` 地图 v0.2 → `v0.3.0` 前端体验与运行时模型接入（PR #2）→ `v0.4.0` 记忆子系统 3.1.0 + 地图交互/图鉴 registry 收口（PR #4/#5）→ `v0.5.0` issue #1/#3/#7/#8 批量落地（PR #9–#13）→ `v0.5.1` 三条 issue 修复（PR #22–#24）→ `v0.5.2` 记忆可信边界 / 404 守卫 / tick 原子 / 部署边界（PR #43–#45，CONTRACT 3.3.0）→ `v0.5.3` Turn 幂等（PR #50）→ `v0.5.4` NPC 认识与名字解锁 + 地图出站脱敏/档案收窄（PR #52/#55/#56，CONTRACT 3.4.1）→ `v0.5.5`（候选版本号，尚未打 tag；发版时决定）简易用户系统 + 房间授权/行动额度（PR #72，merge 840e9c5，CONTRACT 3.5.0）→ `dev/v2` 群聊/微信八卦（PR #51，merge 02a3318）已合入 main（CONTRACT 3.6.0，13 op）→ `v0.5.6`（候选版本号，尚未打 tag；发版时决定）PR #123 打回修复批（14 commits，CONTRACT 3.6.0 不变）→ `v0.6.0` dev/v2 群聊 + 开放 issue 收口 + 像素 UI（PR #144 / #149 / #148，CONTRACT 3.6.2 → 3.8.0）。
 
 
+
+#### 试玩反馈修复（候选行动）
+
+- talk 候选改成「指名对象」：点一下只切换对话对象并聚焦输入框，不再把「和店主说话」本身当台词发出去（此前会记录成「对马骁说：和店主说话」）。
+- 候选的定向目标跟着候选走（`Suggestion.actorId` → `Candidate.actorId`），不再一律沿用当前对话对象。
+- 未认识 NPC 的外貌占位名在候选里取身份词（「围着围裙、袖口沾着油渍的店主」→「店主」），避免候选条出现二十字长句。
+
+#### 复审遗留技术项（本轮）
+
+- `RoomActivity.acquire` 改为等待者队列：房间释放时唤醒，不再 5ms 轮询；超时/取消仍抛 `RoomBusyError`。
+- `SimClock.beforeTick`（NPC 自由活动决策）加 `roomTimeoutMs` 上限：决策挂起时本拍放弃决策并推进时间，`beating` 不会永久卡住。
+- `SimClock` 新增 `telemetry()`（`stuckRooms` + 累计 `stuckTicks`），卡死只在“本轮首次”计数并告警一次，不再每拍刷日志；`stop()` 一并清零。
+- `content/sim/policy.json` 校验失败时告警带出 `issues[].path`，措辞改为「sim 功能按缺省关闭」（拼错单个键不再误报成“行动点功能关闭”）。
+- `hud-stats` 头部注释与新判定（key 优先、label 兼容旧服务端）对齐。
+
+### 试玩反馈修复（NPC 自主对话）
+- v2 会话：`content/sim/policy.json` 新增 `chat{enabled,autoTurns,minPresentNpcs}`；玩家回合写完后，同一条 SSE 里让在场 NPC 自动再聊 `autoTurns` 轮（写完之后才跑，不额外增加玩家等待）。
+- 引擎：`auto` 回合豁免 `minReplyIntervalMs`（真正的上限仍是 `maxAutoRounds` 与每小时条数/调用上限）；提示词在「玩家没接话」时允许 NPC 主动开口，并要求用 broadcast 让在场者（含玩家）都能听见。
+- `CONVERSATION_PROMPT_VERSION` `2026-11-21.1` → `2026-11-24.1`（提示词静态段与动态段都有改动）。
+## 未发布 — v2 会话行动点 + 内容层世界观进 v2（CONTRACT 3.11.0）
+
+### 修复（试玩反馈：NPC 之间的名字）
+
+- 出站遮罩：`叫<真名>` 改写为判断句「是<外貌/序号占位名>」，不再出现「叫抱着一摞校刊的女生」这类病句（`apps/server/src/view-names.ts`）。
+- 姓名解锁新增第三条来源：玩家问「另外一个叫什么 / 旁边那位是谁」时，NPC 台词里说出的其他未认识 NPC 名字也算听到（不要求在场、不要求自报），下一回合起用真名（`apps/server/src/name-unlock.ts` + v1/v2 两条路由接线）。
+- 验证：tsc 0；vitest 137 文件/1111 例；contract 9/9（3.11.0）。
+
+> 收 #153 复审里「未真正闭环」的四项；不改 op 语义、不改世界状态结构。
+
+- **行动点在默认路径（v2 `/conversation`）生效**：`ConversationHostV2` 接 `actionPolicy`（与 v1 `TurnActionPolicy` 同源，键名来自 `content/sim/policy.json`）。玩家每回合先扣点、余额不足整批拒绝（`E_PRECONDITION` + `conversation.error`），不调模型、不落库；旧存档没有 `action_points` 时不扣也不拦。文案由 `ConversationPolicy.messages.actionPointsInsufficient` 提供（`{now}`/`{cost}`），前端 HUD 在 v2 也显示行动点。
+- **内容层世界观（`content/lorebook.json`）进 v2 提示词**：`NpcAgent` 新增 `worldInfo` 钩子，与 v1 `DefaultTurn` 共用同一份选择逻辑（作者注进静态段首、关键词条目追加在静态段末尾，前缀仍可被 KV 缓存）；匹配文本 = 本轮听到的话 + 地点名 + 在场者名字。
+- **`npc-decision` 补 user 消息**：部分 OpenAI 兼容网关在只有 system 时会续写协议文本；现在补一条「请从上面的选项里选一个，只输出 JSON」。
+- **`time.advance` 的 `ticks` 口径统一为 1..8**：`packages/engine/src/arbiter.ops.ts` 与 zod（`TimeAdvanceArgsSchema`）对齐；「跳到指定 phase」的内部 0 不受影响；`docs/05` 不再与实现漂移。
+
+验证：`typecheck` 0；`npm test` 见 CI/本地；`check:contract` 9/9（CONTRACT_VERSION=3.11.0）。
+
+## 未发布 — 按用途的模型路由（CONTRACT 3.10.0）
+
+> 网关按 `LlmRequest.purpose` 选模型与预算；新增 `content/llm/routes.json`。不改 op、不改世界状态。
+
+### 新增
+- `LlmPurpose`（`turn` / `conversation` / `decision` / `canonize`）与 `LlmRequest.purpose?`：引擎只声明“这是什么调用”，模型/预算由部署配置决定。
+- `content/llm/routes.json`：按用途覆盖 `model` / `maxTokens`（下限，只抬不压）/ `temperature` / `timeoutMs` / `extra`（如 `reasoning_effort`）；缺文件或坏配置降级为默认并告警。
+- 交互回合与结构化决策可指到非思考模型，后台总结指到思考模型；思考型模型的预算与超时按用途放大，不必改代码。
+
+### 验证
+- `npm run typecheck` 0 错；`npx vitest run` 134 文件/1101 例全过；`npm run check:contract` 9/9（3.10.0）。
+
+### 已知边界
+- 路由只作用于 `OpenAiCompatClient`；离线叙述器与独立端点的审核器不受影响。
+- `maxTokens` 是下限不是硬上限：调用方的截断重试仍可放大。
+- 启动时读取一次，改配置需重启服务端。
+
+## 未发布 — sim-v2 第一步：行动点 + NPC 动作租约 + 自动时钟
+
+> 时间骨架；只新增可选展示字段（`ViewPatch.panels[].key`）并 minor bump 到 CONTRACT 3.9.0，所有状态变更仍走 Proposal → Arbiter。
+
+### 新增
+- **行动点**：`content/registry/attrs.json` 新增 `action_points`（plr，0..6，默认 6）。`TurnDeps.actionPolicy` 可按内容配置启用；不足时 `E_PRECONDITION` 且不调模型，扣点 `attr.delta{mustKeep:true}` 与回合提案同批 atomic，失败不扣。参数在 `content/sim/policy.json`。**生效范围：只接 v1 `/turns` 的 `Turn`；v2 `/conversation` 是对话模式，不消耗行动点。**
+- **NPC 动作租约**：`sim_lease`（npc，JSON 字符串，visibility self）。map 模块 tick 按“移动占 1 tick / 原地停留 2 tick / 租约未到期不接新动作 / phase 变化重排”维护，自动 tick 不会让 NPC 每拍重新决策。
+- **自动时钟**：`apps/server/src/sim-clock.ts`，默认关闭；只推 `time.advance{ticks}`，到 `maxTick` 停下等玩家 `advance`，不替玩家切 phase。
+- **推进时段回满**：`advance:true` 时在同一批里把玩家行动点回满。
+- **租约不出站**：`sim_lease` 是引擎内部属性，`projectStateForPlayer` 在任何玩家出站通道（`/state`、`/events`、`turn.patch.state`）统一剥掉；`docs/03` 的 issue #74 口径同步注明该唯一例外。
+- **房间活动锁**：新增 `RoomActivity`，v1 `/turns` 与 v2 `/conversation` 执行期间标记房间忙；自动时钟拿不到锁就跳过，玩家回合在时钟本拍进行时等待其结束（最多 30s，客户端断开即取消），等不到锁时在 SSE 头之前返回 409 `E_TURN_BUSY`；`/map/tick` 与 `/map/travel` 忙时同样返回 409，时间推进不再与回合交错；`/map/dialogue` 是只读路径，不抢锁，避免 10–20s 的场景对话 LLM 把玩家回合堵在 acquire。
+- **NPC 自由活动（WorldX 感知/菜单/单选决策）**：`apps/server/src/npc-decision.ts` + `content/sim/policy.json` 的 `decision` 段；自动时钟每拍挑空闲 NPC，投影公开感知（地点/时段/在场者），只给“留下 + 相邻地点”编号菜单，模型回 `{"choice":N}` 后写 `sim_lease`；移动仍由 map tick 执行。默认关闭，受 `maxPerBeat/intervalTicks/hourlyCalls` 限制，坏输出走确定性 fallback。
+- **作者注 / 关键词世界设定（SillyTavern 内容层）**：`content/lorebook.json` + `apps/server/src/lorebook.ts`；`buildTurnPrompt` 新增可选 `authorNote` 与 `worldInfo`，只把命中当前输入/地点/在场者的条目注入提示词，不改 op、不让 LLM 直写状态。`PROMPT_VERSION` bump 到 `2026-11-22.1`。**生效范围：只接 v1 `/turns`；v2 `/conversation` 的 NPC 提示词暂未注入 lorebook/作者注。**
+- **复审 P2/P3 收口**：talk 租约过期/跨 phase 不再先写一条清空再写新租约，改为一次 `attr.set` 覆盖；NPC 决策在写租约前重读 phase，跨 phase 直接放弃；HUD 同时按 `key` 与中文 label 识别行动点；`talkLeaseTicks` 文档明确为顶层字段；`projectProposalsForPlayer` 把 `attr.set sim_lease` 也从回合提案/对话提交提案中剥掉；`docs/06` 明确房间锁是进程内计数，只支持单进程单写者部署。`sim_lease` 的 JSON 校验与 `clockIndex` 抽到 `content/modules/map/lease.ts`，模块与 server 共用同一份字段定义；`travel` 路径可达但模块没走动改报 `E_PRECONDITION`（行动点照退），不再误报 `E_NOT_ADJACENT`。`sim-clock` 对“超时后底层仍不结束”的房间记录 `stuckSince` 并提供 `stuckRooms()` 查询已锁时长；`projectProposalsForPlayer` 对 `entity.update` 的 `attrs` 做防御性剥离；`ViewPatch.panels[].key` 作为新增可选字段把 `CONTRACT_VERSION` minor bump 到 3.9.0（docs/03 §10.29）；v1 SSE `turn.patch.ops` 与 `/events` 的 `turn.patch` envelope 都改走 `projectProposalsForPlayer`，前端 `E_TURN_BUSY` 文案改为“房间正忙（回合或时间推进进行中）”。
+- **对话打断 NPC 动作（D22）**：`/conversation` 的 target/interject 或 v1 `/turns` 的 `targetNpcId` 命中正在行动的 NPC 时，服务端把 `sim_lease` 冻结为 `{action:"talk",resume:原租约}`（空闲 NPC 也写 talk，防止对话途中被自动 tick 起新动作）；map tick 跳过 talk，回合结束（含异常）恢复原租约并继续剩余占用；talk 跨 phase 视为过期清空，并带 `expiresAt` 超时兜底（默认 12 tick），避免崩溃后永久冻结；`sim-clock.stop()` 清空卡死房间快照；场景对话若产生未落库提案会 warn，避免“对话有提案却被静默丢弃”不可观测。
+
+### 验证
+- `npm run typecheck` 0 错；`npx vitest run` 134 文件/1092 例全过；`npm run check:contract` 9/9（3.9.0）。
+- 新增 `turn.action-points.test.ts`（含 FileStore 重启探针）、`sim-clock.test.ts`、`sim.policy.test.ts`，map 模块补租约/停留/跨 phase/超时用例，对话路由补数组 target、v1 `/turns` 与恢复失败不冒充已恢复的用例。
+
+### 已知边界
+- `travel` 可达性预检改用 `content/modules/map/path.ts` 的同一套 BFS（多跳合法）：不可达在回合前直接 `E_NOT_ADJACENT`，不跑 Turn、不扣行动点；“可达但模块没走动”的异常路径会提交并扣点，随后按前后快照差额退还并返回 `E_PRECONDITION`。
+- 旧存档没有 `action_points` 时不强制扣点；自动时钟与 NPC 自由活动默认关闭，需在 `content/sim/policy.json` 显式开启（本地试玩分支已开启）。
+- 房间活动锁覆盖 `/turns`、`/conversation`、自动时钟与地图 HTTP 写入口；锁是进程内计数，只支持 `data/` 单进程单写者部署，多进程/多 worker 不在支持范围；直接调用 `MapService.tick` 的运维/测试脚本仍不在锁内（服务层是可信调用）。底层 tick 超过超时仍不 settle 时只告警、保持房间锁定（宁可 409 也不让两份写入交错）；v1 `/turns` 的额度预留移到拿锁成功之后，等锁失败不再留下账本记录。
+- 单房间 tick 超过 30s 时只停止等待、不取消底层执行；在该 Promise settle 前，同房间的后续拍会跳过，避免重复排队。
+
+### 试玩反馈修复
+
+> 依据试玩反馈修的表现层/内容层问题；不改契约、不新增 op、不改引擎。
+
+- **点图鉴回来被送回楼外**：室内标记 `inside` 原本是 `ChatPanel` 本地 state，切 tab 会卸载组件（`key={tab}`）而丢失，回来就落到大地图。现在 `insideSceneId` 提升到 `App`，跨 tab 保留，`resetRoomUi` 时清空。
+- **小地图传送后场景不变**：`App.refreshState()` 原来只补 `view.position.actors` 的名字，不更新 locId/name/exits；`travel` 只返回 `{scene,events,map}`，也不带 ViewPatch。现在用 `positionFromState(state, actorId)` 整体重建位置（依赖数组补 `actorId`）。
+- **候选行动里不该出现「去操场」**：`suggestions.ts` 的候选池只保留在场 NPC 的对话；开局剧本 `kind:"move"` 的建议也在 `App` 过滤。走哪扇门、去哪一律由玩家点地图/门。
+- **行动点耗尽后卡死**：行动点为 0 时 travel 被 `Turn` 以 `E_PRECONDITION` 拒绝，而「推进时段」入口原来只在地图面板。现在聊天区在行动点为 0 时显示提示条与「推进时段」按钮（`App.restPhase` → `map.tick{advance}` 回满），行动点判定以权威 `state` 为准，tick 后同步回写面板行。
+- **NPC 自由行动不运行**：`content/sim/policy.json` 里 `clock.enabled` 与 `decision.enabled` 双关，而 `NpcDecisionService` 唯一入口是 `SimClock.beforeTick`。现在两者开启（45s/拍、只推 tick 不切 phase；每 2 tick 决策一次、每拍最多 2 人、每小时 12 次）。
+- **NPC 瞬移**：`content/modules/map/module.ts` 的租约与日程两条移动路径原本在同一 tick 把整条 BFS 路径逐跳推进同一批。现在每个 tick 只走一跳（只产 `path[1]` 与该跳坐标），真正到达目标才转 2 tick 的 `stay`；`docs/06-地图模块.md` 同步。N 跳目的地需要 N 个有效 tick。
+- **可观测性**：`apps/server/src/map.ts` 的 travel 领域拒绝（如行动点不足）补一条 `console.warn`，后台能看到被拒原因，不再静默。
+
 ## 未发布 — #151 复审两条 P1（`busy` 时自动进出室内）
 
 > 仅前端表现层：不改契约、不新增 op、不动服务端；`CONTRACT_VERSION` 3.8.0 不变。

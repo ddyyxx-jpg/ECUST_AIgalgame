@@ -5,11 +5,38 @@
  * 为什么单独成文件：这些字段是"漏一次就毁玩法"的秘密通道，散落在各路由里容易漏改；
  * 收在一处让后续新增出口能复用同一函数，也让测试只需盯一个模块。
  * 与 dev/v2 的 `projectWorldState` / `projectConversationEvents` 同口径
- * （由 packages/engine/src/v2/conversation.view.ts 的 stripPlotSecrets 提供字段清单），
- * 但本模块不裁剪 attrs/links——那些走既有的 maskNamesDeep / 观察者投影。
+ * （由 packages/engine/src/v2/conversation.view.ts 的 stripPlotSecrets 提供字段清单）。
+ * attrs 基本原样返回（docs/03 §5.2.5 的 issue #74 口径），唯一例外是引擎内部属性
+ * `sim_lease`：它是 NPC 的动作租约（含下一步目标/剩余 tick），不属于玩家可见状态，
+ * 任何出站投影都必须剥掉；否则 /state、/events、turn.patch 都会泄露 NPC 下一步。
  */
 import type { Envelope, Plot, Proposal, WorldState } from "../../../packages/shared/src/index.ts";
 import { projectProposals, stripPlotSecrets } from "../../../packages/engine/src/v2/index.ts";
+
+/** 引擎内部属性：只给 tick/对话/调试用，任何玩家可读出口都必须剥掉。 */
+const ENGINE_INTERNAL_ATTRS = ["sim_lease"] as const;
+const INTERNAL_ATTR_SET = new Set<string>(ENGINE_INTERNAL_ATTRS);
+
+/**
+ * Proposal 出站裁剪：先复用 v2 的私忆/plot 裁剪，再把引擎内部属性的写入整条丢掉。
+ * 用于 turn.patch.ops 与 conversation.committed.proposals 这类“回放提案”出口，
+ * 防止以后有人把 sim_lease 放进回合批次时从旁路泄露。
+ */
+export function projectProposalsForPlayer(proposals: readonly Proposal[]): Proposal[] {
+  return projectProposals(proposals).filter((p) => {
+    if (p.op === "attr.set") {
+      const key = (p.args as { key?: unknown }).key;
+      return !(typeof key === "string" && INTERNAL_ATTR_SET.has(key));
+    }
+    // 当前契约的 EntityUpdateArgs 只有 name/tags/status，不含 attrs；
+    // 这里防御未来给 entity.update 加 attrs patch 时把内部属性带出去。
+    if (p.op === "entity.update") {
+      const attrs = (p.args as { attrs?: Record<string, unknown> }).attrs;
+      if (attrs && Object.keys(attrs).some((k) => INTERNAL_ATTR_SET.has(k))) return false;
+    }
+    return true;
+  });
+}
 
 /** 玩家能看到的 memory.written：public 广播，或自己的记忆；其余（private/secret）一律不下发 */
 function visibleMemory(env: Envelope, viewer: string | undefined): boolean {
@@ -20,6 +47,12 @@ function visibleMemory(env: Envelope, viewer: string | undefined): boolean {
 
 /** 单条事件裁剪：plot 事件剥 GM 字段，私忆按 owner 过滤；其余事件原样返回 */
 export function projectEventForPlayer(env: Envelope, viewer?: string): Envelope | undefined {
+  // attr.changed 的 payload 带 key/to；sim_lease 是内部租约（下一步目标/剩余 tick），
+  // 不能靠 /state 剥了就算完——历史事件和 map.tick 的 events 都走这里。
+  if (env.type === "attr.changed") {
+    const key = (env.payload as { key?: unknown }).key;
+    if (typeof key === "string" && INTERNAL_ATTR_SET.has(key)) return undefined;
+  }
   if (env.type === "plot.upserted") {
     const payload = env.payload as { plot?: Plot };
     if (!payload.plot) return env;
@@ -41,7 +74,7 @@ export function projectEventForPlayer(env: Envelope, viewer?: string): Envelope 
     const payload = env.payload as { state?: WorldState; ops?: readonly Proposal[] };
     const next: Record<string, unknown> = { ...payload };
     if (payload.state) next.state = projectStateForPlayer(payload.state);
-    if (Array.isArray(payload.ops)) next.ops = projectProposals(payload.ops);
+    if (Array.isArray(payload.ops)) next.ops = projectProposalsForPlayer(payload.ops);
     return { ...env, payload: next };
   }
   return env;
@@ -57,10 +90,29 @@ export function projectEventsForPlayer(events: readonly Envelope[], viewer?: str
   return out;
 }
 
-/** /state 用的状态投影：只剥 plot 的 GM 字段，其余交给出站掩码 */
+/** 剥掉引擎内部属性；不改原对象，返回同一引用当且仅当没有可剥字段。 */
+function stripEngineInternalAttrs(state: WorldState): WorldState {
+  let changed = false;
+  const entities: WorldState["entities"] = {};
+  for (const [id, entity] of Object.entries(state.entities)) {
+    const attrs = entity.attrs as Record<string, unknown>;
+    if (!ENGINE_INTERNAL_ATTRS.some((key) => key in attrs)) {
+      entities[id] = entity;
+      continue;
+    }
+    const nextAttrs = { ...attrs };
+    for (const key of ENGINE_INTERNAL_ATTRS) delete nextAttrs[key];
+    entities[id] = { ...entity, attrs: nextAttrs as typeof entity.attrs };
+    changed = true;
+  }
+  return changed ? { ...state, entities } : state;
+}
+
+/** /state 用的状态投影：剥 plot 的 GM 字段与引擎内部属性，其余交给出站掩码 */
 export function projectStateForPlayer(state: WorldState): WorldState {
-  if (state.plots.length === 0) return state;
-  return { ...state, plots: state.plots.map(stripPlotSecrets) };
+  const clean = stripEngineInternalAttrs(state);
+  if (clean.plots.length === 0) return clean;
+  return { ...clean, plots: clean.plots.map(stripPlotSecrets) };
 }
 
 /**
@@ -73,7 +125,7 @@ export function projectTurnEventForPlayer<T extends { type: string }>(ev: T): T 
   const next: Record<string, unknown> = { ...(ev as unknown as Record<string, unknown>) };
   if (patch.state) next.state = projectStateForPlayer(patch.state);
   // ops 里有 NPC 私忆、撤回正文与 plot 的 GM args；客户端不用它，统一按玩家视角重建
-  if (Array.isArray(patch.ops)) next.ops = projectProposals(patch.ops);
+  if (Array.isArray(patch.ops)) next.ops = projectProposalsForPlayer(patch.ops);
   return next as T;
 }
 

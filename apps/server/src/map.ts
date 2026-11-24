@@ -7,6 +7,8 @@
  * - 草案：委托 DraftEngine（状态机 + AI 生成 + published.json 落盘）。
  */
 import { DEFAULT_LIMITS } from "../../../packages/engine/src/index.ts";
+import { bfs, buildAdjacencyOf } from "../../../content/modules/map/path.ts";
+import { LEASE as SIM_LEASE, PHASES, clockIndex, parseLease } from "../../../content/modules/map/lease.ts";
 import type { DefaultArbiter, MemoryIndex } from "../../../packages/engine/src/index.ts";
 import { isErrorCode } from "../../../packages/shared/src/contract/errors.ts";
 import type {
@@ -40,6 +42,7 @@ import { DraftEngine } from "./map.drafts.ts";
 import type { DraftListResult, DraftResult, PublishResult } from "./map.drafts.ts";
 import { displayNameOf, knowsNameOf, maskNamesDeep, maskTurnEvents, unknownPlaceholders } from "./view-names.ts";
 import { projectEventsForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
+import type { SimPolicy } from "./sim.policy.ts";
 
 // ---------------------------------------------------------------- 对外视图（docs/06 §4）
 export interface MapViewLink {
@@ -117,10 +120,30 @@ export interface MapServiceDeps {
   adminToken: string;
   /** npcId → 外貌描述（content/scenarios/npcs.json 的 appearance）：未认识时用作占位名 */
   appearance?: Map<string, string>;
+  /** 行动点策略；不传 = 推进时段不回满（测试/旧部署） */
+  simPolicy?: SimPolicy;
   now?: () => number;
 }
 
-const PHASES: readonly Phase[] = ["morning", "noon", "afternoon", "evening", "night"];
+/** 推进时段时把玩家行动点回满；只处理已经有该属性的实体（老存档不凭空造属性）。 */
+function refillActionPoints(state: WorldState, policy: SimPolicy, actorId?: string): Proposal[] {
+  if (policy.actionMax <= 0) return [];
+  const ops: Proposal[] = [];
+  for (const entity of Object.values(state.entities)) {
+    if (entity.kind !== "plr" || entity.status !== "active") continue;
+    // actorId 缺失 = 内部/旧调用：回满所有 active plr（正常路由在已登录时必传 viewer）。
+    if (actorId && entity.id !== actorId) continue;
+    const value = entity.attrs[policy.actionAttr];
+    if (typeof value !== "number" || value >= policy.actionMax) continue;
+    ops.push({
+      op: "attr.set",
+      args: { entityId: entity.id, key: policy.actionAttr, value: policy.actionMax },
+      reason: "推进时段，行动点回满",
+    });
+  }
+  return ops;
+}
+
 const INSTALL_MAX_DEPTH = 8;
 
 function nextPhase(phase: Phase): Phase {
@@ -257,6 +280,17 @@ export class MapService {
       if (installFail) return this.outbound(installFail, roomId, state);
     }
 
+    // 回合前先做可达性校验：多跳场景由 map 模块 BFS 走过去，不能只允许直接相邻。
+    // 不可达就根本不跑 Turn，避免"回合已提交、行动点已扣，最后才返回 E_NOT_ADJACENT"的白扣。
+    // 与模块共用 path.ts 的同一套 BFS；懒安装可能刚补了锚点边，所以这里重新取快照。
+    const checked = await this.deps.store.snapshot(roomId);
+    const fromLoc = checked.links.find((l) => l.kind === "located_in" && l.from === actor)?.to
+      ?? checked.room.scene.locId;
+    const reachable = fromLoc === locId || bfs(buildAdjacencyOf(checked), fromLoc, locId) !== undefined;
+    if (!reachable) {
+      return this.outbound(fail("E_NOT_ADJACENT", `从当前位置无法到达 ${locId}`), roomId, checked);
+    }
+
     const events: TurnEvent[] = [];
     let failure: MapFail | undefined;
     try {
@@ -277,7 +311,13 @@ export class MapService {
     } catch (e) {
       return this.outbound(fail(codeOfError(e), e instanceof Error ? e.message : String(e)), roomId, state);
     }
-    if (failure) return this.outbound(failure, roomId, state);
+    if (failure) {
+      // 行动点耗尽等是领域拒绝而非异常；留一条可观测日志，避免「后台看不到报错」。
+      if (failure.code === "E_PRECONDITION") {
+        console.warn(`[map] travel 拒绝：room=${roomId} actor=${actor} loc=${locId} code=${failure.code} message=${failure.message}`);
+      }
+      return this.outbound(failure, roomId, state);
+    }
 
     const patch = events.find((event) => event.type === "turn.patch");
     const after = patch?.state ?? await this.deps.store.snapshot(roomId);
@@ -285,13 +325,130 @@ export class MapService {
     // 只看 turn 事件会把"没走动"当成到达。以移动后的权威位置做最终校验。
     const actorLoc = after.links.find((l) => l.kind === "located_in" && l.from === actor)?.to;
     if (after.room.scene.locId !== locId && actorLoc !== locId) {
-      return this.outbound(fail("E_NOT_ADJACENT", `从当前位置无法到达 ${locId}`), roomId, after);
+      // 路径可达但模块没走动：Turn 已经提交并扣过点，这里把这次白扣退回去。
+      // 不能用 E_NOT_ADJACENT —— 预检已经证明可达，报“不可达”会误导调用方重试方向。
+      const refunded = await this.refundTravelActionPoint(roomId, actor, state, after);
+      return this.outbound(fail("E_PRECONDITION", `前往 ${locId} 的移动未发生，行动点已退还`), roomId, refunded);
     }
     const map = await this.buildMapView(after, actor);
     const scene = this.buildSceneDetail(target, after, refs, npcLocations(after));
     // 出站脱敏（issue #53 成功 / #58 失败）：统一走 outbound，成功整包、失败只遮文本，
     // 与 /turns /events /state /history 同口径；用 after 快照省一次事件日志回放。
     return this.outbound<TravelResult>({ ok: true, scene, events, map }, roomId, after);
+  }
+
+  /**
+   * travel 异常路径退款：相邻但模块没产 move 时 Turn 已提交、行动点已扣。
+   * 只在"前后快照都证明扣过点"时退，避免旧存档/未启用行动点时凭空加属性。
+   * 用 expectedSeq 重试，失败只 warn；调用方仍返回 E_PRECONDITION（路径可达但移动没发生）。
+   */
+  private async refundTravelActionPoint(
+    roomId: string,
+    actorId: string,
+    before: WorldState,
+    after: WorldState,
+  ): Promise<WorldState> {
+    const policy = this.deps.simPolicy;
+    if (!policy || policy.actionCostPerTurn <= 0) return after;
+    const key = policy.actionAttr;
+    const beforeValue = before.entities[actorId]?.attrs[key];
+    const afterValue = after.entities[actorId]?.attrs[key];
+    if (typeof beforeValue !== "number" || typeof afterValue !== "number" || afterValue >= beforeValue) return after;
+    const refund = Math.min(beforeValue - afterValue, policy.actionMax - afterValue);
+    if (refund <= 0) return after;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const state = attempt === 0 ? after : await this.deps.store.snapshot(roomId);
+      const current = state.entities[actorId]?.attrs[key];
+      if (typeof current !== "number") return state;
+      const value = Math.min(policy.actionMax, current + refund);
+      const seq = await this.seqOf(roomId);
+      const applied = await this.deps.arbiter.apply(
+        roomId,
+        [{ op: "attr.set", args: { entityId: actorId, key, value }, reason: "travel 未走动，退还行动点" }],
+        this.cause(roomId, "travel_refund"),
+        seq === undefined ? {} : { expectedSeq: seq },
+      ).catch((e: unknown) => {
+        console.warn(`[map] travel 退款写入异常：`, e instanceof Error ? e.message : e);
+        return undefined;
+      });
+      if (applied?.ok && applied.rejected.length === 0) return this.deps.store.snapshot(roomId);
+    }
+    console.warn(`[map] travel 退款失败（行动点可能仍被扣）`);
+    return after;
+  }
+
+  // -------------------------------------------------------------- 对话打断 NPC 动作（D22）
+  /**
+   * 玩家和 NPC 对话时冻结其动作租约：把当前租约包一层 action=talk，模块 tick 看到
+   * talk 就整段跳过（不递减、不接新动作）。原租约存在 resume 里，对话回合结束由
+   * resumeNpcAction 还原；写失败只 warn（对话本身不应因为租约写不进去而失败）。
+   */
+  async suspendNpcAction(roomId: string, npcId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const seq = await this.seqOf(roomId);
+      const state = await this.deps.store.snapshot(roomId);
+      const npc = state.entities[npcId];
+      if (npc?.kind !== "npc" || npc.status !== "active") return false;
+      const raw = npc.attrs[SIM_LEASE];
+      const original = parseLease(raw);
+      if (original?.action === "talk") return true;
+      // 即使当前空闲也要写 talk：否则对话期间自动 tick 会给这个 NPC 起一个新动作。
+      const talk = {
+        action: "talk",
+        target: typeof original?.target === "string" ? original.target : "",
+        remaining: typeof original?.remaining === "number" ? original.remaining : 0,
+        phase: state.clock.phase,
+        resume: typeof raw === "string" ? raw : "",
+        expiresAt: clockIndex(state.clock) + (this.deps.simPolicy?.talkLeaseTicks ?? 12),
+      };
+      const applied = await this.deps.arbiter.apply(
+        roomId,
+        [{ op: "attr.set", args: { entityId: npcId, key: SIM_LEASE, value: JSON.stringify(talk) }, reason: "对话打断 NPC 动作" }],
+        this.cause(roomId, "dialogue"),
+        seq === undefined ? {} : { expectedSeq: seq },
+      ).catch((e: unknown) => {
+        console.warn(`[map] 冻结 NPC ${npcId} 的动作写入异常（对话继续）：`, e instanceof Error ? e.message : e);
+        return undefined;
+      });
+      if (applied && applied.ok && applied.rejected.length === 0) return true;
+    }
+    console.warn(`[map] 冻结 NPC ${npcId} 的动作失败（对话继续）`);
+    return false;
+  }
+
+  /** 对话回合结束：把 talk 租约换回原租约（phase 用当前值，保证剩余占用继续走完）。 */
+  async resumeNpcAction(roomId: string, npcId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const seq = await this.seqOf(roomId);
+      const state = await this.deps.store.snapshot(roomId);
+      const npc = state.entities[npcId];
+      if (npc?.kind !== "npc" || npc.status !== "active") return false;
+      const current = parseLease(npc.attrs[SIM_LEASE]);
+      if (!current || current.action !== "talk") return false;
+      let value = "";
+      if (typeof current.resume === "string" && current.resume.trim() !== "") {
+        const original = parseLease(current.resume);
+        if (original && (original.action === "move" || original.action === "stay")
+          && typeof original.target === "string" && typeof original.remaining === "number") {
+          value = JSON.stringify({ ...original, phase: state.clock.phase });
+        } else {
+          console.warn(`[map] NPC ${npcId} 的 talk.resume 无法解析，按空闲恢复`);
+        }
+      }
+      const applied = await this.deps.arbiter.apply(
+        roomId,
+        [{ op: "attr.set", args: { entityId: npcId, key: SIM_LEASE, value }, reason: "对话结束恢复 NPC 动作占用" }],
+        this.cause(roomId, "dialogue"),
+        seq === undefined ? {} : { expectedSeq: seq },
+      ).catch((e: unknown) => {
+        console.warn(`[map] 恢复 NPC ${npcId} 的动作写入异常（对话已结束）：`, e instanceof Error ? e.message : e);
+        return undefined;
+      });
+      if (applied && applied.ok && applied.rejected.length === 0) return true;
+    }
+    console.warn(`[map] 恢复 NPC ${npcId} 的动作失败（剩余占用可能丢失）`);
+    return false;
   }
 
   // -------------------------------------------------------------- tick（不经过 Turn / LLM）
@@ -303,7 +460,15 @@ export class MapService {
    */
   private readonly tickQueues = new Map<string, Promise<unknown>>();
 
-  async tick(roomId: string, opts: { advance?: boolean; viewer?: string } = {}): Promise<TickResult> {
+  async tick(roomId: string, opts: { advance?: boolean; ticks?: number; viewer?: string } = {}): Promise<TickResult> {
+    // ticks 是自动时钟的内部参数：HTTP schema 只有 advance，内部调用也不允许两者同给。
+    if (opts.advance && opts.ticks !== undefined) {
+      return fail("E_SCHEMA_INVALID", "advance 与 ticks 不能同时使用");
+    }
+    if (opts.ticks !== undefined && (!Number.isInteger(opts.ticks) || opts.ticks < 1 || opts.ticks > 8)) {
+      // 与 shared/zod 的 time.advance.ticks 上限保持一致；更长的推进拆成多拍。
+      return fail("E_SCHEMA_INVALID", "ticks 必须是 1..8 的整数");
+    }
     const prev = this.tickQueues.get(roomId) ?? Promise.resolve();
     const next = prev.then(
       () => this.tickInner(roomId, opts),
@@ -314,7 +479,7 @@ export class MapService {
     return next;
   }
 
-  private async tickInner(roomId: string, opts: { advance?: boolean; viewer?: string } = {}): Promise<TickResult> {
+  private async tickInner(roomId: string, opts: { advance?: boolean; ticks?: number; viewer?: string } = {}): Promise<TickResult> {
     const events: Envelope[] = [];
     let stateAfter: WorldState | undefined;
     // 必须在 snapshot **之前**取 seq（PR #149 审阅 P1）：模块 tick / dryRun 期间如果有
@@ -341,9 +506,25 @@ export class MapService {
     // issue #38：time.advance 与模块提案必须合成**同一批**提交。旧实现先单独提交时间推进，
     // 后阶段失败时时段已经前进且无法撤销（响应 ok:false 但世界变了，重试还会多推一次）。
     // 注意：模块拿到的 ctx.clock 是推进前状态，目标 phase 以 `tick(ctx, phase)` 的参数为准。
-    const batch: Proposal[] = opts.advance
-      ? [{ op: "time.advance", args: { phase }, reason: "地图 tick 推进时段", by: "tick" }, ...proposals]
-      : proposals;
+    // 推进时段 = 玩家休息：把行动点回满。和 time.advance、模块提案同批 atomic，
+    // 避免"时间进了下一段、行动点没回"的半成功状态。
+    const refill = opts.advance && this.deps.simPolicy?.refillOnPhaseAdvance
+      ? refillActionPoints(state, this.deps.simPolicy, opts.viewer)
+      : [];
+    // 两种时间推进共用一条通道：
+    // - advance=true：切到下一 phase（同时回满行动点）；
+    // - ticks=N：只在 phase 内走 N 个 tick，不换 phase（D22 的"自动推进不切阶段"）。
+    // 两者互斥；tick() 入口已拒绝同时给（ticks 只供自动时钟内部使用）。
+    const timeProposal: Proposal | undefined = opts.advance
+      ? { op: "time.advance", args: { phase }, reason: "地图 tick 推进时段", by: "tick" }
+      : opts.ticks !== undefined
+        ? { op: "time.advance", args: { ticks: opts.ticks }, reason: "地图 tick 推进时间刻度", by: "tick" }
+        : undefined;
+    const batch: Proposal[] = [
+      ...(timeProposal ? [timeProposal] : []),
+      ...refill,
+      ...proposals,
+    ];
     if (batch.length > 0) {
       // 先整批 dryRun：任何一条被拒就整批不落库，避免 NPC 半移动、坐标与镜头不一致。
       // 注意 dryRun 的信封来源是 `arbiter.dryRun`，3.2.1 的 `time.advance` 只认
@@ -465,7 +646,15 @@ export class MapService {
         lines.push(...step.utterances.map((u) => u.text));
         done = step.done;
       }
-      await this.deps.dialogue.close(session.id, "scene dialogue");
+      const summary = await this.deps.dialogue.close(session.id, "scene dialogue");
+      // 场景对话是只读路径：导演可能把记忆/关系提案攒在 summary.proposals 里，
+      // 这里没有 Arbiter 批次，静默丢弃会让“对话产生了效果”变成不可观测。
+      // 保持只读语义，但把丢弃显式记录；将来要落库必须走回合提交并加房间锁。
+      if (summary.proposals.length > 0) {
+        console.warn(
+          `[map] 场景对话 ${sceneId}/${dialogueId} 产生 ${summary.proposals.length} 条提案，当前只读路径不落库（如需生效请改走回合 Arbiter）`,
+        );
+      }
       // 还不认识（不知道名字）：先补一句"陌生人"开场，NPC 不会假装熟络，
       // 而是问怎么称呼；玩家随后在对话流里自述名字，由 introduce 模块落 knows_name 与记忆。
       const opener = knowsNameOf(npc) ? [] : [`（他看了你一眼，显然不认识你）「同学，你是？怎么称呼？」`];

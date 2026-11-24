@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { DialogueDirector, Entity, Envelope, Proposal, Registry } from "../../../packages/shared/src/index.ts";
+import type { ActorId, DialogueDirector, Entity, Envelope, Proposal, Registry, WorldState } from "../../../packages/shared/src/index.ts";
 import { CONTRACT_VERSION } from "../../../packages/shared/src/index.ts";
 import {
   AuditGate,
@@ -50,6 +50,11 @@ import { SaveIndex } from "./saves.ts";
 import { TurnHistory, withTurnRecording } from "./turn-history.ts";
 import { LlmAudit } from "./audit.ts";
 import { MapService } from "./map.ts";
+import { loadSimPolicy } from "./sim.policy.ts";
+import { loadLlmRoutes } from "./llm-routes.ts";
+import { RoomActivity } from "./room-activity.ts";
+import { SimClock } from "./sim-clock.ts";
+import { NpcDecisionService } from "./npc-decision.ts";
 import { AuthStore } from "./auth-store.ts";
 import { SessionStore } from "./sessions.ts";
 import { AuthService } from "./auth.ts";
@@ -61,6 +66,7 @@ import { loadSceneDescs, offlineNarrative, resolveSceneDesc, sceneByName } from 
 import { LlmSwitch } from "./llm-switch.ts";
 import { LlmSettings, loadPersistedLlmSettings } from "./settings.ts";
 import { appearanceById, loadScenarios } from "./scenarios.ts";
+import { loadLorebook, selectWorldInfo } from "./lorebook.ts";
 import { createDebugGate } from "./debug.ts";
 import type { AppDeps } from "./routes.ts";
 import { isStoreFault } from "./store-fault.ts";
@@ -119,6 +125,10 @@ export type App = AppDeps & {
   jobLedger: JobLedger;
   /** 每房间单飞 + 看门狗的后台调度器（PR-2） */
   background: BackgroundCycle;
+  /** 自动时钟（D22）：默认关闭；只推 phase 内 tick，不切 phase */
+  simClock: SimClock;
+  /** 房间活动计数：玩家回合执行期间为忙，自动时钟/地图 tick 据此让路。 */
+  roomActivity: RoomActivity;
   /** 本次启动的对账结果（PR-2）：inflight→failed 计数 + prepared backlog 计数，供运维/测试断言 */
   jobReconcile: JobReconcileSummary;
   /** 后台调度运行期遥测（PR #125 复审可观测性）：终态投影写失败/看门狗触发次数，进程内累计 */
@@ -213,11 +223,14 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
 
   // 开局剧本 / NPC 公开档案是内容数据（content/scenarios/*.json）；缺文件 = 无预设，不影响启动
   const scenarios = await loadScenarios(path.join(contentDir, "scenarios"));
+  // 作者注 / 关键词世界设定：纯内容层，缺文件就整段省略
+  const lorebook = await loadLorebook(contentDir);
 
   // 审核策略（分类/阈值/扣分/删档线）是内容，不是代码；缺文件就用引擎默认值
   const auditPolicy = resolveAuditPolicy(await readOptionalJson(path.join(contentDir, "registry", "policy.json")));
   // 现实锚定：识别"我全知全能"这类诱导性发言并修饰回世界内（缺文件则只带基础世界规则）
   const reality = resolveRealityPolicy(await readOptionalJson(path.join(contentDir, "registry", "reality.json")));
+  const simPolicy = await loadSimPolicy(contentDir);
 
   // 初始状态必须有真实地点：world.json 可以省略 startLocId，此时用第一个地点，
   // 否则 createInitialState 会退回占位值 loc_campus_gate，房间一出生就"在不存在的地方"
@@ -254,6 +267,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
         proposals: [],
       }),
   });
+  const llmRoutes = await loadLlmRoutes(contentDir);
   const settingsFilePath = path.join(path.resolve(cfg.dataDir), "llm-settings.json");
   const saved = await loadPersistedLlmSettings(settingsFilePath);
   const fromEnv = hasLlm(cfg);
@@ -263,6 +277,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
         model: cfg.llm.model,
         apiKey: cfg.llm.apiKey,
         timeoutMs: cfg.llm.timeoutMs,
+        ...(llmRoutes ? { routes: llmRoutes } : {}),
       })
     : saved
       ? new OpenAiCompatClient({
@@ -270,6 +285,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
           model: saved.model,
           apiKey: saved.apiKey,
           timeoutMs: cfg.llm.timeoutMs,
+          ...(llmRoutes ? { routes: llmRoutes } : {}),
         })
       : null;
   const llm = new LlmSwitch(remoteClient ?? offlineLlm);
@@ -357,7 +373,26 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   if (auth.required && !cfg.publicOrigin) {
     console.warn("[auth] GALGAME_AUTH_REQUIRED=1 但未配置 GALGAME_PUBLIC_ORIGIN：Cookie 写请求的 CSRF Origin 校验将拒绝缺失 Origin 的请求");
   }
-  const rawTurn = new DefaultTurn({ store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions });
+  // 世界观钩子：v1 回合与 v2 NPC 共用同一份选择逻辑（匹配文本由调用方拼好）
+  const worldInfoFor = lorebook
+    ? (state: Readonly<WorldState>, _actorId: ActorId, input: string) => {
+        const loc = state.entities[state.room.scene.locId]?.name ?? "";
+        const present = state.room.scene.presentIds
+          .map((id) => state.entities[id]?.name)
+          .filter((name): name is string => typeof name === "string");
+        return {
+          ...(lorebook.authorNote ? { authorNote: lorebook.authorNote } : {}),
+          entries: selectWorldInfo(lorebook, [input, loc, ...present].join("\n")),
+        };
+      }
+    : undefined;
+  const rawTurn = new DefaultTurn({
+    store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions,
+    ...(simPolicy && simPolicy.actionCostPerTurn > 0
+      ? { actionPolicy: { attrKey: simPolicy.actionAttr, costPerTurn: simPolicy.actionCostPerTurn } }
+      : {}),
+    ...(worldInfoFor ? { worldInfo: worldInfoFor } : {}),
+  });
   const turn = withTurnRecording(rawTurn, { history, saves, store, now });
 
   // ---------------------------------------------------------------- 世界层永久记忆（docs/08 §7）
@@ -487,9 +522,13 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     modes: conversationModes,
     policy: conversationPolicy,
     scene: new SceneManager(conversationScene, now),
-    npc: new NpcAgent({ llm, modes: conversationModes, policy: conversationPolicy }),
+    npc: new NpcAgent({ llm, modes: conversationModes, policy: conversationPolicy, ...(worldInfoFor ? { worldInfo: worldInfoFor } : {}) }),
     audit: new ConversationAudit(audit, auditPolicy, new AuditGate({ arbiter, store, registry, audit, policy: auditPolicy })),
     budget: talkBudget,
+    // #153 复审 P1：行动点必须在默认路径（v2 会话）上也生效
+    ...(simPolicy && simPolicy.actionCostPerTurn > 0
+      ? { actionPolicy: { attrKey: simPolicy.actionAttr, costPerTurn: simPolicy.actionCostPerTurn } }
+      : {}),
     now,
   });
 
@@ -545,6 +584,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     timer.unref?.();
   }
 
+  const roomActivity = new RoomActivity();
   const map = new MapService({
     store,
     turn,
@@ -558,7 +598,43 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     dataDir: path.resolve(cfg.dataDir),
     adminToken: cfg.adminToken,
     appearance: appearanceById(scenarios),
+    ...(simPolicy ? { simPolicy } : {}),
   });
+
+  // NPC 自由活动决策：默认关闭；开启后由自动时钟在每拍 tick 前调用，只写 sim_lease。
+  const npcDecision = simPolicy?.decision
+    ? new NpcDecisionService({ store, arbiter, llm, policy: simPolicy.decision })
+    : undefined;
+
+  // 自动时钟默认关闭；enabled 时只推 phase 内 tick，到 maxTick 停下等玩家 advance。
+  const simClock = new SimClock({
+    store,
+    map,
+    policy: simPolicy?.clock ?? { enabled: false, intervalMs: 60_000, ticksPerBeat: 1, maxTick: 24 },
+    isBusy: (roomId) => background.isBusy(roomId) || roomActivity.isBusy(roomId),
+    acquire: (roomId) => roomActivity.tryAcquire(roomId),
+    ...(npcDecision ? { beforeTick: (roomId: string) => npcDecision.run(roomId) } : {}),
+  });
+  simClock.start();
+
+  if (simPolicy && simPolicy.actionCostPerTurn > 0) {
+    const actionDef = registry.attr(simPolicy.actionAttr);
+    if (!actionDef) {
+      // 老存档没有这个属性时 Turn 会跳过扣点；键名拼错也在这里暴露，而不是静默失效。
+      console.warn(`[sim] 行动点属性 ${simPolicy.actionAttr} 未在 registry 声明，行动点将不会生效`);
+    } else if (typeof actionDef.max === "number" && actionDef.max !== simPolicy.actionMax) {
+      console.warn(`[sim] 行动点上限不一致：policy.max=${simPolicy.actionMax}，registry.max=${actionDef.max}；回满按 policy 写，可能被 Arbiter clamp`);
+    }
+  }
+  if (simPolicy?.decision?.enabled && !simPolicy.clock?.enabled) {
+    console.warn("[sim] decision.enabled=true 但 clock.enabled=false：NPC 自由活动只由自动时钟触发，当前不会运行");
+  }
+  if (simPolicy?.clock?.enabled) {
+    console.info(`[sim] 自动时钟已启用：每 ${simPolicy.clock.intervalMs}ms 推 ${simPolicy.clock.ticksPerBeat} tick，maxTick=${simPolicy.clock.maxTick}`);
+  }
+  if (simPolicy?.decision?.enabled) {
+    console.info(`[sim] NPC 自由活动决策已启用：每拍最多 ${simPolicy.decision.maxPerBeat} 人，每 ${simPolicy.decision.intervalTicks} tick 一次`);
+  }
 
   const debugGate = createDebugGate(cfg.debugPassphrase ?? "");
 
@@ -598,9 +674,12 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
       subscribe: (roomId, viewer, cb) => gossip.subscribe(roomId, viewer, cb),
     },
     /** dev/v2 群聊回合宿主（HTTP 接线见 routes.ts；#90 快照保存需要 dataDir 定位房间文件） */
+    ...(simPolicy?.autoChat ? { autoChat: simPolicy.autoChat } : {}),
     conversation: { host: conversation, modes: conversationModes, dataDir: dataRoot },
     turn,
     map,
+    simClock,
+    roomActivity,
     settings,
     registry,
     scenarios,

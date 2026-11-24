@@ -149,6 +149,23 @@ async function playerStep(ctx: StepCtx): Promise<PlayerResult> {
     out.push({ type: "conversation.error", sessionId: s.id, code: "E_CONTENT_BLOCKED", message: deps.policy.messages.auditUnavailable });
     return { aborted: true };
   }
+  // 行动点：与 v1 同源（`TurnActionPolicy`）。旧存档没有该属性 → 不扣也不拦。
+  const cost = deps.actionPolicy?.costPerTurn ?? 0;
+  const actionKey = deps.actionPolicy?.attrKey;
+  if (cost > 0 && actionKey && ctx.kindOf(utterance.speaker) === "plr") {
+    const points = ctx.state.entities[utterance.speaker]?.attrs?.[actionKey];
+    if (typeof points === "number") {
+      if (points < cost) {
+        out.push({
+          type: "conversation.error", sessionId: s.id, code: "E_PRECONDITION",
+          message: deps.policy.messages.actionPointsInsufficient.replace("{now}", String(points)).replace("{cost}", String(cost)),
+        });
+        return { aborted: true };
+      }
+      // 排在最前：与 v1 一致，扣点在整批里先于其它提案；mustKeep 保证余额不足时整批回滚
+      ctx.proposals.push({ op: "attr.delta", args: { entityId: utterance.speaker, key: actionKey, delta: -cost, mustKeep: true }, reason: "行动消耗" });
+    }
+  }
   const deliveries: ConversationEvent[] = deliver(utterance, { recipients: present, modes: deps.modes, noticeFor: nameOf, nameOf })
     .map((d) => ({ type: "conversation.utterance" as const, delivery: d }));
   return { aborted: false, utterance, deliveries };
@@ -233,7 +250,11 @@ function planCalls(ctx: StepCtx, utterance?: Utterance): { npcId: ActorId; allow
       ctx.outcomes.push({ npcId, kind: "silent", reason: call });
       continue;
     }
-    const speak = deps.budget.canSpeak(s.roomId, npcId, CHANNEL, ctx.now, { ignoreMinInterval: named.has(npcId) });
+    // auto 回合是玩家主动/系统显式驱动的"继续聊"，不按"距离上次发言"节流；
+    // 真正的防线是 maxAutoRounds（默认 3 轮）与每小时的条数/调用上限。
+    const speak = deps.budget.canSpeak(s.roomId, npcId, CHANNEL, ctx.now, {
+      ignoreMinInterval: named.has(npcId) || ctx.input.auto === true,
+    });
     if (speak !== "ok") {
       ctx.outcomes.push({ npcId, kind: "silent", reason: speak });
       continue;

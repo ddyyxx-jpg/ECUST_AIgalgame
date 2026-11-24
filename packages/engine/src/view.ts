@@ -22,7 +22,7 @@ export function buildView(state: WorldState, registry: Registry, opts: ViewOptio
       .filter((d) => !d.display.hidden)
       .filter((d) => opts.includeSecret || d.visibility !== "secret")
       .filter((d) => me.attrs[d.key] !== undefined)
-      .map((d) => ({ label: d.display.label, value: me.attrs[d.key] as AttrValue, unit: d.display.unit }));
+      .map((d) => ({ key: d.key, label: d.display.label, value: me.attrs[d.key] as AttrValue, unit: d.display.unit }));
     if (rows.length) panels["状态"] = rows;
   }
 

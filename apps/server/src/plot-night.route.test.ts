@@ -136,9 +136,12 @@ describe("夜间密谋真实链路探针（#96/#128）", () => {
     const evidence = events.filter((e) => e.type === "memory.written");
     expect(evidence.length).toBeGreaterThanOrEqual(DRAFT.leakPoints.length);
     expect(evidence.every((e) => (e.payload as { ownerId?: string }).ownerId === actorId)).toBe(true);
+    // 行动点（D21）也会产出一条 attr.changed；这里只断言调查证据落在每名 actor 上，
+    // 不把"回合内所有属性变化总数"绑死，避免以后再加资源时误伤。
     const deltas = events.filter((e) => e.type === "attr.changed");
-    expect(deltas).toHaveLength(DRAFT.actors.length);
-    expect(new Set(deltas.map((e) => (e.payload as { entityId?: string }).entityId))).toEqual(new Set(DRAFT.actors));
+    const actorDeltas = deltas.filter((e) => DRAFT.actors.includes((e.payload as { entityId?: string }).entityId ?? ""));
+    expect(actorDeltas).toHaveLength(DRAFT.actors.length);
+    expect(new Set(actorDeltas.map((e) => (e.payload as { entityId?: string }).entityId))).toEqual(new Set(DRAFT.actors));
   });
 
   it("同一夜重复推进不会重复落账（幂等：tick 只在进入夜间触发一次）", async () => {

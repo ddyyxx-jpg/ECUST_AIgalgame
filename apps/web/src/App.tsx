@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WorldState, ViewPatch } from "../../../packages/shared/src/contract/types.ts";
-import { LEGACY_ACTOR_ID, createSoloRoom, createSlot, deleteSave, deleteSlot, fetchHistory, fetchState, fetchTurnStatus, runTurn, travel, updateSlot } from "./api.ts";
+import { LEGACY_ACTOR_ID, createSoloRoom, createSlot, deleteSave, deleteSlot, fetchHistory, fetchState, fetchTurnStatus, runTurn, travel, tick, updateSlot } from "./api.ts";
 import type { SaveSlot } from "./api.ts";
 import type { HistoryPage } from "./api.ts";
 import { GameError, HttpError, httpFailMessage, isUnauthorized, onUnauthorized } from "./http.ts";
@@ -21,6 +21,7 @@ import TitleScreen from "./TitleScreen.tsx";
 import { fetchScenarios } from "./scenarios.ts";
 import type { Scenario } from "./scenarios.ts";
 import { candidatePosition, positionFromState, turnSuggestions } from "./suggestions.ts";
+import { isActionPointRow } from "./hud-stats.ts";
 import { installClickSound, setSoundOn, soundOn } from "./sfx.ts";
 import { Typewriter } from "./typewriter.ts";
 import { retrySubmission, shouldDropRetryOnMove } from "./turn-error.ts";
@@ -142,6 +143,8 @@ export default function App() {
   const pendingTurn = useRef<{ clientTurnId: string; narrative: string; facts: string[] } | null>(null);
   /** 全屏地图层：点对话页左上角的小地图打开 */
   const [mapOpen, setMapOpen] = useState(false);
+  /** 室内渲染标记：切 tab 会卸载 ChatPanel，必须放在 App 才不会丢（否则回来像被传送到楼外） */
+  const [insideSceneId, setInsideSceneId] = useState<string | null>(null);
 const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
   const { savesState, refreshSaves } = useSaves(user?.userId ?? null);
   /** 状态版本号：每次刷新权威状态 +1，派生视图（图鉴）据此重新拉取 */
@@ -287,6 +290,8 @@ const [earlier, setEarlier] = useState<EarlierState>(NO_EARLIER);
     setUnconfirmed(null);
     setEarlier(NO_EARLIER);
     setMapOpen(false);
+    setInsideSceneId(null);
+    setInsideSceneId(null);
     setState(null);
     setRoomId("");
     setActorId("");
@@ -661,13 +666,23 @@ const token = scopeRef.current.current();
       .then((s) => {
         if (!scopeRef.current.isCurrent(token.version)) return;
         setState(s);
-        // 位置视图里的 actor 名字是回合当时下发的（可能还是占位名）：认识/改名后用权威状态覆盖，
-        // 走动界面的 NPC 标注才能立刻跟着改，不必等下一回合。
+        // 位置视图必须跟着权威状态整体重建，不能只补 actor 名字：
+        // 地图传送（MapPanel.go）只拿得到 {scene, events, map}，服务端不会补发 ViewPatch.position，
+        // 旧写法会让 locId/name/exits 停在旧地点 —— 表现为「聊天说到了、场景还在原处」，
+        // 切 tab 重渲染后更明显。positionFromState 与 buildView 用同一套在场/出口口径。
         setView((old) => {
-          const pos = old.position;
-          if (!pos) return old;
-          const actors = pos.actors.map((a) => ({ ...a, name: s.entities[a.actorId]?.name ?? a.name }));
-          return { ...old, position: { ...pos, actors } };
+          const position = positionFromState(s, actorId) ?? old.position;
+          // tick/advance 不走回合，拿不到 ViewPatch；行动点面板行要用权威 state 回写，否则「推进时段」后还显示 0。
+          const ap = actorId ? s.entities[actorId]?.attrs.action_points : undefined;
+          const panels = old.panels && typeof ap === "number"
+            ? Object.fromEntries(
+                Object.entries(old.panels).map(([title, rows]) => [
+                  title,
+                  rows.map((row) => (isActionPointRow(row) ? { ...row, value: ap } : row)),
+                ]),
+              )
+            : old.panels;
+          return { ...old, position, ...(panels ? { panels } : {}) };
         });
         // 图鉴是服务端派生视图：状态一变就让它重新拉，认识/读数不需要玩家手动切换 tab 才同步
         setStateRev((v) => v + 1);
@@ -675,7 +690,22 @@ const token = scopeRef.current.current();
       .catch((e) => {
         if (isUnauthorized(e)) expireSession();
       });
-  }, [roomId, expireSession]);
+  }, [roomId, actorId, expireSession]);
+
+  /**
+   * 行动点用完时的「推进时段」：走服务端的 map tick(advance)。
+   * 只推进时间不做别的——回满行动点是 MapService 的批次里做的（advance && refillOnPhaseAdvance）。
+   */
+  const restPhase = useCallback(async () => {
+    if (!roomId || busy) return;
+    try {
+      await tick(roomId, true);
+      push("narrative", "（你歇了一会儿，时间推进到下一个时段。）");
+      refreshState();
+    } catch (e) {
+      setErr(fail(e));
+    }
+  }, [roomId, busy, push, refreshState, fail]);
 
   /**
    * 走到某个点位旁：静默同步世界状态（不往对话流刷字）。
@@ -1161,6 +1191,10 @@ await runTurn(
   }
 
   const panels = view.panels ?? {};
+  // 行动点归零时给一个显眼的「推进时段」入口。
+  // 以权威 state 为准（面板行可能来自上一回合的 ViewPatch，tick 后不会自动刷新）。
+  const currentActionPoints = actorId ? state?.entities[actorId]?.attrs.action_points : undefined;
+  const zeroActionPoints = typeof currentActionPoints === "number" && currentActionPoints <= 0;
   const pos = view.position;
   const typing = getTw().activeLine;
   /** 开场白打完了吗？建议按钮要等逐字动画收尾后再出现 */
@@ -1181,7 +1215,10 @@ await runTurn(
    * v1 仍用服务端下发的 position，行为不变。
    */
   const candidatePos = convMode === "v2" && playedTurns > 0 ? candidatePosition(pos, state, actorId) : pos;
-  const nextActions = playedTurns === 0 ? (scenario?.suggestions ?? []) : turnSuggestions(candidatePos, playedTurns, actorId);
+  // 场景移动不进候选：走哪扇门/去哪个地点由玩家自己点地图或场景门（试玩反馈）。
+  // 开局剧本里作者标了 kind:"move" 的建议同样过滤；turnSuggestions 已不再产出 move。
+  const nextActions = (playedTurns === 0 ? (scenario?.suggestions ?? []) : turnSuggestions(candidatePos, playedTurns, actorId))
+    .filter((s) => typeof s === "string" || s.kind !== "move");
 
   return (
     <div className="app screen-in">
@@ -1276,10 +1313,14 @@ await runTurn(
             hasEarlier={earlier.hasEarlier}
             loadingEarlier={earlier.loading}
             onLoadEarlier={() => void loadEarlier()}
+            zeroActionPoints={zeroActionPoints}
+            onRest={() => void restPhase()}
             v2Modes={convMode === "v2" ? v2Modes : undefined}
             onSendUtterance={convMode === "v2" ? sendV2Utterance : undefined}
             onAutoRound={convMode === "v2" ? autoRound : undefined}
             pendingLines={pendingLines}
+            inside={insideSceneId}
+            onInsideChange={setInsideSceneId}
           />
         )}
 

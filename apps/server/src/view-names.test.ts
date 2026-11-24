@@ -58,6 +58,26 @@ describe("文本脱敏", () => {
     expect(maskNamesInText("周明远在旁边点头。", p)).toBe("另一位陌生的同学在旁边点头。");
   });
 
+  it("「叫<真名>」改成判断句，不出现「叫<外貌>」这种病句（试玩反馈）", () => {
+    const appearance = new Map([
+      ["npc_a", "抱着一摞校刊、脖子上挂着相机的女生"],
+      ["npc_b", "坐在借还台后、手边摞着一叠还书的女生"],
+    ]);
+    const p = unknownPlaceholders(stateOf(npc("npc_a", "白晓通", false), npc("npc_b", "林静", false)), appearance);
+    const out = maskNamesInText("另一个在三楼过刊那边的，叫白晓通。林静在流通台盖章呢。", p);
+    expect(out).toBe(
+      "另一个在三楼过刊那边的，是抱着一摞校刊、脖子上挂着相机的女生。坐在借还台后、手边摞着一叠还书的女生在流通台盖章呢。",
+    );
+    expect(out).not.toContain("叫抱");
+    // 第三人称介绍（"她叫X"）同样改成判断句
+    expect(maskNamesInText("她叫林静，在流通台。", p)).toBe("她是坐在借还台后、手边摞着一叠还书的女生，在流通台。");
+    // 「叫他X」这种称呼用法不在改写范围内，只做名字替换
+    expect(maskNamesInText("大家都叫他白晓通。", p)).toContain("叫他抱着一摞校刊");
+    // 已知名字的人不受影响
+    const known = unknownPlaceholders(stateOf(npc("npc_a", "白晓通", true)));
+    expect(maskNamesInText("叫白晓通。", known)).toBe("叫白晓通。");
+  });
+
   it("递归脱敏事件结构，不改非字符串", () => {
     const p = unknownPlaceholders(stateOf(npc("npc_a", "严守一", false)));
     const masked = maskNamesDeep(

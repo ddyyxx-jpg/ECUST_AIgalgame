@@ -24,7 +24,9 @@ import type {
   ViewPatch,
 } from "@galgame/shared";
 import npcScene from "../../../content/directors/npc.scene.ts";
+import { bfs, buildAdjacencyOf } from "../../../content/modules/map/path.ts";
 import { MapService } from "./map.ts";
+import type { SimPolicy } from "./sim.policy.ts";
 import type { MapDraft } from "./map.data.ts";
 
 const ADMIN_TOKEN = "dev-admin";
@@ -33,6 +35,8 @@ const ROOM_ID = "room_test";
 const COORD_ATTRS: AttrDef[] = [
   { key: "coord_x", type: "number", scope: ["loc", "npc", "plr"], min: 0, max: 2000, default: 0, visibility: "public", display: { label: "X", hidden: true } },
   { key: "coord_y", type: "number", scope: ["loc", "npc", "plr"], min: 0, max: 2000, default: 0, visibility: "public", display: { label: "Y", hidden: true } },
+  { key: "action_points", type: "number", scope: ["plr"], min: 0, max: 6, default: 6, visibility: "public", display: { label: "行动点" } },
+  { key: "sim_lease", type: "string", scope: ["npc"], default: "", visibility: "self", display: { label: "行动租约", hidden: true } },
 ];
 
 const WORLD = {
@@ -148,7 +152,14 @@ class FakeModules implements Modules {
     const hit = /^map\.travel (\S+)$/.exec(ctx.input);
     if (!hit) return { ok: false, proposals: [], error: { code: "E_TOOL_UNKNOWN", message: "无匹配意图" } };
     if (this.noTravel) return { ok: true, proposals: [] };
-    return { ok: true, proposals: [{ op: "move.to", args: { actorId: ctx.actorId, locId: hit[1] }, reason: "fake map intent" }] };
+    const from = ctx.state.links.find((l) => l.kind === "located_in" && l.from === ctx.actorId)?.to
+      ?? ctx.state.room.scene.locId;
+    const path = bfs(buildAdjacencyOf(ctx.state), from, hit[1]);
+    if (!path) return { ok: true, proposals: [] };
+    return {
+      ok: true,
+      proposals: path.slice(1).map((locId) => ({ op: "move.to", args: { actorId: ctx.actorId, locId }, reason: "fake map intent" })),
+    };
   }
   async callTool(): Promise<ModuleOutcome> {
     return { ok: false, proposals: [], error: { code: "E_TOOL_UNKNOWN", message: "n/a" } };
@@ -207,6 +218,7 @@ class FlakyStore extends EventSourcedStore {
 async function setup(
   llm = new MockLlm({ responses: [VALID_SCENE] }),
   store: EventSourcedStore = new EventSourcedStore({ worldId: WORLD.worldId, locId: WORLD.startLocId }),
+  opts: { simPolicy?: SimPolicy; actionPoints?: number; secondPlayer?: { id: string; actionPoints: number } } = {},
 ): Promise<Fixture> {
   const root = tempDir("galgame-map-test-");
   const contentDir = path.join(root, "content");
@@ -224,6 +236,13 @@ async function setup(
     entity("npc_lin", "npc", "林夏", true),
     entity("plr_self", "plr", "你", false),
   ];
+  const player = seeded.find((e) => e.id === "plr_self");
+  if (player && opts.actionPoints !== undefined) player.attrs.action_points = opts.actionPoints;
+  if (opts.secondPlayer) {
+    const second = entity(opts.secondPlayer.id, "plr", "第二位玩家", false);
+    second.attrs.action_points = opts.secondPlayer.actionPoints;
+    seeded.push(second);
+  }
   store.append(
     ROOM_ID,
     seeded.map((e, i) => ({
@@ -258,7 +277,12 @@ async function setup(
   expect(seeded2.rejected).toEqual([]);
 
   const dialogue = new DialogueHost(() => makeCtx({ state: store.state(ROOM_ID), registry }), [npcScene]);
-  const turn = new DefaultTurn({ store, arbiter, registry, modules, memory: new InMemoryMemory(), llm });
+  const turn = new DefaultTurn({
+    store, arbiter, registry, modules, memory: new InMemoryMemory(), llm,
+    ...(opts.simPolicy ? {
+      actionPolicy: { attrKey: opts.simPolicy.actionAttr, costPerTurn: opts.simPolicy.actionCostPerTurn },
+    } : {}),
+  });
   const service = new MapService({
     store,
     turn,
@@ -270,6 +294,7 @@ async function setup(
     contentDir,
     dataDir,
     adminToken: ADMIN_TOKEN,
+    ...(opts.simPolicy ? { simPolicy: opts.simPolicy } : {}),
   });
   return { service, store, arbiter, turn, dialogue, registry, modules, llm, contentDir, dataDir };
 }
@@ -339,6 +364,42 @@ describe("MapService · travel", () => {
     expect(res).toMatchObject({ ok: false, code: "E_SCENE_NOT_FOUND" });
   });
 
+  it("多跳场景可达：预检放行，由 map 模块沿 BFS 路径移动", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 6 });
+    // loc_annex 锚在食堂；玩家在图书馆，library→canteen→annex 是两跳，不能按"直接相邻"拒绝。
+    const res = await f.service.travel(ROOM_ID, "plr_self", "loc_annex");
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.scene.id).toBe("loc_annex");
+    expect(res.map.player.locId).toBe("loc_annex");
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(5);
+  });
+
+  it("可达性预检：已 live 但无边的场景在回合前拒绝，不扣行动点", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 6 });
+    const cause: Envelope = {
+      v: 1,
+      id: "evt_annex_no_edge",
+      roomId: ROOM_ID,
+      seq: f.store.seq(ROOM_ID) + 1,
+      ts: 1,
+      actorId: "system",
+      type: "room.bootstrap",
+      payload: {},
+    };
+    const seeded = await f.arbiter.apply(
+      ROOM_ID,
+      [{ op: "entity.create", args: { id: "loc_annex", kind: "loc", name: "食堂附属楼", attrs: { coord_x: 600, coord_y: 400 }, origin: "seed", canon: false } }],
+      cause,
+    );
+    expect(seeded.rejected).toEqual([]);
+    const res = await f.service.travel(ROOM_ID, "plr_self", "loc_annex");
+    expect(res).toMatchObject({ ok: false, code: "E_NOT_ADJACENT" });
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
+  });
+
   it("规划/在建点不能进入，也不会懒安装", async () => {
     const f = await setup();
     for (const locId of ["loc_planned", "loc_building"]) {
@@ -402,12 +463,21 @@ describe("MapService · travel", () => {
     expect(after.map.scenes.find((s) => s.id === locId)).toMatchObject({ origin: "user", installed: true });
   });
 
-  it("模块报 ok 但玩家没动 → E_NOT_ADJACENT（不再假到达）", async () => {
+  it("模块报 ok 但玩家没动 → E_PRECONDITION（不再假到达）", async () => {
     const f = await setup();
     f.modules.noTravel = true;
     const res = await f.service.travel(ROOM_ID, "plr_self", "loc_canteen");
-    expect(res).toMatchObject({ ok: false, code: "E_NOT_ADJACENT" });
+    expect(res).toMatchObject({ ok: false, code: "E_PRECONDITION" });
     expect(f.store.state(ROOM_ID).room.scene.locId).toBe("loc_library");
+  });
+
+  it("可达但模块没走动：E_PRECONDITION 且退还行动点", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 6 });
+    f.modules.noTravel = true;
+    const res = await f.service.travel(ROOM_ID, "plr_self", "loc_canteen");
+    expect(res).toMatchObject({ ok: false, code: "E_PRECONDITION" });
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
   });
 
   it("懒安装缺边可补齐（半安装自愈）", async () => {
@@ -451,6 +521,63 @@ describe("MapService · tick", () => {
     expect(f.store.state(ROOM_ID).clock.phase).toBe("noon");
     expect(f.modules.tickedPhases).toEqual(["noon"]);
     expect(res.moved).toEqual([{ actorId: "npc_lin", name: "林夏", from: "loc_library", to: "loc_canteen" }]);
+  });
+
+  it("ticks:3 只在 phase 内走刻度，不换阶段（D22）", async () => {
+    const f = await setup();
+    const res = await f.service.tick(ROOM_ID, { ticks: 3 });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).clock).toMatchObject({ phase: "morning", tick: 3 });
+    expect(f.modules.tickedPhases).toEqual(["morning"]);
+  });
+
+  it("advance:true 把玩家行动点回满（与 time.advance 同批）", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 0 });
+    const res = await f.service.tick(ROOM_ID, { advance: true });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
+  });
+
+  it("多人房只回满触发 advance 的玩家（viewer）", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, {
+      simPolicy: policy,
+      actionPoints: 0,
+      secondPlayer: { id: "plr_two", actionPoints: 3 },
+    });
+    const res = await f.service.tick(ROOM_ID, { advance: true, viewer: "plr_self" });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
+    expect(f.store.state(ROOM_ID).entities.plr_two?.attrs.action_points).toBe(3);
+  });
+
+  it("未传 viewer（内部/旧调用）时回满所有 active 玩家", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, {
+      simPolicy: policy,
+      actionPoints: 0,
+      secondPlayer: { id: "plr_two", actionPoints: 2 },
+    });
+    const res = await f.service.tick(ROOM_ID, { advance: true });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(6);
+    expect(f.store.state(ROOM_ID).entities.plr_two?.attrs.action_points).toBe(6);
+  });
+
+  it("advance 与 ticks 同给 / ticks 越界 → E_SCHEMA_INVALID，不推进时间", async () => {
+    const f = await setup();
+    expect(await f.service.tick(ROOM_ID, { advance: true, ticks: 3 })).toMatchObject({ ok: false, code: "E_SCHEMA_INVALID" });
+    expect(await f.service.tick(ROOM_ID, { ticks: 25 })).toMatchObject({ ok: false, code: "E_SCHEMA_INVALID" });
+    expect(f.store.state(ROOM_ID).clock).toMatchObject({ phase: "morning", tick: 0 });
+  });
+
+  it("advance:false 不回满行动点", async () => {
+    const policy: SimPolicy = { actionAttr: "action_points", actionCostPerTurn: 1, actionMax: 6, refillOnPhaseAdvance: true };
+    const f = await setup(undefined, undefined, { simPolicy: policy, actionPoints: 2 });
+    const res = await f.service.tick(ROOM_ID, { advance: false });
+    expect(res.ok).toBe(true);
+    expect(f.store.state(ROOM_ID).entities.plr_self?.attrs.action_points).toBe(2);
   });
 
   it("advance:false 只按当前 phase 重排", async () => {
@@ -695,6 +822,45 @@ class UnloadedStore extends EventSourcedStore {
     return seq;
   }
 }
+
+describe("MapService · 对话冻结/恢复 NPC 动作（D22）", () => {
+  async function seedLease(f: Fixture, value: unknown): Promise<void> {
+    const cause: Envelope = {
+      v: 1, id: "evt_seed_lease", roomId: ROOM_ID, seq: f.store.seq(ROOM_ID) + 1, ts: 1,
+      actorId: "system", type: "room.bootstrap", payload: {},
+    };
+    const applied = await f.arbiter.apply(
+      ROOM_ID,
+      [{ op: "attr.set", args: { entityId: "npc_lin", key: "sim_lease", value: JSON.stringify(value) } }],
+      cause,
+    );
+    expect(applied.rejected).toEqual([]);
+  }
+
+  it("对话开始冻结为 talk 租约，结束后恢复原租约与剩余占用", async () => {
+    const f = await setup();
+    await seedLease(f, { action: "move", target: "loc_canteen", remaining: 2, phase: "morning" });
+    expect(await f.service.suspendNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    const frozen = JSON.parse(String(f.store.state(ROOM_ID).entities["npc_lin"]!.attrs.sim_lease));
+    expect(frozen).toMatchObject({ action: "talk", target: "loc_canteen", remaining: 2, phase: "morning" });
+    expect(JSON.parse(frozen.resume)).toMatchObject({ action: "move", target: "loc_canteen", remaining: 2 });
+    // 幂等：连续对话再次冻结不嵌套
+    expect(await f.service.suspendNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    expect(await f.service.resumeNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    const restored = JSON.parse(String(f.store.state(ROOM_ID).entities["npc_lin"]!.attrs.sim_lease));
+    expect(restored).toMatchObject({ action: "move", target: "loc_canteen", remaining: 2 });
+    expect(await f.service.resumeNpcAction(ROOM_ID, "npc_lin")).toBe(false);
+  });
+
+  it("空闲 NPC 也冻结为 talk，避免对话期间被自动 tick 起新动作；恢复后清空", async () => {
+    const f = await setup();
+    expect(await f.service.suspendNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    const frozen = JSON.parse(String(f.store.state(ROOM_ID).entities["npc_lin"]!.attrs.sim_lease));
+    expect(frozen).toMatchObject({ action: "talk", target: "", remaining: 0, phase: "morning", resume: "" });
+    expect(await f.service.resumeNpcAction(ROOM_ID, "npc_lin")).toBe(true);
+    expect(f.store.state(ROOM_ID).entities["npc_lin"]!.attrs.sim_lease).toBe("");
+  });
+});
 
 describe("MapService · tick 与并发写入（PR #149 审阅 P1）", () => {
   it("modules.tick 期间的并发写入不会被旧快照覆盖", async () => {

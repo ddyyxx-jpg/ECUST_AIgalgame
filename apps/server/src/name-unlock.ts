@@ -97,6 +97,41 @@ export function introducedPresentIds(state: WorldState, speech: string): string[
     .map((n) => n.id);
 }
 
+/** 玩家在问「另一个人」是谁（第三人称问名），例如"另外一个叫什么？""旁边那位是谁" */
+const ASK_OTHER_RE = /(另一个|另外|旁边|刚才那个|那边那个|那位|其他人)/u;
+const NAME_WORD_RE = /(叫什么|叫什么名字|名字|是谁|哪位|怎么称呼)/u;
+
+export function isAskOtherNameInput(input: string): boolean {
+  return isAskNameInput(input) || (ASK_OTHER_RE.test(input) && NAME_WORD_RE.test(input));
+}
+
+/**
+ * 文本里**被提到**的未认识 NPC（说出口的名字就算玩家听见了）。
+ *
+ * 与 `namesIntroducedIn` 的区别：那是"本人自报姓名"，这里是"别人转述/介绍他的名字"。
+ * 只在玩明确问"另一个人叫什么"时才启用——否则旁白顺口提一句就把名字全解锁了。
+ * 「名字：台词」的说话人标签不算提到，否则每句台词都会解锁说话人。
+ */
+export function mentionedNpcIds(state: WorldState, text: string): string[] {
+  if (!text.trim()) return [];
+  const out: string[] = [];
+  for (const e of Object.values(state.entities)) {
+    if (e.kind !== "npc" || e.status !== "active" || knowsNameOf(e)) continue;
+    const name = e.name.trim();
+    if (name.length < 2) continue;
+    const re = new RegExp(escapeRe(name), "g");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const after = text.slice(m.index + name.length, m.index + name.length + 1);
+      if (after !== "：" && after !== ":") {
+        out.push(e.id);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * v2：把「玩家实际收到的 delivery」还原成「真名：台词」。
  * 只统计 `to === actorId`——耳语/私信给别的 NPC 的话玩家没听见，不能据此解锁；

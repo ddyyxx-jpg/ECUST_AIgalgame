@@ -9,6 +9,7 @@ import {
   type ErrorCode,
   type LlmMessage,
   type LlmPort,
+  type LlmPurpose,
   type LlmRequest,
   type LlmResult,
   type Usage,
@@ -32,12 +33,28 @@ export function isLlmError(err: unknown): err is LlmError {
   return err instanceof LlmError;
 }
 
+/** 按用途覆盖的网关参数（`content/llm/routes.json` 解析后传入） */
+export interface LlmRoute {
+  /** 该用途使用的模型；缺省 = 客户端默认模型 */
+  model?: string;
+  /** max_tokens 下限：调用方传得更大时保留调用方的值（截断重试要靠它放大） */
+  maxTokens?: number;
+  /** 覆盖调用方的 temperature */
+  temperature?: number;
+  /** 覆盖超时（思考型模型通常需要更久） */
+  timeoutMs?: number;
+  /** 透传给厂商的额外请求字段（如 `reasoning_effort`）；不覆盖 model/messages/temperature/max_tokens */
+  extra?: Record<string, unknown>;
+}
+
 export interface OpenAiCompatConfig {
   baseUrl?: string;
   model?: string;
   apiKey?: string;
   /** 默认 15s；单回合 LLM 调用超过它就没有体验价值了 */
   timeoutMs?: number;
+  /** 按用途覆盖：模型 / 预算下限 / 温度 / 超时 / 厂商额外字段 */
+  routes?: Partial<Record<LlmPurpose, LlmRoute>>;
   /** 测试注入口；默认 globalThis.fetch，保证不联网也能测 */
   fetchImpl?: typeof fetch;
 }
@@ -56,6 +73,7 @@ export class OpenAiCompatClient implements LlmPort {
   private readonly model: string | undefined;
   private readonly apiKey: string | undefined;
   private readonly timeoutMs: number;
+  private readonly routes: Partial<Record<LlmPurpose, LlmRoute>> | undefined;
   private readonly fetchImpl: typeof fetch;
 
   constructor(config: OpenAiCompatConfig = {}) {
@@ -63,27 +81,36 @@ export class OpenAiCompatClient implements LlmPort {
     this.model = config.model ?? process.env[ENV_KEYS.model];
     this.apiKey = config.apiKey ?? process.env[ENV_KEYS.apiKey];
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.routes = config.routes;
     this.fetchImpl = config.fetchImpl ?? globalThis.fetch;
   }
 
   async chat(req: LlmRequest): Promise<LlmResult> {
     const baseUrl = this.requireConfig(this.baseUrl, ENV_KEYS.baseUrl);
-    const model = this.requireConfig(this.model, ENV_KEYS.model);
+    // 路由只认"用途"：引擎声明 purpose，具体选哪个模型/预算属于部署配置
+    const route = req.purpose === undefined ? undefined : this.routes?.[req.purpose];
+    const routeModel = route?.model?.trim();
+    const model = routeModel ? routeModel : this.requireConfig(this.model, ENV_KEYS.model);
     const apiKey = this.requireConfig(this.apiKey, ENV_KEYS.apiKey);
     const wantJson = req.json === true;
+    // 预算只抬不压：调用方带截断重试时会自己放大 max_tokens，不能被路由值压回去
+    const maxTokens = Math.max(req.maxTokens ?? 0, route?.maxTokens ?? 0) || undefined;
+    const temperature = route?.temperature ?? req.temperature;
+    const timeoutMs = route?.timeoutMs ?? this.timeoutMs;
 
     const body: Record<string, unknown> = {
+      ...route?.extra,
       model,
       messages: withJsonInstruction(req.messages, wantJson),
       stream: false,
     };
     if (wantJson) body.response_format = { type: "json_object" };
-    if (req.temperature !== undefined) body.temperature = req.temperature;
-    if (req.maxTokens !== undefined) body.max_tokens = req.maxTokens;
+    if (temperature !== undefined) body.temperature = temperature;
+    if (maxTokens !== undefined) body.max_tokens = maxTokens;
 
     const startedAt = Date.now();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     let payload: unknown = undefined;
     let headerTraceId: string | undefined;
@@ -113,7 +140,7 @@ export class OpenAiCompatClient implements LlmPort {
     } catch (err) {
       if (err instanceof LlmError) throw err;
       if (controller.signal.aborted) {
-        throw new LlmError("E_LLM_TIMEOUT", `LLM 请求超时（${this.timeoutMs}ms）`);
+        throw new LlmError("E_LLM_TIMEOUT", `LLM 请求超时（${timeoutMs}ms）`);
       }
       const detail = err instanceof Error ? err.message : String(err);
       throw new LlmError("E_LLM_FORMAT", `LLM 网络错误：${detail}`);

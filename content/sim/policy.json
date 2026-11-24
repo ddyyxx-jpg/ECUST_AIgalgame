@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "talkLeaseTicks": 12,
+  "actionPoints": {
+    "enabled": true,
+    "attr": "action_points",
+    "perTurn": 1,
+    "max": 6,
+    "refillOnPhaseAdvance": true
+  },
+  "clock": {
+    "enabled": true,
+    "intervalMs": 45000,
+    "ticksPerBeat": 1,
+    "maxTick": 24
+  },
+  "decision": {
+    "enabled": true,
+    "maxPerBeat": 2,
+    "intervalTicks": 2,
+    "hourlyCalls": 12,
+    "maxOptions": 4
+  },
+  "chat": {
+    "enabled": true,
+    "autoTurns": 1,
+    "minPresentNpcs": 2
+  }
+}

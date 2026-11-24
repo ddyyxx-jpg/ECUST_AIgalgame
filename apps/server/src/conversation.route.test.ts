@@ -29,6 +29,7 @@ import {
 } from "../../../packages/engine/src/v2/index.ts";
 import { createApp, type App } from "./bootstrap.ts";
 import { registerRoutes } from "./routes.ts";
+import { RoomBusyError } from "./room-activity.ts";
 import type { ServerConfig } from "./config.ts";
 
 const CONTENT = "content";
@@ -126,8 +127,9 @@ function fakeConversationHost(opts: {
   events: ConversationEvent[];
   openDelayMs?: number;
   runDelayMs?: number;
-}): { host: ConversationHostV2; openCalls: () => number; closeCalls: () => string[] } {
+}): { host: ConversationHostV2; openCalls: () => number; closeCalls: () => string[]; runCalls: () => number } {
   let opens = 0;
+  let runs = 0;
   const closed: string[] = [];
   const sessions = new Map<string, ConversationSessionV2>();
   const host = {
@@ -157,19 +159,24 @@ function fakeConversationHost(opts: {
       return sessions.has(id);
     },
     async *run(_sessionId: string): AsyncIterable<ConversationEvent> {
+      runs += 1;
       if (opts.runDelayMs) await new Promise<void>((resolve) => setTimeout(resolve, opts.runDelayMs));
       for (const ev of opts.events) yield ev;
     },
   } as unknown as ConversationHostV2;
-  return { host, openCalls: () => opens, closeCalls: () => closed };
+  return { host, openCalls: () => opens, closeCalls: () => closed, runCalls: () => runs };
 }
 
 /** 换掉 host 但不换房间/账号：房间仍由 createApp 真建，guardRoom/roomGate 照常生效 */
+const fakeHostRef: { current?: { runCalls: () => number } } = {};
+
 async function appWithHost(makeHost: (roomId: string, actorId: string) => ConversationHostV2) {
   process.env.GALGAME_GOSSIP_SCAN_MS = "0";
   const deps = await createApp(testConfig());
   const { roomId, actorId } = await deps.createRoom("solo", "u_owner");
   deps.conversation = { host: makeHost(roomId, actorId) };
+  // 自动续聊默认关闭：绝大多数用例只断言"一次 host.run"的事件投影。
+  deps.autoChat = undefined;
   const app = Fastify();
   registerRoutes(app, deps);
   return { app, deps, roomId, actorId };
@@ -217,6 +224,25 @@ function viewState(roomId: string, known: string, unknown: string): WorldState {
 }
 
 describe("dev/v2 群聊 HTTP 端点（issue #89）", () => {
+  it("等锁失败返回 409，不写 SSE 头", async () => {
+    const { app, deps, roomId, actorId } = await appWith();
+    deps.roomActivity = {
+      acquire: async () => { throw new RoomBusyError(roomId, "等待超时"); },
+      tryAcquire: () => null,
+      enter: () => () => {},
+      isBusy: () => true,
+    } as never;
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: payload(actorId, "lock-busy"),
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ ok: false, code: "E_TURN_BUSY" });
+    await app.close();
+  });
+
   it("正常回合：SSE 推 opened/utterance/committed，speaker 绑定为调用者", async () => {
     const { app, roomId, actorId } = await appWith();
     const res = await app.inject({
@@ -445,6 +471,29 @@ describe("dev/v2 群聊 HTTP 端点（issue #89）", () => {
     expect(typeof data.turn).toBe("number");
     expect(data.state.room.id).toBe(roomId);
     await app.close();
+  });
+
+  it("chat.autoTurns：玩家回合后同一条 SSE 里再跑一轮 auto 回合（内容仍然脱敏）", async () => {
+    const { app, deps, roomId, actorId } = await appWithHost((rid: string, viewer: string) => {
+      const events: ConversationEvent[] = [
+        { type: "conversation.utterance", delivery: { to: viewer, speaker: "npc_a", utteranceId: "u1", mode: "broadcast", channels: ["content"], content: "我先说" } },
+        { type: "conversation.committed", sessionId: "conv_1", turn: 1, proposals: [], state: viewState(rid, "npc_a", "npc_b") },
+      ];
+      const fakeHost = fakeConversationHost({ events });
+      fakeHostRef.current = fakeHost;
+      return fakeHost.host;
+    });
+    deps.autoChat = { turns: 1, minPresentNpcs: 1 };
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: payload(actorId, "auto-chat-1"),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(fakeHostRef.current?.runCalls()).toBe(2); // 玩家回合 + 1 轮 auto
+    const events = sse(res.body);
+    expect(events.filter((e) => e.type === "conversation.utterance")).toHaveLength(2);
   });
 
   it("BLOCKER-1：玩家 SSE 按观察者投影——无他人 mental/私聊，committed 私忆与 GM 字段裁掉，已认识名不回归", async () => {
@@ -927,6 +976,176 @@ describe("审阅 #144 P1-b：插话后的当轮台词必须有 NPC 回应", () =
     const outcomes = (committed?.data.outcomes ?? []) as { kind: string; reason?: string }[];
     expect(outcomes.some((o) => o.kind === "speak")).toBe(true);
     expect(outcomes.every((o) => o.kind !== "silent" || o.reason !== "phase_or_cap")).toBe(true);
+    await app.close();
+  });
+});
+
+describe("D22：对话打断 NPC 动作占用", () => {
+  it("对话目标与插话者正在行动时都冻结租约，回合结束恢复剩余占用", async () => {
+    const { app, deps, roomId, actorId } = await appWith();
+    const npcId = "npc_yan";
+    const interjectId = "npc_lin";
+    const cause = (id: string) => ({
+      v: 1 as const, id, roomId, seq: (deps.store as EventLog).state(roomId) ? 0 : 0, ts: 1,
+      actorId: "system", type: "room.bootstrap", payload: {},
+    });
+    // 先放进同一场景，再种两条“正在移动”的租约
+    const seededScene = await deps.arbiter.apply(
+      roomId,
+      [{ op: "scene.set", args: { presentIds: [actorId, npcId, interjectId] } }],
+      { ...cause("evt_d22_scene"), seq: (deps.store as EventLog).state(roomId).room.scene.presentIds.length + 1 },
+    );
+    expect(seededScene.rejected).toEqual([]);
+    const state = (deps.store as EventLog).state(roomId);
+    const seededLease = await deps.arbiter.apply(
+      roomId,
+      [
+        { op: "attr.set", args: { entityId: npcId, key: "sim_lease", value: JSON.stringify({ action: "move", target: "loc_canteen", remaining: 2, phase: state.clock.phase }) } },
+        { op: "attr.set", args: { entityId: interjectId, key: "sim_lease", value: JSON.stringify({ action: "stay", target: "loc_library", remaining: 1, phase: state.clock.phase }) } },
+      ],
+      { ...cause("evt_d22_lease"), seq: (deps.store as EventLog).seq(roomId) + 1 },
+    );
+    expect(seededLease.rejected).toEqual([]);
+
+    const frozen = new Map<string, string>();
+    const realSuspend = deps.map.suspendNpcAction.bind(deps.map);
+    deps.map.suspendNpcAction = async (r, n) => {
+      const ok = await realSuspend(r, n);
+      if (ok) frozen.set(n, String((deps.store as EventLog).state(r).entities[n]?.attrs.sim_lease));
+      return ok;
+    };
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: {
+        actorId, clientTurnId: "d22-1", interject: interjectId,
+        utterance: { mode: "addressed", target: npcId, content: "你先别走，聊两句" },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(frozen.get(npcId)!)).toMatchObject({ action: "talk", target: "loc_canteen", remaining: 2 });
+    expect(JSON.parse(frozen.get(interjectId)!)).toMatchObject({ action: "talk", target: "loc_library", remaining: 1 });
+    const after = (deps.store as EventLog).state(roomId);
+    expect(JSON.parse(String(after.entities[npcId]!.attrs.sim_lease))).toMatchObject({
+      action: "move", target: "loc_canteen", remaining: 2,
+    });
+    expect(JSON.parse(String(after.entities[interjectId]!.attrs.sim_lease))).toMatchObject({
+      action: "stay", target: "loc_library", remaining: 1,
+    });
+    await app.close();
+  });
+
+  it("utterance.target 是数组时，数组里的每个在场 NPC 都被冻结/恢复", async () => {
+    const { app, deps, roomId, actorId } = await appWith();
+    const a = "npc_yan";
+    const b = "npc_lin";
+    const state0 = (deps.store as EventLog).state(roomId);
+    const scene = await deps.arbiter.apply(
+      roomId,
+      [{ op: "scene.set", args: { presentIds: [actorId, a, b] } }],
+      { v: 1, id: "evt_d22_scene_arr", roomId, seq: (deps.store as EventLog).seq(roomId) + 1, ts: 1, actorId: "system", type: "room.bootstrap", payload: {} },
+    );
+    expect(scene.rejected).toEqual([]);
+    const now = (deps.store as EventLog).state(roomId).clock.phase;
+    const seeded = await deps.arbiter.apply(
+      roomId,
+      [a, b].map((id) => ({
+        op: "attr.set" as const,
+        args: { entityId: id, key: "sim_lease", value: JSON.stringify({ action: "move", target: "loc_canteen", remaining: 2, phase: now }) },
+      })),
+      { v: 1, id: "evt_d22_lease_arr", roomId, seq: (deps.store as EventLog).seq(roomId) + 1, ts: 1, actorId: "system", type: "room.bootstrap", payload: {} },
+    );
+    expect(seeded.rejected).toEqual([]);
+    const frozen = new Set<string>();
+    const realSuspend = deps.map.suspendNpcAction.bind(deps.map);
+    deps.map.suspendNpcAction = async (r, n) => {
+      const ok = await realSuspend(r, n);
+      if (ok) frozen.add(n);
+      return ok;
+    };
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: {
+        actorId, clientTurnId: "d22-arr-1",
+        utterance: { mode: "addressed", target: [a, b], content: "你们俩都等一下" },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(frozen).toEqual(new Set([a, b]));
+    const after = (deps.store as EventLog).state(roomId);
+    for (const id of [a, b]) {
+      expect(JSON.parse(String(after.entities[id]!.attrs.sim_lease))).toMatchObject({ action: "move", target: "loc_canteen", remaining: 2 });
+    }
+    await app.close();
+  });
+
+  it("多 NPC 中有一个恢复失败时，不把仍含 talk 的状态当作已恢复下发", async () => {
+    const { app, deps, roomId, actorId } = await appWith();
+    const npcId = "npc_yan";
+    const scene = await deps.arbiter.apply(
+      roomId,
+      [{ op: "scene.set", args: { presentIds: [actorId, npcId] } }],
+      { v: 1, id: "evt_d22_scene_fail", roomId, seq: (deps.store as EventLog).seq(roomId) + 1, ts: 1, actorId: "system", type: "room.bootstrap", payload: {} },
+    );
+    expect(scene.rejected).toEqual([]);
+    const now = (deps.store as EventLog).state(roomId).clock.phase;
+    const seeded = await deps.arbiter.apply(
+      roomId,
+      [{ op: "attr.set", args: { entityId: npcId, key: "sim_lease", value: JSON.stringify({ action: "move", target: "loc_canteen", remaining: 2, phase: now }) } }],
+      { v: 1, id: "evt_d22_lease_fail", roomId, seq: (deps.store as EventLog).seq(roomId) + 1, ts: 1, actorId: "system", type: "room.bootstrap", payload: {} },
+    );
+    expect(seeded.rejected).toEqual([]);
+    deps.map.resumeNpcAction = async () => false;
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: { actorId, clientTurnId: "d22-fail-1", utterance: { mode: "addressed", target: npcId, content: "聊两句" } },
+    });
+    expect(res.statusCode).toBe(200);
+    const ev = sse(res.body).find((e) => e.type === "conversation.committed");
+    const data = ev!.data as unknown as Extract<ConversationEvent, { type: "conversation.committed" }>;
+    // 恢复失败：服务端仍是 talk（等待超时兜底），但 SSE 不把“仍冻结”的 snapshot
+    // 冒充成已恢复状态；committed.state 保持 host 回合开始时的快照。
+    expect(JSON.parse(String((deps.store as EventLog).state(roomId).entities[npcId]!.attrs.sim_lease))).toMatchObject({ action: "talk" });
+    expect(data.state.entities[npcId]!.attrs.sim_lease).toBeUndefined();
+    await app.close();
+  });
+
+  it("v1 /turns 带 targetNpcId 时同样冻结/恢复", async () => {
+    const { app, deps, roomId, actorId } = await appWith();
+    const npcId = "npc_yan";
+    const scene = await deps.arbiter.apply(
+      roomId,
+      [{ op: "scene.set", args: { presentIds: [actorId, npcId] } }],
+      { v: 1, id: "evt_d22_scene_v1", roomId, seq: (deps.store as EventLog).seq(roomId) + 1, ts: 1, actorId: "system", type: "room.bootstrap", payload: {} },
+    );
+    expect(scene.rejected).toEqual([]);
+    const now = (deps.store as EventLog).state(roomId).clock.phase;
+    const seeded = await deps.arbiter.apply(
+      roomId,
+      [{ op: "attr.set", args: { entityId: npcId, key: "sim_lease", value: JSON.stringify({ action: "move", target: "loc_canteen", remaining: 2, phase: now }) } }],
+      { v: 1, id: "evt_d22_lease_v1", roomId, seq: (deps.store as EventLog).seq(roomId) + 1, ts: 1, actorId: "system", type: "room.bootstrap", payload: {} },
+    );
+    expect(seeded.rejected).toEqual([]);
+    const calls: string[] = [];
+    const realSuspend = deps.map.suspendNpcAction.bind(deps.map);
+    const realResume = deps.map.resumeNpcAction.bind(deps.map);
+    deps.map.suspendNpcAction = async (r, n) => { calls.push(`suspend:${n}`); return realSuspend(r, n); };
+    deps.map.resumeNpcAction = async (r, n) => { calls.push(`resume:${n}`); return realResume(r, n); };
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/turns`,
+      headers: { "x-user-id": "u_owner" },
+      payload: { actorId, input: "你好", clientTurnId: "d22-v1-1", targetNpcId: npcId },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual([`suspend:${npcId}`, `resume:${npcId}`]);
+    expect(JSON.parse(String((deps.store as EventLog).state(roomId).entities[npcId]!.attrs.sim_lease))).toMatchObject({ action: "move", remaining: 2 });
     await app.close();
   });
 });

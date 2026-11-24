@@ -18,6 +18,10 @@ import type { MemoryContext } from "./turn.memory.ts";
 export interface PromptOptions {
   /** 现实锚定层追加的行（世界规则 + 本回合的诱导类型） */
   framing?: string[];
+  /** 房间/世界稳定前缀：作者注（SillyTavern Author's Note 的只读移植） */
+  authorNote?: string;
+  /** 关键词命中的世界设定条目（SillyTavern World Info / Lorebook） */
+  worldInfo?: readonly string[];
   /** 本回合召回的记忆（读不到时传 undefined，提示词就退化成"第一次见面"） */
   mem?: MemoryContext;
   /** 属性注册表：S6 只渲染 public 属性，secret 永不出现在提示词里 */
@@ -106,10 +110,17 @@ export function buildTurnPrompt(
     }
   }
 
+  const sAuthor = opts.authorNote ? [`【作者注】${opts.authorNote}`] : [];
+  const sWorld = opts.worldInfo && opts.worldInfo.length > 0
+    ? ["【世界设定·关键词触发】", ...opts.worldInfo.map((line) => `- ${line}`)]
+    : [];
+
   return [
     ...s1,
+    ...sAuthor,
     ...(opts.framing ?? []),
     ...s15,
+    ...sWorld,
     ...s4,
     ...s5,
     ...s6,

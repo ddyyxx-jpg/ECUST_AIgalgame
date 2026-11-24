@@ -13,6 +13,7 @@ import type {
   ViewPatch,
 } from "../../../packages/shared/src/contract/types.ts";
 import worldMapJson from "./data/world_map.json" with { type: "json" };
+import { LEASE, PHASES, clockIndex, parseLease, type Lease } from "./lease.ts";
 import schedulesJson from "./data/npc-schedules.json" with { type: "json" };
 import { bfs, buildAdjacency, liveLocIds, resolveTarget } from "./path.ts";
 
@@ -58,7 +59,6 @@ const BY = "mod.map";
 // 属性键来自 docs/06 §1：坐标复用 registry 的 coord_x / coord_y，不在代码里发明新字段。
 const COORD_X = "coord_x";
 const COORD_Y = "coord_y";
-const PHASES: readonly Phase[] = ["morning", "noon", "afternoon", "evening", "night"];
 
 /** 带中文动词前缀的输入：去/到/往/回/进/前往…，用于从自然语言里剥出地点词 */
 const TRAVEL_RE = /^(?:map\.travel\b|travel\b|去|到|往|回|进|前往|移动到|走向|走到)/i;
@@ -196,30 +196,130 @@ function mapView(ctx: ModuleContext): ViewPatch {
   };
 }
 
+function leaseProposal(npcId: string, lease: Lease | null, reason: string): Proposal {
+  return {
+    op: "attr.set",
+    args: { entityId: npcId, key: LEASE, value: lease === null ? "" : JSON.stringify(lease) },
+    reason,
+    by: BY,
+  };
+}
+
+/**
+ * 日程 + 动作租约（D22 / WorldX 的 action lease）：
+ * - 有租约且未到期：只递减/清空，不接新动作（NPC 正在占用时间）；
+ * - 到达目标：停留 2 个 tick，再重新排日程；
+ * - 需要移动：一次走完整条最短路，随后占用 1 个 tick 结算；
+ * - phase 变了：旧租约作废，按新 phase 重排。
+ * 一个 tick 只处理一次，保证"自动推进不切 phase"时 NPC 也不会每 tick 重新决策。
+ */
 function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
   if (!PHASES.includes(phase)) return [];
   const adj = buildAdjacency(ctx);
   const proposals: Proposal[] = [];
   const finalLoc = new Map<string, string>();
 
-  for (const npcId of Object.keys(SCHEDULES.schedules).sort()) {
-    const targetId = SCHEDULES.schedules[npcId]?.[phase];
-    if (!targetId || !liveLoc(ctx, targetId)) continue;
+  // 日程名单 ∪ 仍持有租约的 active NPC：非日程 NPC 一旦被决策/对话写入租约，
+  // 也必须由同一个 tick 消费或清掉，否则会永远占着租约不再被选。
+  const npcIds = new Set<string>(Object.keys(SCHEDULES.schedules));
+  for (const e of liveNpcs(ctx)) {
+    if (parseLease(e.attrs[LEASE])) npcIds.add(e.id);
+  }
+
+  for (const npcId of [...npcIds].sort()) {
     const npc = ctx.query.entity(npcId);
     if (npc?.kind !== "npc" || npc.status !== "active") continue;
     const from = locatedAt(ctx, npcId);
-    if (!from || from === targetId) continue;
-    const path = bfs(adj, from, targetId);
-    if (!path || path.length < 2) continue; // 无路径：跳过该 NPC，不产错误
-    for (const hop of path.slice(1)) {
-      proposals.push({ op: "move.to", args: { actorId: npcId, locId: hop }, reason: `${npc.name}前往${nameOf(ctx, hop)}`, by: BY });
-      const coord = coordOf(ctx, hop);
-      proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_X, value: coord.x }, reason: `${npc.name}坐标`, by: BY });
-      proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_Y, value: coord.y }, reason: `${npc.name}坐标`, by: BY });
+    if (!from) continue;
+
+    const old = parseLease(npc.attrs[LEASE]);
+    // 玩家对话中：冻结动作，不递减、不接新动作；对话结束由服务端恢复原租约。
+    // 跨 phase / 超时的 talk 租约视为过期：不先单独写一条清空，而是让本次重排的
+    // 新租约直接覆盖它，避免同一批出现“清空 + 新租约”两条 attr.set 噪声。
+    if (old?.action === "talk") {
+      const expired = old.expiresAt !== undefined && clockIndex(ctx.clock) > old.expiresAt;
+      if (old.phase === phase && !expired) continue;
     }
-    finalLoc.set(npcId, targetId);
+    // 租约优先于日程：NPC 自由活动/对话恢复可能把目标改到非日程地点。
+    // 只要求目标仍是 live loc、phase 未变，避免旧存档/被删场景把 NPC 卡死。
+    const lease = old && old.action !== "talk" && old.phase === phase && liveLoc(ctx, old.target) ? old : null;
+    if (lease) {
+      if (lease.remaining > 1) {
+        proposals.push(leaseProposal(npcId, { ...lease, remaining: lease.remaining - 1 }, `${npc.name}继续${lease.action === "move" ? "赶路" : "停留"}`));
+        continue;
+      }
+      if (lease.action === "stay") {
+        proposals.push(leaseProposal(npcId, null, `${npc.name}结束停留`));
+        continue;
+      }
+      // move 租约到期：一 tick 只走一跳，走完把 move 租约续上；真正到达才转停留。
+      // 试玩反馈：原先一 tick 把整条 bfs 路径逐跳推完，玩家只看到 NPC 在两地之间瞬移。
+      if (from === lease.target) {
+        proposals.push(leaseProposal(npcId, { action: "stay", target: lease.target, remaining: 2, phase }, `${npc.name}在${nameOf(ctx, lease.target)}停留`));
+        continue;
+      }
+      const leasePath = bfs(adj, from, lease.target);
+      if (!leasePath || leasePath.length < 2) {
+        proposals.push(leaseProposal(npcId, null, `${npc.name}的目的地不可达，取消动作`));
+        continue;
+      }
+      const leaseHop = leasePath[1];
+      const leaseArrived = leaseHop === lease.target;
+      proposals.push(
+        leaseProposal(
+          npcId,
+          leaseArrived
+            ? { action: "stay", target: lease.target, remaining: 2, phase }
+            : { action: "move", target: lease.target, remaining: 1, phase },
+          leaseArrived ? `${npc.name}到达${nameOf(ctx, lease.target)}` : `${npc.name}继续赶路`,
+        ),
+      );
+      proposals.push({ op: "move.to", args: { actorId: npcId, locId: leaseHop }, reason: `${npc.name}前往${nameOf(ctx, leaseHop)}`, by: BY });
+      const leaseCoord = coordOf(ctx, leaseHop);
+      proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_X, value: leaseCoord.x }, reason: `${npc.name}坐标`, by: BY });
+      proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_Y, value: leaseCoord.y }, reason: `${npc.name}坐标`, by: BY });
+      finalLoc.set(npcId, leaseHop);
+      continue;
+    }
+
+    const targetId = SCHEDULES.schedules[npcId]?.[phase];
+    if (!targetId || !liveLoc(ctx, targetId)) {
+      // 没有可回的日程：旧租约（含过期 talk）在这里统一清一次，避免残留。
+      if (old) proposals.push(leaseProposal(npc.id, null, "无日程，结束租约"));
+      continue;
+    }
+
+    if (from === targetId) {
+      proposals.push(leaseProposal(npcId, { action: "stay", target: targetId, remaining: 2, phase }, `${npc.name}在${nameOf(ctx, targetId)}停留`));
+      continue;
+    }
+
+    const path = bfs(adj, from, targetId);
+    if (!path || path.length < 2) {
+      // 无路径：旧租约不能继续占着，否则会一直重试到租约过期。
+      if (old) proposals.push(leaseProposal(npc.id, null, "目的地不可达，结束租约"));
+      continue;
+    }
+    // 一 tick 只走一跳：先写 move 租约（下一 tick 从新位置继续），再写这一跳的移动与坐标。
+    // 这样 NPC 在玩家看来是一格一格走过去的，而不是同一 tick 内瞬移到日程终点。
+    const hop = path[1];
+    const arrived = hop === targetId;
+    proposals.push(
+      leaseProposal(
+        npcId,
+        arrived
+          ? { action: "stay", target: targetId, remaining: 2, phase }
+          : { action: "move", target: targetId, remaining: 1, phase },
+        arrived ? `${npc.name}到达${nameOf(ctx, targetId)}` : `${npc.name}前往${nameOf(ctx, targetId)}`,
+      ),
+    );
+    proposals.push({ op: "move.to", args: { actorId: npcId, locId: hop }, reason: `${npc.name}前往${nameOf(ctx, hop)}`, by: BY });
+    const coord = coordOf(ctx, hop);
+    proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_X, value: coord.x }, reason: `${npc.name}坐标`, by: BY });
+    proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_Y, value: coord.y }, reason: `${npc.name}坐标`, by: BY });
+    finalLoc.set(npcId, hop);
   }
-  if (proposals.length === 0) return [];
+  if (proposals.length === 0 || finalLoc.size === 0) return proposals;
 
   // 镜头保护：solo 房间的 actor.moved 会让镜头跟着每个 NPC 跑，末尾必须放回玩家所在地
   const playerLoc = ctx.state.room.scene.locId;

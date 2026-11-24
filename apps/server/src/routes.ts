@@ -6,13 +6,13 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ActorId, Memory, MemoryRecord, Registry, RoomId, Store, Turn, TurnEvent, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import type { ConversationEvent, GossipEvent, MessageDigest, UtteranceModeDef } from "../../../packages/shared/src/contract/v2.ts";
-import { projectEventsForPlayer, playerOf, projectStateForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
+import { projectEventsForPlayer, projectProposalsForPlayer, playerOf, projectStateForPlayer, projectTurnEventForPlayer } from "./outbound-secrets.ts";
 import { projectConversationEvents, saveSnapshot, sessionSnapshotPath, type ConversationHostV2 } from "../../../packages/engine/src/v2/index.ts";
 import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from "./map.data.ts";
 import type { MapService } from "./map.ts";
 import type { LlmSettings } from "./settings.ts";
 import { maskNamesDeep, unmaskTargetPlaceholder, unknownPlaceholders } from "./view-names.ts";
-import { askedNameTargetId, introducedPresentIds, viewerSpeech } from "./name-unlock.ts";
+import { askedNameTargetId, introducedPresentIds, isAskOtherNameInput, mentionedNpcIds, viewerSpeech } from "./name-unlock.ts";
 import type { SaveIndex } from "./saves.ts";
 import type { TurnHistory } from "./turn-history.ts";
 import { registerResumeRoutes } from "./resume.routes.ts";
@@ -22,6 +22,7 @@ import { registerAdminRoutes } from "./admin.routes.ts";
 import { dailyLimitFor } from "./auth-store.ts";
 import type { TurnLedger } from "./quota.ts";
 import type { AdminLog } from "./admin-log.ts";
+import { RoomBusyError, type RoomActivity } from "./room-activity.ts";
 import { makeRoomExists } from "./room-exists.ts";
 import { isSafeRoomId } from "../../../packages/engine/src/store.ts";
 import { clampLimit } from "./limit.ts";
@@ -67,6 +68,8 @@ export interface AppDeps {
     stats(): { worldId: string; version: number; writtenToday: number; writtenTotal: number; circuitOpen: boolean; consecutiveJudgeFailures: number };
     sample(limit: number): MemoryRecord[];
   };
+  /** NPC 自由对话：玩家回合写完后，同一条流里让在场 NPC 自己再聊 autoTurns 轮 */
+  autoChat?: { turns: number; minPresentNpcs: number };
   /** 管理员令牌；canonize 端点用它鉴权（地图端点由 MapService 自己校验） */
   adminToken?: string;
   /** 令牌校验 + 失败限流（registerRoutes 未提供时按 adminToken 新建；测试可注入独立实例） */
@@ -101,6 +104,8 @@ export interface AppDeps {
   debugGate?: DebugGate | null;
   /** 单次历史/事件响应行数上限（默认 200，GALGAME_HISTORY_LIMIT_MAX） */
   historyLimitMax?: number;
+  /** 房间活动计数：玩家回合执行期间为忙，自动时钟/地图 tick 据此让路。 */
+  roomActivity?: RoomActivity;
   version: string;
 }
 
@@ -571,9 +576,18 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
      * 这里另起一条 Promise 链把 open+run 整体包住，两层锁不同、不嵌套，不会自锁。
      */
     const turnChains = new Map<string, Promise<void>>();
-    const serializeTurn = <T>(roomId: string, fn: () => Promise<T>): Promise<T> => {
+    const serializeTurn = <T>(roomId: string, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
       const prev = turnChains.get(roomId) ?? Promise.resolve();
-      const next = prev.then(fn, fn);
+      // 只在回合真正执行时标记忙（排队等待不算），让自动时钟在排队阶段仍可推进。
+      const run = async (): Promise<T> => {
+        const leave = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000, signal) : undefined;
+        try {
+          return await fn();
+        } finally {
+          leave?.();
+        }
+      };
+      const next = prev.then(run, run);
       const tail = next.then(() => undefined, () => undefined);
       turnChains.set(roomId, tail);
       void tail.finally(() => {
@@ -691,6 +705,30 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         const placeholder = unknownPlaceholders(access.state, deps.appearance).get(utteranceTarget.name);
         utterance.content = unmaskTargetPlaceholder(utterance.content, placeholder, utteranceTarget.name);
       }
+      // D22：玩家对话/插话的 NPC 若正在执行动作，本轮对话期间冻结其租约；
+      // 回合结束（含异常）恢复，剩余占用继续由 map tick 走完。target 与 interject
+      // 可能同时在场，两者都要冻结，否则被插话的 NPC 会在说话时继续走日程。
+      const talkNpcIds: string[] = [];
+      // 契约允许 target 是 string 或 string[]（多目标），两种形态都要冻结。
+      const targetIds = utterance?.target === undefined
+        ? []
+        : Array.isArray(utterance.target) ? utterance.target : [utterance.target];
+      for (const id of targetIds) {
+        if (typeof id !== "string") continue;
+        const targetEntity = access.state.entities[id];
+        if (targetEntity?.kind === "npc" && access.state.room.scene.presentIds.includes(id) && !talkNpcIds.includes(id)) {
+          talkNpcIds.push(id);
+        }
+      }
+      if (
+        body.interject
+        && access.state.entities[body.interject]?.kind === "npc"
+        && access.state.room.scene.presentIds.includes(body.interject)
+        && !talkNpcIds.includes(body.interject)
+      ) {
+        talkNpcIds.push(body.interject);
+      }
+      const suspendedNpcIds: string[] = [];
       let sessionId = "";
       let opened: ConversationEvent | undefined;
       const out: ConversationEvent[] = [];
@@ -698,51 +736,87 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       // 房间锁内：额度预留 → openOrReuse → host.run → 结算，全在同一把锁上。
       // 拒绝（额度不足/账本写失败）必须在 SSE 头之前返回，故先把锁内阶段的结果带出来。
       let denied = false;
-      await serializeTurn(roomId, async () => {
-        if (!(await reserveTurn())) { denied = true; return; }
-        try {
-          const r = await openOrReuse(roomId, actorId, access.state);
-          sessionId = r.sessionId;
-          opened = r.opened;
-          for await (const ev of host.run(r.sessionId, {
-            clientTurnId: body.clientTurnId,
-            ...(utterance ? { utterance } : {}),
-            ...(body.interject ? { interject: body.interject } : {}),
-            ...(body.auto ? { auto: true } : {}),
-            ...(access.userId ? { userId: access.userId } : {}),
-          })) out.push(ev);
-          // #104：结算与事件流同源——只有真的 committed 才记 committed；
-          // conversation.error（含插话/拒绝）按 failed；无 committed 也无 error 的提前结束按 unconfirmed。
-          if (charged && turnScope && ledger) {
-            const commitEv = out.find((e) => e.type === "conversation.committed");
-            const errored = out.some((e) => e.type === "conversation.error");
-            if (commitEv && commitEv.type === "conversation.committed") {
-              // conversation.* 不写 EventLog（无 Envelope seq），用回合号作为 committedSeq 供重放识别；
-              // 重放时 reserve 见到 committedSeq 即放行到 host 幂等缓存，不重复计费。
-              ledger.transition(turnScope, "committed", { committedSeq: commitEv.turn });
-              // #90：回合已提交后把会话快照原子落盘（独立文件，不进 EventLog）。
-              // 快照只是恢复投影，写失败只记日志，不影响已提交的世界真源。
-              const dataDir = deps.conversation?.dataDir;
-              if (dataDir) {
-                try {
-                  await saveSnapshot(sessionSnapshotPath(dataDir, roomId), host.exportSessions(roomId));
-                } catch (e) {
-                  console.warn(`[conversation] 保存房间 ${roomId} 会话快照失败（不影响已提交回合）：`, e instanceof Error ? e.message : e);
+      const acquireAbort = new AbortController();
+      const onClientClose = () => acquireAbort.abort();
+      req.raw.once("close", onClientClose);
+      try {
+        await serializeTurn(roomId, async () => {
+          if (!(await reserveTurn())) { denied = true; return; }
+          try {
+            const r = await openOrReuse(roomId, actorId, access.state);
+            sessionId = r.sessionId;
+            opened = r.opened;
+            for (const npcId of talkNpcIds) {
+              const frozen = await deps.map.suspendNpcAction(roomId, npcId);
+              if (frozen) suspendedNpcIds.push(npcId);
+            }
+            for await (const ev of host.run(r.sessionId, {
+              clientTurnId: body.clientTurnId,
+              ...(utterance ? { utterance } : {}),
+              ...(body.interject ? { interject: body.interject } : {}),
+              ...(body.auto ? { auto: true } : {}),
+              ...(access.userId ? { userId: access.userId } : {}),
+            })) out.push(ev);
+            // #104：结算与事件流同源——只有真的 committed 才记 committed；
+            // conversation.error（含插话/拒绝）按 failed；无 committed 也无 error 的提前结束按 unconfirmed。
+            if (charged && turnScope && ledger) {
+              const commitEv = out.find((e) => e.type === "conversation.committed");
+              const errored = out.some((e) => e.type === "conversation.error");
+              if (commitEv && commitEv.type === "conversation.committed") {
+                // conversation.* 不写 EventLog（无 Envelope seq），用回合号作为 committedSeq 供重放识别；
+                // 重放时 reserve 见到 committedSeq 即放行到 host 幂等缓存，不重复计费。
+                ledger.transition(turnScope, "committed", { committedSeq: commitEv.turn });
+                // #90：回合已提交后把会话快照原子落盘（独立文件，不进 EventLog）。
+                // 快照只是恢复投影，写失败只记日志，不影响已提交的世界真源。
+                const dataDir = deps.conversation?.dataDir;
+                if (dataDir) {
+                  try {
+                    await saveSnapshot(sessionSnapshotPath(dataDir, roomId), host.exportSessions(roomId));
+                  } catch (e) {
+                    console.warn(`[conversation] 保存房间 ${roomId} 会话快照失败（不影响已提交回合）：`, e instanceof Error ? e.message : e);
+                  }
+                }
+              } else if (errored) ledger.transition(turnScope, "failed");
+              else if (body.auto && out.some((e) => e.type === "conversation.notice")) {
+                // 只限 auto 超上限：既没调模型也没写世界，不能按 unconfirmed 占额度。
+                // 审核拦截（blocked）也只回 notice，但那是真实发生过的一次审核调用，维持 unconfirmed 原语义。
+                ledger.transition(turnScope, "failed");
+              } else ledger.transition(turnScope, "unconfirmed");
+            }
+          } catch (e) {
+            // #104：异常路径按失败回收额度（未 committed），与 v1 /turns 的 catch 同口径；重放命中不结算
+            if (charged && turnScope && ledger) ledger.transition(turnScope, "failed");
+            caught = e;
+          } finally {
+            if (suspendedNpcIds.length > 0) {
+              let restoredAll = true;
+              for (const npcId of suspendedNpcIds) {
+                if (!(await deps.map.resumeNpcAction(roomId, npcId))) {
+                  restoredAll = false;
+                  console.warn(`[conversation] NPC ${npcId} 动作租约恢复失败`);
                 }
               }
-            } else if (errored) ledger.transition(turnScope, "failed");
-            else if (body.auto && out.some((e) => e.type === "conversation.notice")) {
-              // 只限 auto 超上限：既没调模型也没写世界，不能按 unconfirmed 占额度。
-              // 审核拦截（blocked）也只回 notice，但那是真实发生过的一次审核调用，维持 unconfirmed 原语义。
-              ledger.transition(turnScope, "failed");
-            } else ledger.transition(turnScope, "unconfirmed");
+              // committed 事件里的 state 是回合中途快照，含 talk 租约；全部恢复成功后才替换，
+              // 避免把仍有冻结 NPC 的状态当成“已恢复”下发。用新事件对象替换，不能改 host 缓存里的同一对象。
+              if (restoredAll) {
+                const snapshot = structuredClone(await deps.store.snapshot(roomId));
+                const idx = out.findIndex((e) => e.type === "conversation.committed");
+                const commitEv = idx >= 0 ? out[idx] : undefined;
+                if (commitEv && commitEv.type === "conversation.committed") {
+                  out[idx] = { ...commitEv, state: snapshot };
+                }
+              }
+            }
           }
-        } catch (e) {
-          // #104：异常路径按失败回收额度（未 committed），与 v1 /turns 的 catch 同口径；重放命中不结算
-          if (charged && turnScope && ledger) ledger.transition(turnScope, "failed");
-          caught = e;
+        }, acquireAbort.signal);
+      } catch (e) {
+        if (e instanceof RoomBusyError) {
+          return reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
         }
-      });
+        throw e;
+      } finally {
+        req.raw.off("close", onClientClose);
+      }
       if (denied) return reply;
       reply.raw.writeHead(200, SSE_HEADERS);
       // #106：心跳注释行（SSE comment，前端 parseSsePart 会忽略）。与 gossip SSE 同口径，
@@ -771,7 +845,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
             if (asked) learnedIds.add(asked);
             // 台词判定：交付里没有说话人标签，按「真名：内容」还原后复用 v1 的自报姓名规则；
             // 只统计玩家实际收到的 delivery（viewerSpeech 内含可见性过滤）。
-            for (const id of introducedPresentIds(snapshot, viewerSpeech(snapshot, actorId, out))) learnedIds.add(id);
+            const heard = viewerSpeech(snapshot, actorId, out);
+            for (const id of introducedPresentIds(snapshot, heard)) learnedIds.add(id);
+            // 玩家在问"另一个人"是谁：对方把名字说出来了，玩家就听见了（不必在场、不必自报）
+            if (isAskOtherNameInput(utterance?.content ?? "")) {
+              for (const id of mentionedNpcIds(snapshot, heard)) learnedIds.add(id);
+            }
             if (learnedIds.size > 0) {
               await deps.learnNpcNames(roomId, [...learnedIds]);
               finalState = await deps.store.snapshot(roomId);
@@ -785,8 +864,41 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         // BLOCKER-1：host.run 的事件是全量内部视图，下发前必须按已鉴权 viewer + 会话成员投影：
         // mental 永不下发，私聊只给目标本人，committed 的私忆/私有关系/GM 字段按可见性裁剪，最后再遮真名。
         const members = host.get(sessionId)?.participants ?? [actorId];
-        const visible = projectConversationEvents(out, actorId, members, deps.registry);
+        const visible = projectConversationEvents(out, actorId, members, deps.registry).map((ev) =>
+          ev.type === "conversation.committed"
+            ? { ...ev, proposals: projectProposalsForPlayer(ev.proposals) }
+            : ev,
+        );
         for (const ev of visible) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, placeholders));
+        // NPC 自由对话：玩家这批事件已经写出去，再让在场 NPC 自己接着聊几轮（auto 回合）。
+        // 放在写完之后，是为了不让玩家多等一轮 LLM；每轮用当前状态重算占位名再脱敏。
+        const autoTurns = committed && !body.auto ? deps.autoChat?.turns ?? 0 : 0;
+        if (autoTurns > 0) {
+          const presentNpcs = finalState.room.scene.presentIds.filter((id) => finalState.entities[id]?.kind === "npc");
+          if (presentNpcs.length >= (deps.autoChat?.minPresentNpcs ?? 2)) {
+            // 抢一把房间锁：auto 回合会写世界状态，不能和 tick/travel 交错；拿不到就这轮不聊。
+            const releaseAuto = deps.roomActivity ? deps.roomActivity.tryAcquire(roomId) : () => {};
+            if (releaseAuto) {
+              try {
+                for (let i = 0; i < autoTurns; i += 1) {
+                  const batch: ConversationEvent[] = [];
+                  for await (const ev of host.run(sessionId, { clientTurnId: `${body.clientTurnId}#auto${i}`, auto: true })) {
+                    batch.push(ev);
+                  }
+                  // 本批连一句都没说（全 silent）就停，不空转烧模型
+                  if (!batch.some((e) => e.type === "conversation.utterance")) break;
+                  const autoCommitted = batch.find((e) => e.type === "conversation.committed");
+                  if (autoCommitted?.type === "conversation.committed") finalState = autoCommitted.state;
+                  const autoPlaceholders = unknownPlaceholders(finalState, deps.appearance);
+                  const visibleAuto = projectConversationEvents(batch, actorId, members, deps.registry);
+                  for (const ev of visibleAuto) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, autoPlaceholders));
+                }
+              } finally {
+                releaseAuto();
+              }
+            }
+          }
+        }
       } catch (e) {
         const roomSyncFault = isRoomSyncFault(e);
         // #104：异常路径按失败回收额度（未 committed），与 v1 /turns 的 catch 同口径；重放命中不结算
@@ -894,7 +1006,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     // 秘密裁剪（PR #147 审阅 P0）：plot 事件剥 GM 字段，私忆只留 public 与玩家本人；
     // viewer 取服务端解析的玩家身份，不信任 query 里的 actorId。
     const visible = projectEventsForPlayer(events, playerOf(snapshot, access.userId));
-    return { events: maskNamesDeep(visible, placeholders), lastSeq: visible.length ? visible[visible.length - 1]!.seq : from };
+    // 分页游标用原始事件末 seq：被过滤的私忆/租约事件也占 seq，不能让客户端卡在同一段。
+    return { events: maskNamesDeep(visible, placeholders), lastSeq: allEvents.length ? allEvents[allEvents.length - 1]!.seq : from };
   });
 
   /** 一次行动 = 一条 SSE 流，事件名就是 TurnEvent.type */
@@ -920,7 +1033,28 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     // 幂等作用域：账号 + 房间 + 逻辑请求 ID（P1-1）。未登录（本地无 auth）不结算额度。
     const turnScope = userId ? { userId, roomId, clientTurnId: body.clientTurnId } : undefined;
 
-    // 额度结算（收敛稿 B1，docs/03 §5.2.10）：按逻辑请求预留，拒绝也在 SSE 头之前
+    // 先拿锁再写 SSE 头：等锁失败必须还能回普通 409，不能先宣布 200 流再反悔。
+    let leaveTurn: (() => void) | undefined;
+    const acquireAbort = new AbortController();
+    const onClientClose = () => acquireAbort.abort();
+    req.raw.once("close", onClientClose);
+    const abandonTurn = () => {
+      leaveTurn?.();
+      leaveTurn = undefined;
+      req.raw.off("close", onClientClose);
+    };
+    try {
+      leaveTurn = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000, acquireAbort.signal) : undefined;
+    } catch (e) {
+      req.raw.off("close", onClientClose);
+      if (e instanceof RoomBusyError) {
+        return reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
+      }
+      throw e;
+    }
+
+    // 额度结算（收敛稿 B1，docs/03 §5.2.10）：拿锁成功后才 reserve。
+    // 等锁失败必须不留任何账本副作用；reserve 失败则释放锁再回 409/429。
     const ledger = userId ? deps.ledger : undefined;
     if (ledger && userId && turnScope) {
       const settings = deps.auth?.store.getSettings();
@@ -930,6 +1064,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         dailyLimit, actionsEnabled: settings?.actionsEnabled ?? true,
       });
       if (!reserved.ok) {
+        abandonTurn();
         const status = reserved.code === "E_RATE_LIMITED" ? 429 : 409;
         return reply.code(status).send({ ok: false, code: reserved.code, message: reserved.message, ...(reserved.committedSeq !== undefined ? { committedSeq: reserved.committedSeq } : {}) });
       }
@@ -938,10 +1073,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         await ledger.transitionDurable(turnScope, "running");
       } catch {
         ledger.transition(turnScope, "failed");
+        abandonTurn();
         return reply.code(503).send({ ok: false, code: "E_STORE_FAULT", message: "额度账本写入失败，行动未开始，可重试" });
       }
     }
-
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache, no-transform",
@@ -968,6 +1103,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         target && target.kind === "npc" && targetPresent
           ? unmaskTargetPlaceholder(body.input, targetPlaceholder, target.name)
           : body.input;
+      // D22：v1 回退路径同样在对话回合内冻结目标 NPC 的动作租约。
+      const talkNpcId = target && target.kind === "npc" && targetPresent ? target.id : undefined;
+      let suspendedTalkNpcId: string | undefined;
+      if (talkNpcId && typeof deps.map.suspendNpcAction === "function") {
+        if (await deps.map.suspendNpcAction(roomId, talkNpcId)) suspendedTalkNpcId = talkNpcId;
+      }
       const it = deps.turn.run({
         roomId,
         actorId: body.actorId,
@@ -981,9 +1122,26 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       // 此时已经认识——遮住反而会出现"陌生人自我介绍"这种荒谬结果。
       // 所以先收齐事件，再用最终 patch 的 state 算一次名单，然后统一写出。
       const events: TurnEvent[] = [];
-      for await (const ev of it as AsyncIterable<TurnEvent>) {
-        events.push(ev);
-        if (ev.type === "turn.commit" || ev.type === "turn.error" || ev.type === "turn.rejected") break;
+      try {
+        for await (const ev of it as AsyncIterable<TurnEvent>) {
+          events.push(ev);
+          if (ev.type === "turn.commit" || ev.type === "turn.error" || ev.type === "turn.rejected") break;
+        }
+      } finally {
+        if (suspendedTalkNpcId && typeof deps.map.resumeNpcAction === "function") {
+          if (await deps.map.resumeNpcAction(roomId, suspendedTalkNpcId)) {
+            // turn.patch.state 是回合中途快照（含 talk 租约）；恢复后用最新状态替换。
+            // 替换成新事件对象，避免改到调用方缓存的事件对象。
+            const snapshot = structuredClone(await deps.store.snapshot(roomId));
+            const idx = events.findIndex((ev) => ev.type === "turn.patch");
+            const patch = idx >= 0 ? events[idx] : undefined;
+            if (patch && patch.type === "turn.patch") {
+              events[idx] = { ...patch, state: snapshot };
+            }
+          } else {
+            console.warn(`[turns] NPC ${suspendedTalkNpcId} 动作租约恢复失败`);
+          }
+        }
       }
       // 额度结算与事件流同源：只有真的提交了才记 committed，其余按失败/待核对处理
       committed = events.some((ev) => ev.type === "turn.commit");
@@ -1028,6 +1186,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
             })
             .join("\n");
           for (const id of introducedPresentIds(snapshot, speech)) learnedIds.add(id);
+          // 玩家在问"另一个人"是谁：对方把名字说出来了，玩家就听见了（不必在场、不必自报）
+          if (isAskOtherNameInput(body.input)) {
+            for (const id of mentionedNpcIds(snapshot, speech)) learnedIds.add(id);
+          }
           if (learnedIds.size > 0) {
             await deps.learnNpcNames(roomId, [...learnedIds]);
             finalState = await deps.store.snapshot(roomId);
@@ -1061,6 +1223,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         retryable: !committed && !roomSyncFault,
       });
     } finally {
+      leaveTurn?.();
+      req.raw.off("close", onClientClose);
       reply.raw.end();
     }
     return reply;
@@ -1209,7 +1373,25 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf, { actorId: parsed.data.actorId });
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    return safe(reply, () => deps.map.travel(roomId, parsed.data.actorId, parsed.data.locId));
+    // 地图写操作必须和玩家回合/对话/自动时钟抢同一把房间锁，不能只做 isBusy 预检：
+    // 预检与真正写入之间还有调度窗口，玩家回合或时钟可以插进来。
+    return safe(reply, async () => {
+      let leave: (() => void) | undefined;
+      try {
+        leave = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000) : undefined;
+      } catch (e) {
+        if (e instanceof RoomBusyError) {
+          reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
+          return;
+        }
+        throw e;
+      }
+      try {
+        return await deps.map.travel(roomId, parsed.data.actorId, parsed.data.locId);
+      } finally {
+        leave?.();
+      }
+    });
   });
 
   app.post("/api/v1/rooms/:roomId/map/tick", async (req, reply) => {
@@ -1220,9 +1402,25 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    // viewer：出站事件按调用者自己的视角裁私忆（PR #149 P3）；未登录时由 MapService 回退到玩家角色
+    // 与 /turns、/conversation、自动时钟共用房间锁；只预检会被调度窗口穿透。
     const viewer = access.userId ? playerOf(access.state, access.userId) : undefined;
-    return safe(reply, () => deps.map.tick(roomId, { ...parsed.data, ...(viewer ? { viewer } : {}) }));
+    return safe(reply, async () => {
+      let leave: (() => void) | undefined;
+      try {
+        leave = deps.roomActivity ? await deps.roomActivity.acquire(roomId, 30_000) : undefined;
+      } catch (e) {
+        if (e instanceof RoomBusyError) {
+          reply.code(409).send({ ok: false, code: "E_TURN_BUSY", message: e.message });
+          return;
+        }
+        throw e;
+      }
+      try {
+        return await deps.map.tick(roomId, { ...parsed.data, ...(viewer ? { viewer } : {}) });
+      } finally {
+        leave?.();
+      }
+    });
   });
 
   app.post("/api/v1/rooms/:roomId/map/dialogue", async (req, reply) => {
@@ -1233,9 +1431,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf, { actorId: parsed.data.actorId });
     if (!access) return reply;
     if (actionsPaused(reply)) return reply;
-    return safe(reply, () =>
-      deps.map.openDialogue(roomId, parsed.data.actorId, parsed.data.sceneId, parsed.data.dialogueId),
-    );
+    // 场景对话只读快照 + 调导演，不产生落库提案（summary.proposals 未交 Arbiter），
+    // 因此不抢房间锁：否则一次 10–20s 的 LLM 会让玩家回合在 acquire 处排队/409。
+    // 若未来这里开始写世界状态，只把写操作包进 roomActivity.acquire，不要包整段 LLM。
+    return safe(reply, () => deps.map.openDialogue(roomId, parsed.data.actorId, parsed.data.sceneId, parsed.data.dialogueId));
   });
 
   app.post("/api/v1/map/drafts", (req, reply) => {

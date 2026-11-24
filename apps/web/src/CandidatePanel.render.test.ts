@@ -17,8 +17,7 @@ describe("CandidatePanel 按来源 kind 分组上色（issue #139）", () => {
         candidates,
         disabled: false,
         ready: true,
-        target: null,
-        onPick: () => undefined,
+        onActivate: () => undefined,
       }),
     );
     expect(html).toContain("class=\"candidate-chip kind-talk\"");

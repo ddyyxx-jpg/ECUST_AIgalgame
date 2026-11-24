@@ -6,6 +6,7 @@
  * 输入框的提示也跟着换 —— 但输入仍然是自然语言，不受对话对象限制。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { hudStats, isActionPointRow } from "./hud-stats.ts";
 import type { ViewPatch, WorldState } from "../../../packages/shared/src/contract/types.ts";
 import CampusMap from "./CampusMap.tsx";
 import CandidatePanel from "./CandidatePanel.tsx";
@@ -13,7 +14,7 @@ import InteriorMap from "./InteriorMap.tsx";
 import MiniMap from "./MiniMap.tsx";
 import { candidateKeyIndex } from "./candidate-keys.ts";
 import { buildCandidates } from "./candidates.ts";
-import type { SuggestionInput } from "./candidates.ts";
+import type { Candidate, SuggestionInput } from "./candidates.ts";
 import { getMap } from "./api.ts";
 import type { MapView } from "./api.ts";
 import { interiorFor, interiorNpcSpot } from "./interior.ts";
@@ -52,6 +53,10 @@ export interface ChatPanelProps {
   suggestions: SuggestionInput[];
   /** 提交候选行动；返回 send 的 Promise 时，数字键快选在 settle 后解除自锁（见 busyRef） */
   onPick: (text: string, target?: { id: string; name: string } | null) => Promise<void> | undefined;
+  /** 当前室内场景 id（App 持有，跨 tab 保留）；null = 校园大地图 */
+  inside: string | null;
+  /** 进入 / 退出室内地图 */
+  onInsideChange: (locId: string | null) => void;
   /** 点左上角小地图：展开全屏地图选点 */
   roomId: string;
   /** 状态版本号：与 GalleryPanel 一致，解锁 NPC 后据此重拉地图气泡 */
@@ -80,6 +85,10 @@ export interface ChatPanelProps {
   onSendUtterance?: (draft: UtteranceDraft) => void;
   /** v2 回合的乐观玩家行：等引擎把自己的 delivery 投回来就清掉（避免点了发送没反应） */
   pendingLines?: { kind: LineKind; text: string }[];
+  /** 行动点已归零：显示「推进时段」入口，避免玩家卡在“行动点不足”里找不到出口 */
+  zeroActionPoints?: boolean;
+  /** 推进时段（服务端 tick advance）：回满行动点 */
+  onRest?: () => void;
 }
 
 export default function ChatPanel({
@@ -107,22 +116,52 @@ export default function ChatPanel({
   waitingForInterjection = false,
   hasEarlier,
   loadingEarlier,
+  zeroActionPoints = false,
+  onRest,
   onLoadEarlier,
   v2Modes,
   onSendUtterance,
   onAutoRound,
   pendingLines,
+  inside: insideSceneId,
+  onInsideChange,
 }: ChatPanelProps) {
   const [talking, setTalking] = useState<{ id: string; name: string } | null>(null);
   /** 点击时记的是占位名；对方自报姓名解锁后，用权威状态里的真名覆盖标题/输入框 */
   const talkingName = talking ? (state?.entities[talking.id]?.name ?? talking.name) : "";
+  /**
+   * 候选自带 actorId 时按候选定向：否则在用「和X说话」候选时会沿用当前对话对象，
+   * 出现「对马骁说：和店主说话」这种目标与内容矛盾的台词。
+   */
+  /**
+   * 激活候选：talk 是“指名对象”，只切对话对象、不替玩家说话（否则会把「和店主说话」
+   * 本身当成一句台词发给对方，出现「对马骁说：和店主说话」这种自相矛盾的记录）。
+   */
+  const activateCandidate = (c: Candidate) => {
+    if (c.kind === "talk" && c.actorId) {
+      setTalking({ id: c.actorId, name: state?.entities[c.actorId]?.name ?? c.actorId });
+      return undefined;
+    }
+    return onPick(c.text, targetFor(c.actorId));
+  };
+  const targetFor = (actorId?: string) =>
+    actorId
+      ? { id: actorId, name: state?.entities[actorId]?.name ?? actorId }
+      : talking
+        ? { id: talking.id, name: talkingName }
+        : null;
   const [blocked, setBlocked] = useState<BlockedNpc | null>(null);
   /** 「前往 TA 所在地」成功后，等位置真的切过去再选中这个人（避免被换场景的清理 effect 覆盖） */
   const [pendingTalk, setPendingTalk] = useState<{ id: string; name: string; locId: string } | null>(null);
   const [travelling, setTravelling] = useState(false);
   const [map, setMap] = useState<MapView | null>(null);
-  /** 当前所在室内地图对应的场景 id；null = 在校园大地图 */
-  const [inside, setInside] = useState<string | null>(null);
+  /**
+   * 当前所在室内地图对应的场景 id；null = 在校园大地图。
+   * 这个标记必须由 App 持有：切「图鉴」等 tab 会卸载 ChatPanel（key={tab}），
+   * 本地 state 会丢，回来就落到大地图，看起来像「被传送到楼外」。
+   */
+  const inside = insideSceneId;
+  const setInside = onInsideChange;
   /** 刚点了入口、等世界状态真的走到该场景后再切渲染 */
   const [enteringInterior, setEnteringInterior] = useState<string | null>(null);
   /** v2 demo：当前说话类型（mode）与动作文本（action）；仅在 v2Modes 提供时显示 */
@@ -267,7 +306,6 @@ const PHASE_META: Record<string, { name: string; icon: string; color: string }> 
   evening: { name: "傍晚", icon: "◐", color: "#ff8f63" },
   night: { name: "夜里", icon: "☾", color: "#7ea6ff" },
 };
-const stats = (Object.values(panels ?? {})[0] ?? []).slice(0, 4);
 
   // 室内视图：当前场景是否挂了室内地图，以及馆内的 NPC（位置按索引落到馆内座位点）
   const insideInterior = inside ? interiorFor(inside) : null;
@@ -280,6 +318,9 @@ const stats = (Object.values(panels ?? {})[0] ?? []).slice(0, 4);
 
   // v2 demo：当前说话类型与本地校验（规则对齐引擎 delivery.ts，避免用户第一次点就吃 E_SCHEMA_INVALID）
   const v2Active = Boolean(v2Modes && v2Modes.length > 0 && onSendUtterance);
+  const panelRows = Object.values(panels ?? {})[0] ?? [];
+  // 行动点目前只覆盖 v1 /turns；v2 群聊模式显示 6/6 会骗人，直接隐藏。
+  const stats = hudStats(panelRows); // v2 也扣行动点（#153 复审 P1），必须显示
   const currentMode = v2Modes?.find((m) => m.id === mode);
   const draft = {
     mode,
@@ -316,10 +357,7 @@ const stats = (Object.values(panels ?? {})[0] ?? []).slice(0, 4);
       e.preventDefault();
       // 发给父组件后本帧内不再接第二发：setBusy(true) 的提交慢于本次事件
       busyRef.current = true;
-      const picked = onPick(
-        candidates[index - 1].text,
-        talking ? { id: talking.id, name: talkingName } : null,
-      );
+      const picked = activateCandidate(candidates[index - 1]);
       // 父组件返回 send 的 Promise：成功、失败、守卫提前返回都会在 settle 后解除自锁。
       // 不改成「只依赖 busy prop」：第二次按键可能早于 effect 同步 busy，会重新同帧连发；
       // 因此保留 ref，并补上这条确定性的复位路径。onPick 返回 undefined 时交给 busy effect。
@@ -332,7 +370,7 @@ const stats = (Object.values(panels ?? {})[0] ?? []).slice(0, 4);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [candidates, state, overlayOpen, talking, talkingName, onPick]);
+  }, [candidates, state, overlayOpen, talking, talkingName, onPick, activateCandidate]);
 
   return (
     <div className="world-page">
@@ -542,8 +580,7 @@ const stats = (Object.values(panels ?? {})[0] ?? []).slice(0, 4);
           candidates={candidates}
           disabled={busy}
           ready={Boolean(state)}
-          target={talking ? { id: talking.id, name: talkingName } : null}
-          onPick={onPick}
+          onActivate={activateCandidate}
         />
 
         {/* v2 demo：说话类型选择 + @谁（点场景里的 NPC 即 talking）。老流程无 v2Modes 时不显示。
@@ -580,6 +617,14 @@ const stats = (Object.values(panels ?? {})[0] ?? []).slice(0, 4);
         {v2Active && v2Touched && !v2Check.ok && (
           <div className="v2-hint" role="status">
             {v2Check.reason}
+          </div>
+        )}
+        {zeroActionPoints && onRest && (
+          <div className="action-rest" role="status">
+            <span>行动点已用完：休息一下推进时段，行动点会回满。</span>
+            <button type="button" className="btn" onClick={onRest} disabled={busy}>
+              推进时段
+            </button>
           </div>
         )}
         <form

@@ -146,6 +146,26 @@
       "default": false,
       "visibility": "public",
       "display": { "label": "认识" }
+    },
+    {
+      "key": "action_points",
+      "type": "number",
+      "scope": ["plr"],
+      "min": 0,
+      "max": 6,
+      "default": 6,
+      "visibility": "public",
+      "display": { "label": "行动点", "unit": "次" },
+      "desc": "玩家每个时段可行动的次数；普通回合消耗 1 点，归零后只能休息推进时段（content/sim/policy.json 配置）"
+    },
+    {
+      "key": "sim_lease",
+      "type": "string",
+      "scope": ["npc"],
+      "default": "",
+      "visibility": "self",
+      "display": { "label": "行动租约", "hidden": true },
+      "desc": "NPC 当前动作的租约（JSON 字符串：action/target/remaining/phase；action 可为 move/stay/talk，talk 额外带 resume 原租约）；为空表示空闲。由 map 模块 tick 维护"
     }
   ]
 }

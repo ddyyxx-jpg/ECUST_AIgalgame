@@ -78,6 +78,24 @@ describe("v2 NPC agent（每个 NPC 独立一次 LLM）", () => {
     expect(capped.decision.kind === "think" || capped.decision.kind === "silent").toBe(true);
   });
 
+  it("世界观：作者注进静态段、关键词条目按传入顺序成段", () => {
+    const prompt = buildNpcPrompt(
+      { ...base, world: { authorNote: "白描克制，不替不在场的人说话", entries: ["图书馆 22:00 闭馆", "宿舍 23:30 熄灯"] } },
+      modes,
+      policy,
+    );
+    expect(prompt).toContain("【作者注】白描克制");
+    expect(prompt).toContain("【世界设定·关键词触发】");
+    expect(prompt.indexOf("- 图书馆 22:00 闭馆")).toBeLessThan(prompt.indexOf("- 宿舍 23:30 熄灯"));
+    // 作者注在动态段之前；世界设定在静态段末尾（前缀仍可被 KV 缓存）
+    expect(prompt.indexOf("【作者注】")).toBeLessThan(prompt.indexOf("【你】"));
+    expect(prompt.indexOf("【世界设定·关键词触发】")).toBeLessThan(prompt.indexOf("【你】"));
+    // 不传 world 时不出现这两段
+    const plain = buildNpcPrompt({ ...base }, modes, policy);
+    expect(plain).not.toContain("【作者注】");
+    expect(plain).not.toContain("【世界设定·关键词触发】");
+  });
+
   it("非 JSON 输出降级 silent；提示词静态协议在动态段之前", async () => {
     const llm = new MockLlm({ responses: ["不是 JSON"] });
     const r = await new NpcAgent({ llm, modes, policy }).decide({ ...base });

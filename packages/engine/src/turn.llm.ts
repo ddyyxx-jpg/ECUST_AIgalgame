@@ -22,6 +22,10 @@ export interface TurnLlmDeps {
   registry?: Registry;
   /** 自定义提示词；**必须**用上第 4 个参数 mem，否则记忆注入会被静默丢掉（docs/08 §5.2） */
   buildPrompt?: (state: WorldState, actorId: ActorId, input: string, mem?: MemoryContext) => string | Promise<string>;
+  worldInfo?: (state: WorldState, actorId: ActorId, input: string) => {
+    authorNote?: string;
+    entries: readonly string[];
+  };
 }
 
 export interface LlmProduct {
@@ -82,6 +86,7 @@ export class TurnLlm {
   private async askOnce(req: TurnRequest, state: WorldState, kind: RealityKind | null, mem?: MemoryContext): Promise<LlmProduct> {
     const res = await this.deps.llm.chat({
       json: true,
+      purpose: "turn",
       messages: [
         { role: "system", content: await this.prompt(state, req.actorId, req.input, kind, mem) },
         { role: "user", content: req.input },
@@ -109,6 +114,7 @@ export class TurnLlm {
     try {
       const res = await this.deps.llm.chat({
         json: true,
+        purpose: "turn",
         messages: [
           { role: "system", content: await this.prompt(state, req.actorId, req.input, kind, mem) },
           { role: "user", content: req.input },
@@ -173,10 +179,13 @@ export class TurnLlm {
 
   private async prompt(state: WorldState, actorId: ActorId, input: string, kind: RealityKind | null, mem?: MemoryContext): Promise<string> {
     if (this.deps.buildPrompt) return await this.deps.buildPrompt(state, actorId, input, mem);
+    const extra = this.deps.worldInfo?.(state, actorId, input);
     return buildTurnPrompt(state, actorId, input, {
       framing: realityFraming(this.deps.reality, kind),
       ...(mem ? { mem } : {}),
       ...(this.deps.registry ? { registry: this.deps.registry } : {}),
+      ...(extra?.authorNote ? { authorNote: extra.authorNote } : {}),
+      ...(extra?.entries.length ? { worldInfo: extra.entries } : {}),
     });
   }
 }

@@ -3,7 +3,7 @@
  *
  * docs/03 §5.2.5 明确两条通道不可混用：
  * - /state 是权威原状态通道，返回实体 attrs 原值（含 self/secret 的精确值），
- *   只按一级认识口径做名字脱敏，不做 visibility 过滤；
+ *   只按一级认识口径做名字脱敏、并剥掉引擎内部 sim_lease，不做 visibility 过滤；
  * - GalleryView 才是读数视图：public→exact，secret→band（无 value/ratio），
  *   self 对他人→数值 band / 文本 masked（本版本无"看自己"视图）。
  *
@@ -50,7 +50,7 @@ function world(): WorldState {
       loc_lib: entity("loc_lib", "loc", "图书馆", {}),
       [PLR]: entity(PLR, "plr", "你", { stamina: 55, trust: 42, guard: 11 }),
       // knows_name=true：图鉴解锁读数；self/secret 都写入了具体值，用来验证两条通道口径
-      [NPC]: entity(NPC, "npc", "林静", { knows_name: true, stamina: 80, trust: 64, mood: "平静", guard: 73, stress: 35 }),
+      [NPC]: entity(NPC, "npc", "林静", { knows_name: true, stamina: 80, trust: 64, mood: "平静", guard: 73, stress: 35, sim_lease: '{"action":"move","target":"loc_canteen","remaining":1,"phase":"morning"}' }),
       [STRANGER]: entity(STRANGER, "npc", "白晓通", { knows_name: false, trust: 90 }),
     },
     links: [
@@ -64,7 +64,7 @@ function world(): WorldState {
 }
 
 describe("/state 原始 attrs 通道（docs/03 §5.2.5）", () => {
-  it("任何角色的 attrs 都原样返回：self/secret 精确值不被过滤，只做名字脱敏", async () => {
+  it("attrs 原样返回（self/secret 精确值不被过滤），只做名字脱敏并剥引擎内部 sim_lease", async () => {
     const app = Fastify();
     registerRoutes(app, {
       store: { snapshot: async () => world(), listRooms: async () => [ROOM], events: async () => [] },
@@ -84,6 +84,8 @@ describe("/state 原始 attrs 通道（docs/03 §5.2.5）", () => {
 
     // npc：secret=guard、self=trust/mood/stress 的精确值都在（/state 不做 visibility 过滤）
     expect(entities[NPC]?.attrs).toMatchObject({ guard: 73, trust: 64, mood: "平静", stress: 35, stamina: 80 });
+    // sim_lease 是引擎内部动作租约（含下一步目标），不能随 /state 出站
+    expect(entities[NPC]?.attrs).not.toHaveProperty("sim_lease");
     // plr：self 视角下自己的 self/secret 同样原样返回
     expect(entities[PLR]?.attrs).toMatchObject({ trust: 42, guard: 11 });
 
@@ -94,6 +96,35 @@ describe("/state 原始 attrs 通道（docs/03 §5.2.5）", () => {
     // 不是读数视图：没有 GalleryStat 结构混入
     expect(JSON.stringify(body)).not.toContain('"display"');
     expect(JSON.stringify(body)).not.toContain('"band"');
+    expect(JSON.stringify(body)).not.toContain("sim_lease");
+    await app.close();
+  });
+});
+
+describe("/events 的 sim_lease 裁剪（结构断言）", () => {
+  it("attr.changed(key=sim_lease) 整条不出站，普通属性事件保留", async () => {
+    const events = [
+      { v: 1, id: "evt_lease", roomId: ROOM, seq: 1, ts: 1, actorId: "system", type: "attr.changed", payload: { entityId: NPC, key: "sim_lease", from: "", to: '{"action":"talk","resume":"{}"}', clamped: false } },
+      { v: 1, id: "evt_stamina", roomId: ROOM, seq: 2, ts: 1, actorId: "system", type: "attr.changed", payload: { entityId: NPC, key: "stamina", from: 80, to: 79, clamped: false } },
+      { v: 1, id: "evt_lease2", roomId: ROOM, seq: 3, ts: 1, actorId: "system", type: "attr.changed", payload: { entityId: NPC, key: "sim_lease", from: "{}", to: "", clamped: false } },
+    ];
+    const app = Fastify();
+    registerRoutes(app, {
+      store: { snapshot: async () => world(), listRooms: async () => [ROOM], events: async () => events },
+      turn: {},
+      map: {},
+      registry: await realRegistry(),
+      settings: { view: () => ({ mode: "offline", baseUrl: "", model: "", persisted: false }), apply: async () => ({ ok: false }), clear: async () => undefined },
+      createRoom: async () => ({ roomId: ROOM, actorId: PLR }),
+      version: "test",
+    } as unknown as AppDeps);
+    await app.ready();
+    const res = await app.inject({ method: "GET", url: `/api/v1/rooms/${ROOM}/events?fromSeq=0` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { events: { type: string; payload: { key?: string } }[]; lastSeq: number };
+    expect(body.events.map((e) => e.payload.key)).toEqual(["stamina"]);
+    expect(body.lastSeq).toBe(3);
+    expect(JSON.stringify(body)).not.toContain("sim_lease");
     await app.close();
   });
 });
@@ -133,5 +164,24 @@ describe("GalleryView 的 self 对他人口径（docs/03 §5.2.5，结构断言�
       expect(stat).not.toHaveProperty("ratio");
       expect(stat).not.toHaveProperty("text");
     }
+  });
+});
+
+describe("attr.changed 出站裁剪", () => {
+  it("丢弃 sim_lease 的历史事件，普通属性事件保留", async () => {
+    const { projectEventForPlayer } = await import("./outbound-secrets.ts");
+    const base = { v: 1, id: "evt_x", roomId: ROOM, seq: 1, ts: 1, actorId: "system" } as const;
+    const lease = {
+      ...base,
+      type: "attr.changed",
+      payload: { entityId: NPC, key: "sim_lease", from: "", to: "{\"action\":\"talk\"}", clamped: false },
+    };
+    expect(projectEventForPlayer(lease as never)).toBeUndefined();
+    const stamina = {
+      ...base,
+      type: "attr.changed",
+      payload: { entityId: NPC, key: "stamina", from: 100, to: 90, clamped: false },
+    };
+    expect(projectEventForPlayer(stamina as never)).not.toBeUndefined();
   });
 });

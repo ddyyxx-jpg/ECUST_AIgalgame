@@ -37,6 +37,8 @@ export interface ConversationDeps {
   scene: SceneManager;
   npc: NpcAgent;
   audit: ConversationAudit;
+  /** 可选：玩家每回合消耗的行动点（与 v1 `TurnActionPolicy` 同源；缺省不扣点） */
+  actionPolicy?: { attrKey: string; costPerTurn: number };
   /** dev/v2 可选：与 GossipHost 共用的发言/调用预算 */
   budget?: import("./talk-budget.ts").TalkBudget;
   wakeOnMultiTarget?: boolean;

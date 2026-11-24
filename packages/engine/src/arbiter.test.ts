@@ -192,6 +192,21 @@ describe("Arbiter · 时钟与记忆", () => {
     expect(ok.events[0]?.payload).toMatchObject({ clock: { day: 1, phase: "night", tick: 0 } });
   });
 
+  it("ticks 与 zod 对齐：只接受 1..8，0 与 9 都拒绝", async () => {
+    const { arbiter } = setup();
+    const tick = (id: string) => ({ ...cause(id, "system"), type: "tick.night" as const });
+    const zero = await arbiter.apply(ROOM, [{ op: "time.advance", args: { ticks: 0 } }], tick("evt_tick_t0"));
+    expect(zero.rejected[0]?.code).toBe("E_SCHEMA_INVALID");
+    const nine = await arbiter.apply(ROOM, [{ op: "time.advance", args: { ticks: 9 } }], tick("evt_tick_t9"));
+    expect(nine.rejected[0]?.code).toBe("E_SCHEMA_INVALID");
+    const eight = await arbiter.apply(ROOM, [{ op: "time.advance", args: { ticks: 8 } }], tick("evt_tick_t8"));
+    expect(eight.ok).toBe(true);
+    expect(eight.events[0]?.payload).toMatchObject({ clock: { tick: 8 } });
+    // 「跳到指定 phase」内部用 0，不受影响
+    const phase = await arbiter.apply(ROOM, [{ op: "time.advance", args: { phase: "noon" } }], tick("evt_tick_tp"));
+    expect(phase.ok).toBe(true);
+  });
+
   it("memory.write 只能写自己的记忆；导演代写按信封来源判定", async () => {
     const { arbiter } = setup();
     const own = await arbiter.apply(ROOM, [{ op: "memory.write", args: { ownerId: NPC, content: "他好像知道我昨晚在图书馆" }, by: "npc.director" }], cause());

@@ -46,6 +46,15 @@ import { impressionFact } from "./impressions.ts";
 /** 回合后低频 compact（#42）：每 N 个已提交回合触发一次，避免每回合都排序/归档 */
 const COMPACT_EVERY = 5;
 
+/**
+ * 行动点策略：键名由内容层（content/sim/policy.json）提供，引擎不认具体属性名（I2）。
+ * 只在玩家实体已经有这个属性时生效——老存档缺属性不会被凭空拦住。
+ */
+export interface TurnActionPolicy {
+  attrKey: string;
+  costPerTurn: number;
+}
+
 export interface TurnDeps {
   store: EventLog;
   arbiter: DefaultArbiter;
@@ -72,6 +81,16 @@ export interface TurnDeps {
   impressions?: Impressions;
   /** 组装提示词；默认实现见 turn.prompt。**必须**接收并使用第 4 个参数 mem（记忆注入） */
   buildPrompt?: (state: WorldState, actorId: ActorId, input: string, mem?: MemoryContext) => string | Promise<string>;
+  /**
+   * 房间级提示词补充（作者注 / 关键词触发的世界设定），在组装提示词时按当前状态与输入选取。
+   * 只影响"给 LLM 看什么"，不产生状态变更；由 server 的内容加载器实现。
+   */
+  worldInfo?: (state: WorldState, actorId: ActorId, input: string) => {
+    authorNote?: string;
+    entries: readonly string[];
+  };
+  /** 行动点策略；不注入 = 不扣点、不拦截（测试/旧存档兼容） */
+  actionPolicy?: TurnActionPolicy;
 }
 
 export class DefaultTurn implements Turn {
@@ -141,6 +160,7 @@ export class DefaultTurn implements Turn {
       reality: this.reality,
       registry: deps.registry,
       ...(deps.buildPrompt ? { buildPrompt: deps.buildPrompt } : {}),
+      ...(deps.worldInfo ? { worldInfo: deps.worldInfo } : {}),
     });
     this.gate = new AuditGate({
       arbiter: deps.arbiter,
@@ -200,6 +220,30 @@ export class DefaultTurn implements Turn {
       yield emit({ type: "turn.error", code: "E_FORBIDDEN", message: "该玩家档案已因多次严重违规被删除，无法继续游戏。", retryable: false });
       return;
     }
+
+    // 行动点：只对"实体已经有这个属性"的玩家生效（老存档缺属性不拦）；归零必须休息，
+    // 休息入口是地图 tick（advance=true），由服务端按同一份策略回满。
+    const actionPolicy = this.deps.actionPolicy;
+    const actionKey = actionPolicy?.attrKey;
+    const actionCost = actionPolicy?.costPerTurn ?? 0;
+    const actionNow = actionKey ? state0.entities[req.actorId]?.attrs[actionKey] : undefined;
+    const chargeAction = typeof actionNow === "number" && actionCost > 0;
+    if (chargeAction && actionNow < actionCost) {
+      yield emit({
+        type: "turn.error",
+        code: "E_PRECONDITION",
+        message: `行动点不足（${actionNow}/${actionCost}），请先休息推进时段。`,
+        retryable: false,
+      });
+      return;
+    }
+    const costOps: Proposal[] = chargeAction && actionKey
+      ? [{
+        op: "attr.delta",
+        args: { entityId: req.actorId, key: actionKey, delta: -actionCost, mustKeep: true },
+        reason: "行动消耗",
+      }]
+      : [];
 
     yield emit({ type: "turn.accepted", turnId });
 
@@ -284,7 +328,7 @@ export class DefaultTurn implements Turn {
           const onlyMemory = result.rejected.every((r) => memoryProposals.includes(r.proposal));
           if (onlyMemory) {
             memoryRejected = true;
-            const retryOps = [...moduleProposals, ...llmProposals];
+            const retryOps = [...costOps, ...moduleProposals, ...llmProposals];
             result = await this.deps.arbiter.apply(req.roomId, retryOps, causeForBudget, {
               expectedSeq, turnBudget, commitEvidence: evidence, captureState: true,
               expectAttrs: expectAttrsFor(state0, retryOps),
@@ -294,7 +338,7 @@ export class DefaultTurn implements Turn {
         return result;
       };
 
-      let applied = await applyBatch([...moduleProposals, ...llmProposals, ...memoryProposals], seqNow);
+      let applied = await applyBatch([...costOps, ...moduleProposals, ...llmProposals, ...memoryProposals], seqNow);
 
       // ② 一次修复：只有"模型给的提案"坏了才值得再问一次；模块的提案坏了属于代码 bug
       let repairError = "";
@@ -343,7 +387,7 @@ export class DefaultTurn implements Turn {
               memoryDropped = memoryPlan.dropped;
             }
             applied = await applyBatch(
-              [...moduleProposals, ...llmProposals, ...memoryProposals],
+              [...costOps, ...moduleProposals, ...llmProposals, ...memoryProposals],
               this.deps.store.seq(req.roomId),
             );
           }
