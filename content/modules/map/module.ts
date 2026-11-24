@@ -252,7 +252,8 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
         proposals.push(leaseProposal(npcId, null, `${npc.name}结束停留`));
         continue;
       }
-      // move 租约到期：真正执行移动，然后转成 2 tick 的停留占用。
+      // move 租约到期：一 tick 只走一跳，走完把 move 租约续上；真正到达才转停留。
+      // 试玩反馈：原先一 tick 把整条 bfs 路径逐跳推完，玩家只看到 NPC 在两地之间瞬移。
       if (from === lease.target) {
         proposals.push(leaseProposal(npcId, { action: "stay", target: lease.target, remaining: 2, phase }, `${npc.name}在${nameOf(ctx, lease.target)}停留`));
         continue;
@@ -262,14 +263,22 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
         proposals.push(leaseProposal(npcId, null, `${npc.name}的目的地不可达，取消动作`));
         continue;
       }
-      proposals.push(leaseProposal(npcId, { action: "stay", target: lease.target, remaining: 2, phase }, `${npc.name}到达${nameOf(ctx, lease.target)}`));
-      for (const hop of leasePath.slice(1)) {
-        proposals.push({ op: "move.to", args: { actorId: npcId, locId: hop }, reason: `${npc.name}前往${nameOf(ctx, hop)}`, by: BY });
-        const coord = coordOf(ctx, hop);
-        proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_X, value: coord.x }, reason: `${npc.name}坐标`, by: BY });
-        proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_Y, value: coord.y }, reason: `${npc.name}坐标`, by: BY });
-      }
-      finalLoc.set(npcId, lease.target);
+      const leaseHop = leasePath[1];
+      const leaseArrived = leaseHop === lease.target;
+      proposals.push(
+        leaseProposal(
+          npcId,
+          leaseArrived
+            ? { action: "stay", target: lease.target, remaining: 2, phase }
+            : { action: "move", target: lease.target, remaining: 1, phase },
+          leaseArrived ? `${npc.name}到达${nameOf(ctx, lease.target)}` : `${npc.name}继续赶路`,
+        ),
+      );
+      proposals.push({ op: "move.to", args: { actorId: npcId, locId: leaseHop }, reason: `${npc.name}前往${nameOf(ctx, leaseHop)}`, by: BY });
+      const leaseCoord = coordOf(ctx, leaseHop);
+      proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_X, value: leaseCoord.x }, reason: `${npc.name}坐标`, by: BY });
+      proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_Y, value: leaseCoord.y }, reason: `${npc.name}坐标`, by: BY });
+      finalLoc.set(npcId, leaseHop);
       continue;
     }
 
@@ -291,15 +300,24 @@ function tickProposals(ctx: ModuleContext, phase: Phase): Proposal[] {
       if (old) proposals.push(leaseProposal(npc.id, null, "目的地不可达，结束租约"));
       continue;
     }
-    // 先写租约，再写移动：末尾两条仍应是坐标，方便既有测试与前端按"最后一跳"定位
-    proposals.push(leaseProposal(npcId, { action: "move", target: targetId, remaining: 1, phase }, `${npc.name}前往${nameOf(ctx, targetId)}`));
-    for (const hop of path.slice(1)) {
-      proposals.push({ op: "move.to", args: { actorId: npcId, locId: hop }, reason: `${npc.name}前往${nameOf(ctx, hop)}`, by: BY });
-      const coord = coordOf(ctx, hop);
-      proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_X, value: coord.x }, reason: `${npc.name}坐标`, by: BY });
-      proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_Y, value: coord.y }, reason: `${npc.name}坐标`, by: BY });
-    }
-    finalLoc.set(npcId, targetId);
+    // 一 tick 只走一跳：先写 move 租约（下一 tick 从新位置继续），再写这一跳的移动与坐标。
+    // 这样 NPC 在玩家看来是一格一格走过去的，而不是同一 tick 内瞬移到日程终点。
+    const hop = path[1];
+    const arrived = hop === targetId;
+    proposals.push(
+      leaseProposal(
+        npcId,
+        arrived
+          ? { action: "stay", target: targetId, remaining: 2, phase }
+          : { action: "move", target: targetId, remaining: 1, phase },
+        arrived ? `${npc.name}到达${nameOf(ctx, targetId)}` : `${npc.name}前往${nameOf(ctx, targetId)}`,
+      ),
+    );
+    proposals.push({ op: "move.to", args: { actorId: npcId, locId: hop }, reason: `${npc.name}前往${nameOf(ctx, hop)}`, by: BY });
+    const coord = coordOf(ctx, hop);
+    proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_X, value: coord.x }, reason: `${npc.name}坐标`, by: BY });
+    proposals.push({ op: "attr.set", args: { entityId: npcId, key: COORD_Y, value: coord.y }, reason: `${npc.name}坐标`, by: BY });
+    finalLoc.set(npcId, hop);
   }
   if (proposals.length === 0 || finalLoc.size === 0) return proposals;
 

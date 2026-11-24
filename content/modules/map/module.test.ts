@@ -181,20 +181,23 @@ describe("map.look", () => {
 });
 
 describe("tick（NPC 日程）", () => {
-  it("night：三个 NPC 各自沿最短路移动、坐标落到终点，末尾 scene.set 保住玩家镜头", async () => {
+  it("night：一 tick 只走一跳（不瞬移）、坐标落在这一跳，末尾 scene.set 保住玩家镜头", async () => {
     const state = buildRoom();
     const out = await mod.tick!(ctxOf(state), "night");
     expectLegalOps(out);
+    // zhou 已在 teaching_1，到 dorm3 只需一跳；lin/ma 各走第一跳（食堂）
     expect(movesOf(out, "npc_zhou")).toEqual(["loc_dorm3"]);
-    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
-    expect(movesOf(out, "npc_ma")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
-    // 每个 NPC 的最终坐标 = 终点场景坐标（dorm3 240,520）
-    for (const npcId of ["npc_zhou", "npc_lin", "npc_ma"]) {
+    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen"]);
+    expect(movesOf(out, "npc_ma")).toEqual(["loc_canteen"]);
+    const leaseOf = (id: string) =>
+      JSON.parse(String(out.filter((p) => p.op === "attr.set" && p.args.entityId === id && p.args.key === "sim_lease").at(-1)!.args.value));
+    // 到达者转 stay 2；还在路上的人保持 move 租约，下一 tick 从新位置继续
+    expect(leaseOf("npc_zhou")).toMatchObject({ action: "stay", target: "loc_dorm3", remaining: 2 });
+    expect(leaseOf("npc_lin")).toMatchObject({ action: "move", target: "loc_dorm3", remaining: 1 });
+    // 每条移动后面紧跟这一跳的坐标（最后两条仍是坐标，前端按“最后一跳”定位）
+    for (const npcId of ["npc_lin", "npc_ma"]) {
       const sets = out.filter((p) => p.op === "attr.set" && p.args.entityId === npcId);
-      expect(sets.slice(-2).map((p) => [p.args.key, p.args.value])).toEqual([
-        ["coord_x", 4300],
-        ["coord_y", 1650],
-      ]);
+      expect(sets.slice(-2).map((p) => p.args.key)).toEqual(["coord_x", "coord_y"]);
     }
     // 镜头保护：最后一条必须是玩家所在地，presentIds 只含玩家（没有 NPC 留在教室）
     const last = out.at(-1)!;
@@ -287,7 +290,7 @@ describe("tick（NPC 日程）", () => {
     const leases = out.filter((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
     expect(leases).toHaveLength(1);
     expect(JSON.parse(String(leases[0]!.args.value))).toMatchObject({ action: "move", target: "loc_dorm3", phase: "night" });
-    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
+    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen"]);
   });
 
   it("跨 phase 的 talk 租约视为过期：清空并按新 phase 重排", async () => {
@@ -303,7 +306,7 @@ describe("tick（NPC 日程）", () => {
     const leases = out.filter((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
     expect(leases).toHaveLength(1);
     expect(JSON.parse(String(leases[0]!.args.value))).toMatchObject({ action: "move", target: "loc_dorm3", phase: "night" });
-    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
+    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen"]);
   });
 
   it("坏租约 JSON 当空闲处理，不阻塞 NPC 重排", async () => {
@@ -312,7 +315,7 @@ describe("tick（NPC 日程）", () => {
     state.links = state.links.filter((l) => !(l.kind === "located_in" && l.from === "npc_lin"));
     state.links.push(located("npc_lin", "loc_library"));
     const out = await mod.tick!(ctxOf(state), "night");
-    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen", "loc_teaching_1", "loc_dorm3"]);
+    expect(movesOf(out, "npc_lin")).toEqual(["loc_canteen"]);
     const lease = out.find((p) => p.op === "attr.set" && p.args.entityId === "npc_lin" && p.args.key === "sim_lease");
     expect(JSON.parse(String(lease!.args.value))).toMatchObject({ action: "move", target: "loc_dorm3", phase: "night" });
   });

@@ -27,9 +27,21 @@
 
 ### 已知边界
 - `travel` 可达性预检改用 `content/modules/map/path.ts` 的同一套 BFS（多跳合法）：不可达在回合前直接 `E_NOT_ADJACENT`，不跑 Turn、不扣行动点；“可达但模块没走动”的异常路径会提交并扣点，随后按前后快照差额退还并返回 `E_PRECONDITION`。
-- 旧存档没有 `action_points` 时不强制扣点；自动时钟默认关闭，需在 `content/sim/policy.json` 显式开启。
+- 旧存档没有 `action_points` 时不强制扣点；自动时钟与 NPC 自由活动默认关闭，需在 `content/sim/policy.json` 显式开启（本地试玩分支已开启）。
 - 房间活动锁覆盖 `/turns`、`/conversation`、自动时钟与地图 HTTP 写入口；锁是进程内计数，只支持 `data/` 单进程单写者部署，多进程/多 worker 不在支持范围；直接调用 `MapService.tick` 的运维/测试脚本仍不在锁内（服务层是可信调用）。底层 tick 超过超时仍不 settle 时只告警、保持房间锁定（宁可 409 也不让两份写入交错）；v1 `/turns` 的额度预留移到拿锁成功之后，等锁失败不再留下账本记录。
 - 单房间 tick 超过 30s 时只停止等待、不取消底层执行；在该 Promise settle 前，同房间的后续拍会跳过，避免重复排队。
+
+### 试玩反馈修复
+
+> 依据试玩反馈修的表现层/内容层问题；不改契约、不新增 op、不改引擎。
+
+- **点图鉴回来被送回楼外**：室内标记 `inside` 原本是 `ChatPanel` 本地 state，切 tab 会卸载组件（`key={tab}`）而丢失，回来就落到大地图。现在 `insideSceneId` 提升到 `App`，跨 tab 保留，`resetRoomUi` 时清空。
+- **小地图传送后场景不变**：`App.refreshState()` 原来只补 `view.position.actors` 的名字，不更新 locId/name/exits；`travel` 只返回 `{scene,events,map}`，也不带 ViewPatch。现在用 `positionFromState(state, actorId)` 整体重建位置（依赖数组补 `actorId`）。
+- **候选行动里不该出现「去操场」**：`suggestions.ts` 的候选池只保留在场 NPC 的对话；开局剧本 `kind:"move"` 的建议也在 `App` 过滤。走哪扇门、去哪一律由玩家点地图/门。
+- **行动点耗尽后卡死**：行动点为 0 时 travel 被 `Turn` 以 `E_PRECONDITION` 拒绝，而「推进时段」入口原来只在地图面板。现在聊天区在行动点为 0 时显示提示条与「推进时段」按钮（`App.restPhase` → `map.tick{advance}` 回满），行动点判定以权威 `state` 为准，tick 后同步回写面板行。
+- **NPC 自由行动不运行**：`content/sim/policy.json` 里 `clock.enabled` 与 `decision.enabled` 双关，而 `NpcDecisionService` 唯一入口是 `SimClock.beforeTick`。现在两者开启（45s/拍、只推 tick 不切 phase；每 2 tick 决策一次、每拍最多 2 人、每小时 12 次）。
+- **NPC 瞬移**：`content/modules/map/module.ts` 的租约与日程两条移动路径原本在同一 tick 把整条 BFS 路径逐跳推进同一批。现在每个 tick 只走一跳（只产 `path[1]` 与该跳坐标），真正到达目标才转 2 tick 的 `stay`；`docs/06-地图模块.md` 同步。N 跳目的地需要 N 个有效 tick。
+- **可观测性**：`apps/server/src/map.ts` 的 travel 领域拒绝（如行动点不足）补一条 `console.warn`，后台能看到被拒原因，不再静默。
 
 ## 未发布 — #151 复审两条 P1（`busy` 时自动进出室内）
 

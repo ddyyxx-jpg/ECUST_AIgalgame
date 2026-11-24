@@ -9,15 +9,15 @@
     "refillOnPhaseAdvance": true
   },
   "clock": {
-    "enabled": false,
-    "intervalMs": 60000,
+    "enabled": true,
+    "intervalMs": 45000,
     "ticksPerBeat": 1,
     "maxTick": 24
   },
   "decision": {
-    "enabled": false,
+    "enabled": true,
     "maxPerBeat": 2,
-    "intervalTicks": 6,
+    "intervalTicks": 2,
     "hourlyCalls": 12,
     "maxOptions": 4
   }

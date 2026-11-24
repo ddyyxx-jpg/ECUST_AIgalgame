@@ -53,6 +53,10 @@ export interface ChatPanelProps {
   suggestions: SuggestionInput[];
   /** 提交候选行动；返回 send 的 Promise 时，数字键快选在 settle 后解除自锁（见 busyRef） */
   onPick: (text: string, target?: { id: string; name: string } | null) => Promise<void> | undefined;
+  /** 当前室内场景 id（App 持有，跨 tab 保留）；null = 校园大地图 */
+  inside: string | null;
+  /** 进入 / 退出室内地图 */
+  onInsideChange: (locId: string | null) => void;
   /** 点左上角小地图：展开全屏地图选点 */
   roomId: string;
   /** 状态版本号：与 GalleryPanel 一致，解锁 NPC 后据此重拉地图气泡 */
@@ -81,6 +85,10 @@ export interface ChatPanelProps {
   onSendUtterance?: (draft: UtteranceDraft) => void;
   /** v2 回合的乐观玩家行：等引擎把自己的 delivery 投回来就清掉（避免点了发送没反应） */
   pendingLines?: { kind: LineKind; text: string }[];
+  /** 行动点已归零：显示「推进时段」入口，避免玩家卡在“行动点不足”里找不到出口 */
+  zeroActionPoints?: boolean;
+  /** 推进时段（服务端 tick advance）：回满行动点 */
+  onRest?: () => void;
 }
 
 export default function ChatPanel({
@@ -108,11 +116,15 @@ export default function ChatPanel({
   waitingForInterjection = false,
   hasEarlier,
   loadingEarlier,
+  zeroActionPoints = false,
+  onRest,
   onLoadEarlier,
   v2Modes,
   onSendUtterance,
   onAutoRound,
   pendingLines,
+  inside: insideSceneId,
+  onInsideChange,
 }: ChatPanelProps) {
   const [talking, setTalking] = useState<{ id: string; name: string } | null>(null);
   /** 点击时记的是占位名；对方自报姓名解锁后，用权威状态里的真名覆盖标题/输入框 */
@@ -122,8 +134,13 @@ export default function ChatPanel({
   const [pendingTalk, setPendingTalk] = useState<{ id: string; name: string; locId: string } | null>(null);
   const [travelling, setTravelling] = useState(false);
   const [map, setMap] = useState<MapView | null>(null);
-  /** 当前所在室内地图对应的场景 id；null = 在校园大地图 */
-  const [inside, setInside] = useState<string | null>(null);
+  /**
+   * 当前所在室内地图对应的场景 id；null = 在校园大地图。
+   * 这个标记必须由 App 持有：切「图鉴」等 tab 会卸载 ChatPanel（key={tab}），
+   * 本地 state 会丢，回来就落到大地图，看起来像「被传送到楼外」。
+   */
+  const inside = insideSceneId;
+  const setInside = onInsideChange;
   /** 刚点了入口、等世界状态真的走到该场景后再切渲染 */
   const [enteringInterior, setEnteringInterior] = useState<string | null>(null);
   /** v2 demo：当前说话类型（mode）与动作文本（action）；仅在 v2Modes 提供时显示 */
@@ -583,6 +600,14 @@ const PHASE_META: Record<string, { name: string; icon: string; color: string }> 
         {v2Active && v2Touched && !v2Check.ok && (
           <div className="v2-hint" role="status">
             {v2Check.reason}
+          </div>
+        )}
+        {zeroActionPoints && onRest && (
+          <div className="action-rest" role="status">
+            <span>行动点已用完：休息一下推进时段，行动点会回满。</span>
+            <button type="button" className="btn" onClick={onRest} disabled={busy}>
+              推进时段
+            </button>
           </div>
         )}
         <form

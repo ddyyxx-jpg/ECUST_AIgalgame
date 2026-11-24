@@ -311,7 +311,13 @@ export class MapService {
     } catch (e) {
       return this.outbound(fail(codeOfError(e), e instanceof Error ? e.message : String(e)), roomId, state);
     }
-    if (failure) return this.outbound(failure, roomId, state);
+    if (failure) {
+      // 行动点耗尽等是领域拒绝而非异常；留一条可观测日志，避免「后台看不到报错」。
+      if (failure.code === "E_PRECONDITION") {
+        console.warn(`[map] travel 拒绝：room=${roomId} actor=${actor} loc=${locId} code=${failure.code} message=${failure.message}`);
+      }
+      return this.outbound(failure, roomId, state);
+    }
 
     const patch = events.find((event) => event.type === "turn.patch");
     const after = patch?.state ?? await this.deps.store.snapshot(roomId);

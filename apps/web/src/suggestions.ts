@@ -70,11 +70,16 @@ export function candidatePosition(pos: Pos | undefined, state: WorldState | null
   return positionFromState(state, selfId) ?? pos;
 }
 
-/** 候选池：当前场景能去的地方 + 能说话的人（自己除外，不在场的人不算） */
+/**
+ * 候选池：只放「能和谁说句话」（自己除外，不在场的人不算）。
+ *
+ * 场景移动一律不進候选：走哪个门、什么时候走由玩家自己在地图/场景里点，
+ * 候选按钮只做“输入辅助”，不替玩家做移动决定（试玩反馈：候选人里出现「去操场」，
+ * 一点就把人搬走，和手动地图传送抢控制权）。
+ */
 function buildPool(pos: Pos | undefined, selfId: string): Suggestion[] {
   if (!pos) return [];
   const out: Suggestion[] = [];
-  for (const e of pos.exits) out.push({ text: `去${e.name}`, kind: "move" });
   for (const a of pos.actors) {
     if (a.present && a.actorId !== selfId && a.name.length > 0) {
       out.push({ text: `和${a.name}说话`, kind: "talk" });

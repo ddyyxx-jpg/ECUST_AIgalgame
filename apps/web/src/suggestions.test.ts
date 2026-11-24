@@ -41,12 +41,13 @@ describe("positionFromState（v2 会话事实投影，P2-7）", () => {
     // 双向邻接成立；dormant loc、NPC→loc、非 located_in 边都不算出口
     expect(p!.exits).toEqual([{ locId: "loc_lab", name: "实验楼 302" }]);
     expect(p!.actors.map((a) => a.actorId)).toEqual(["npc_lin", "npc_zhou"]);
-    // pool=3 时每轮只取 floor(3/2)=1 条，三轮轮转正好覆盖出口 + 两个在场 NPC
+    // pool=2 时每轮只取 1 条（结构性不重叠），三轮轮转覆盖两个在场 NPC
     const rounds = [1, 2, 3].map((r) => turnSuggestions(p, r, "plr_self", 5));
     const all = rounds.flat();
     const texts = all.map((s) => s.text);
-    expect(new Set(texts)).toEqual(new Set(["去实验楼 302", "和林静说话", "和周明远说话"]));
-    expect(all.some((s) => s.kind === "move" && s.text === "去实验楼 302")).toBe(true);
+    expect(new Set(texts)).toEqual(new Set(["和林静说话", "和周明远说话"]));
+    // 场景移动不进候选：走哪扇门由玩家自己操作（试玩反馈）
+    expect(texts.some((t) => t.startsWith("去"))).toBe(false);
     expect(texts.some((t) => t.includes("说话") && (t.includes("图书馆") || t.includes("书")))).toBe(false);
   });
 
@@ -69,7 +70,10 @@ describe("positionFromState（v2 会话事实投影，P2-7）", () => {
   it("P3：presentIds 含地点/物品时不生成「和地点说话」候选", () => {
     const p = positionFromState(state, "plr_self")!;
     const pool = [...turnSuggestions(p, 1, "plr_self", 10), ...turnSuggestions(p, 2, "plr_self", 10)];
-    expect(pool.filter((s) => s.kind === "talk").map((s) => s.text)).toEqual(["和林静说话", "和周明远说话"]);
+    const talks = pool.filter((s) => s.kind === "talk").map((s) => s.text);
+    expect([...talks].sort()).toEqual(["和林静说话", "和周明远说话"].sort());
+    // 地点/物品即使出现在 presentIds 里也不能变成「和地点说话」
+    expect(talks.some((t) => t.includes("图书馆") || t.includes("纸条"))).toBe(false);
   });
 
   it("P2-2：pos 的 actors/exits 皆空但 state 可推导时，用 state 推导结果；有效 pos 不覆盖", () => {
@@ -83,7 +87,7 @@ describe("positionFromState（v2 会话事实投影，P2-7）", () => {
 });
 
 describe("turnSuggestions（来源侧带 kind）", () => {
-  it("出口 → move，在场 NPC → talk；自己与不在场的人不算", () => {
+  it("只给在场 NPC 的 talk 候选；出口与不在场/自己都不算", () => {
     const p = pos({
       exits: [{ locId: "loc_lab", name: "实验楼 302" }],
       actors: [
@@ -92,15 +96,11 @@ describe("turnSuggestions（来源侧带 kind）", () => {
         { actorId: "npc_zhou", name: "周明远", present: false },
       ],
     });
-    // pool=2 时每轮只取 1 条（结构性不重叠）；两轮合起来覆盖出口与在场 NPC 两种来源
-    const first = turnSuggestions(p, 1, "plr_self", 5);
-    const second = turnSuggestions(p, 2, "plr_self", 5);
-    expect([...first, ...second]).toEqual([
-      { text: "和林静说话", kind: "talk" },
-      { text: "去实验楼 302", kind: "move" },
-    ]);
+    // 池里只剩 1 条 talk：每轮都给同一句（无法再拆），但绝不出现 move
+    expect(turnSuggestions(p, 1, "plr_self", 5)).toEqual([{ text: "和林静说话", kind: "talk" }]);
+    expect(turnSuggestions(p, 2, "plr_self", 5)).toEqual([{ text: "和林静说话", kind: "talk" }]);
     // 渲染层直通，不重新分类
-    expect(buildCandidates([...first, ...second]).map((c) => c.kind)).toEqual(["talk", "move"]);
+    expect(buildCandidates(turnSuggestions(p, 1, "plr_self", 5)).map((c) => c.kind)).toEqual(["talk"]);
   });
 
   it("空场景 → 空数组", () => {
@@ -110,17 +110,17 @@ describe("turnSuggestions（来源侧带 kind）", () => {
 
   it("相邻回合候选下标不重叠（既有轮转语义不变）", () => {
     const p = pos({
-      exits: [
-        { locId: "a", name: "A" },
-        { locId: "b", name: "B" },
-        { locId: "c", name: "C" },
-        { locId: "d", name: "D" },
+      actors: [
+        { actorId: "npc_a", name: "A", present: true },
+        { actorId: "npc_b", name: "B", present: true },
+        { actorId: "npc_c", name: "C", present: true },
+        { actorId: "npc_d", name: "D", present: true },
       ],
     });
     const first = turnSuggestions(p, 1, "self", 2);
     const second = turnSuggestions(p, 2, "self", 2);
-    expect(first.every((s) => s.kind === "move")).toBe(true);
-    expect(second.every((s) => s.kind === "move")).toBe(true);
+    expect(first.every((s) => s.kind === "talk")).toBe(true);
+    expect(second.every((s) => s.kind === "talk")).toBe(true);
     expect(new Set([...first, ...second].map((s) => s.text)).size).toBe(4);
   });
 });
