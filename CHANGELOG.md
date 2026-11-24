@@ -9,6 +9,7 @@
 #### 复审遗留技术项（本轮）
 
 - `RoomActivity.acquire` 改为等待者队列：房间释放时唤醒，不再 5ms 轮询；超时/取消仍抛 `RoomBusyError`。
+- `SimClock.beforeTick`（NPC 自由活动决策）加 `roomTimeoutMs` 上限：决策挂起时本拍放弃决策并推进时间，`beating` 不会永久卡住。
 - `SimClock` 新增 `telemetry()`（`stuckRooms` + 累计 `stuckTicks`），卡死只在“本轮首次”计数并告警一次，不再每拍刷日志；`stop()` 一并清零。
 - `content/sim/policy.json` 校验失败时告警带出 `issues[].path`，措辞改为「sim 功能按缺省关闭」（拼错单个键不再误报成“行动点功能关闭”）。
 - `hud-stats` 头部注释与新判定（key 优先、label 兼容旧服务端）对齐。

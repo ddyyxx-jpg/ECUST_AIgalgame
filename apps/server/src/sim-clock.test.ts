@@ -36,6 +36,28 @@ describe("SimClock（D22 自动推进）", () => {
     expect(calls).toEqual([1]);
   });
 
+  it("beforeTick 永挂时本拍不卡死：超时后仍推进时间，下一拍还能跑", async () => {
+    const warnings: string[] = [];
+    const ticks: number[] = [];
+    let hanging = true;
+    const clock = new SimClock({
+      store: storeOf({ r1: 0 }),
+      map: { tick: async (_roomId, opts) => { ticks.push(opts.ticks); return { ok: true }; } },
+      policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 },
+      roomTimeoutMs: 20,
+      warn: (m) => warnings.push(m),
+      beforeTick: async () => {
+        if (hanging) await new Promise<void>(() => {});
+      },
+    });
+    await clock.beat();
+    expect(ticks).toEqual([1]);
+    expect(warnings.some((w) => w.includes("决策超过 20ms"))).toBe(true);
+    hanging = false;
+    await clock.beat();
+    expect(ticks).toEqual([1, 1]);
+  });
+
   it("后台任务占用的房间跳过", async () => {
     const calls: string[] = [];
     const clock = new SimClock({

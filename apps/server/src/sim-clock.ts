@@ -36,6 +36,8 @@ export interface SimClockDeps {
   roomTimeoutMs?: number;
 }
 
+const BEFORE_TICK_TIMEOUT = Symbol("beforeTick-timeout");
+
 export class SimClock {
   private timer?: NodeJS.Timeout;
   private beating = false;
@@ -65,6 +67,20 @@ export class SimClock {
     // 不能把上一轮的锁状态留给下一次启动/健康检查。
     this.stuckSince.clear();
     this.stuckTicks = 0;
+  }
+
+  /** 给可能挂起的异步步骤加上限；超时返回哨兵，不取消底层（它自己会超时/失败）。 */
+  private async withTimeout<T>(work: Promise<T>, ms: number): Promise<T | typeof BEFORE_TICK_TIMEOUT> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<typeof BEFORE_TICK_TIMEOUT>((resolve) => {
+      timer = setTimeout(() => resolve(BEFORE_TICK_TIMEOUT), ms);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([work, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** 当前仍被卡死 tick 占用的房间与已锁时长，供运维告警/健康检查读取。 */
@@ -99,10 +115,20 @@ export class SimClock {
             const roomLeft = this.policy.maxTick > 0 ? this.policy.maxTick - state.clock.tick : Number.POSITIVE_INFINITY;
             if (roomLeft <= 0) continue;
             if (this.deps.beforeTick) {
-              try {
-                await this.deps.beforeTick(roomId);
-              } catch (e) {
-                this.warn(`[sim-clock] 房间 ${roomId} 决策失败，本拍继续推进：${e instanceof Error ? e.message : String(e)}`);
+              // 决策本身可能调 LLM：必须有上限，否则它一挂，beating 永远不复位，整个时钟停摆。
+              const budget = this.deps.roomTimeoutMs ?? 30_000;
+              const outcome = await this.withTimeout(
+                this.deps.beforeTick(roomId).then(
+                  () => undefined,
+                  (e: unknown) => e,
+                ),
+                budget,
+              );
+              if (outcome === BEFORE_TICK_TIMEOUT) {
+                this.warn(`[sim-clock] 房间 ${roomId} 决策超过 ${budget}ms 未返回，本拍放弃决策、直接推进时间`);
+              } else if (outcome !== undefined) {
+                const message = outcome instanceof Error ? outcome.message : String(outcome);
+                this.warn(`[sim-clock] 房间 ${roomId} 决策失败，本拍继续推进：${message}`);
               }
             }
             const ticks = Math.min(this.policy.ticksPerBeat, roomLeft);
