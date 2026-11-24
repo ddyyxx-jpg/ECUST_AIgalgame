@@ -76,7 +76,11 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
     const raw = JSON.parse(await readFile(path.join(contentDir, "sim", "policy.json"), "utf8")) as unknown;
     const parsed = PolicySchema.safeParse(raw);
     if (!parsed.success) {
-      console.warn("[sim] content/sim/policy.json 校验失败，行动点功能关闭");
+      const detail = parsed.error.issues
+        .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
+        .join("; ");
+      // 拼错一个键会让整份策略 strict 校验失败：说清是哪个键，别让运维以为是“行动点没了”。
+      console.warn(`[sim] content/sim/policy.json 校验失败，sim 功能按缺省关闭（${detail}）`);
       return undefined;
     }
     const ap = parsed.data.actionPoints;

@@ -1,4 +1,4 @@
-/** 右上角状态条：按显示名把“行动点”提到最前，其余保持 registry 顺序。 */
+/** 右上角状态条：把“行动点”提到最前（优先 key，旧服务端退回中文 label），其余保持 registry 顺序。 */
 export interface HudStatRow {
   key?: string;
   label: string;

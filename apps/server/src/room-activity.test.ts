@@ -59,6 +59,36 @@ describe("RoomActivity", () => {
     leave();
   });
 
+  it("释放时唤醒等待者（不是 5ms 轮询），多人排队时只有一个拿到", async () => {
+    const activity = new RoomActivity();
+    const leave = activity.enter("room_a");
+    let firstOrder = 0;
+    const a = activity.acquire("room_a").then((r) => { firstOrder += 1; return r; });
+    const b = activity.acquire("room_a").then((r) => { firstOrder += 1; return r; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(firstOrder).toBe(0);
+    leave();
+    const ra = await a;
+    // 同一个 tick 里两个等待者都被唤醒，但只有一个能真正进入；另一个继续等。
+    expect(activity.isBusy("room_a")).toBe(true);
+    ra();
+    const rb = await b;
+    rb();
+    expect(activity.isBusy("room_a")).toBe(false);
+  });
+
+  it("等待者超时后不残留在队列里（房间随后释放也不重复唤醒）", async () => {
+    const activity = new RoomActivity();
+    const leave = activity.enter("room_a");
+    await expect(activity.acquire("room_a", 5)).rejects.toBeInstanceOf(RoomBusyError);
+    const release = activity.tryAcquire("room_a");
+    expect(release).toBeNull();
+    leave();
+    const ok = activity.tryAcquire("room_a");
+    expect(ok).not.toBeNull();
+    ok?.();
+  });
+
   it("并发进入时最后一个释放才清空", () => {
     const activity = new RoomActivity();
     const first = activity.enter("room_a");

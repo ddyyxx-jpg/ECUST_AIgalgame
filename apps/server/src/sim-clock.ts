@@ -43,6 +43,7 @@ export class SimClock {
   private readonly running = new Map<string, Promise<SimClockTickResult>>();
   /** 已超时但底层仍未结束的房间：用于告警“锁了多久”，只读不参与调度。 */
   private readonly stuckSince = new Map<string, number>();
+  private stuckTicks = 0;
   private readonly policy: SimClockPolicy;
   private readonly warn: (message: string) => void;
 
@@ -63,12 +64,18 @@ export class SimClock {
     // 进程关停时清掉“卡死房间”快照；底层 tick 若还在写由进程退出兜底，
     // 不能把上一轮的锁状态留给下一次启动/健康检查。
     this.stuckSince.clear();
+    this.stuckTicks = 0;
   }
 
   /** 当前仍被卡死 tick 占用的房间与已锁时长，供运维告警/健康检查读取。 */
   stuckRooms(): Array<{ roomId: string; lockedMs: number }> {
     const now = Date.now();
     return [...this.stuckSince].map(([roomId, since]) => ({ roomId, lockedMs: now - since }));
+  }
+
+  /** 运维遥测：永久锁房间 + 累计卡死拍数（供 /health 或外部探针读取，不必捞 stdout）。 */
+  telemetry(): { stuckRooms: Array<{ roomId: string; lockedMs: number }>; stuckTicks: number } {
+    return { stuckRooms: this.stuckRooms(), stuckTicks: this.stuckTicks };
   }
 
   /** 单飞：上一拍没跑完就跳过本拍，避免房间队列被叠满 */
@@ -160,11 +167,16 @@ export class SimClock {
     if (result === undefined) {
       // 不强制放锁：宁可让该房间后续回合/推进拿到 409，也不能让两份写入交错。
       // 底层若永久不 settle，这里只告警，房间保持锁定，等运维处理。
+      const firstStuck = !this.stuckSince.has(roomId);
       const since = this.stuckSince.get(roomId) ?? Date.now();
       this.stuckSince.set(roomId, since);
-      this.warn(
-        `[sim-clock] 房间 ${roomId} 底层 tick 超过 ${timeoutMs}ms 未结束，保持房间锁定（已锁定 ${Date.now() - since}ms；simClock.stuckRooms() 可查）`,
-      );
+      // 只在“本轮首次卡死”时告警并计数：锁会一直保持到 settle，按拍重复刷日志没有信息量。
+      if (firstStuck) {
+        this.stuckTicks += 1;
+        this.warn(
+          `[sim-clock] 房间 ${roomId} 底层 tick 超过 ${timeoutMs}ms 未结束，保持房间锁定（已锁定 ${Date.now() - since}ms；simClock.telemetry() 可查）`,
+        );
+      }
     }
     return result;
   }

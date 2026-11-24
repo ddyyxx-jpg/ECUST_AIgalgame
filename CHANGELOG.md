@@ -6,6 +6,13 @@
 
 
 
+#### 复审遗留技术项（本轮）
+
+- `RoomActivity.acquire` 改为等待者队列：房间释放时唤醒，不再 5ms 轮询；超时/取消仍抛 `RoomBusyError`。
+- `SimClock` 新增 `telemetry()`（`stuckRooms` + 累计 `stuckTicks`），卡死只在“本轮首次”计数并告警一次，不再每拍刷日志；`stop()` 一并清零。
+- `content/sim/policy.json` 校验失败时告警带出 `issues[].path`，措辞改为「sim 功能按缺省关闭」（拼错单个键不再误报成“行动点功能关闭”）。
+- `hud-stats` 头部注释与新判定（key 优先、label 兼容旧服务端）对齐。
+
 ### 试玩反馈修复（NPC 自主对话）
 - v2 会话：`content/sim/policy.json` 新增 `chat{enabled,autoTurns,minPresentNpcs}`；玩家回合写完后，同一条 SSE 里让在场 NPC 自动再聊 `autoTurns` 轮（写完之后才跑，不额外增加玩家等待）。
 - 引擎：`auto` 回合豁免 `minReplyIntervalMs`（真正的上限仍是 `maxAutoRounds` 与每小时条数/调用上限）；提示词在「玩家没接话」时允许 NPC 主动开口，并要求用 broadcast 让在场者（含玩家）都能听见。

@@ -878,19 +878,25 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
           if (presentNpcs.length >= (deps.autoChat?.minPresentNpcs ?? 2)) {
             // 抢一把房间锁：auto 回合会写世界状态，不能和 tick/travel 交错；拿不到就这轮不聊。
             const releaseAuto = deps.roomActivity ? deps.roomActivity.tryAcquire(roomId) : () => {};
-            if (releaseAuto) try {
-            for (let i = 0; i < autoTurns; i += 1) {
-              const batch: ConversationEvent[] = [];
-              for await (const ev of host.run(sessionId, { clientTurnId: `${body.clientTurnId}#auto${i}`, auto: true })) batch.push(ev);
-              // 本批连一句都没说（全 silent）就停，不空转烧模型
-              if (!batch.some((e) => e.type === "conversation.utterance")) break;
-              const autoCommitted = batch.find((e) => e.type === "conversation.committed");
-              if (autoCommitted?.type === "conversation.committed") finalState = autoCommitted.state;
-              const autoPlaceholders = unknownPlaceholders(finalState, deps.appearance);
-              const visibleAuto = projectConversationEvents(batch, actorId, members, deps.registry);
-              for (const ev of visibleAuto) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, autoPlaceholders));
+            if (releaseAuto) {
+              try {
+                for (let i = 0; i < autoTurns; i += 1) {
+                  const batch: ConversationEvent[] = [];
+                  for await (const ev of host.run(sessionId, { clientTurnId: `${body.clientTurnId}#auto${i}`, auto: true })) {
+                    batch.push(ev);
+                  }
+                  // 本批连一句都没说（全 silent）就停，不空转烧模型
+                  if (!batch.some((e) => e.type === "conversation.utterance")) break;
+                  const autoCommitted = batch.find((e) => e.type === "conversation.committed");
+                  if (autoCommitted?.type === "conversation.committed") finalState = autoCommitted.state;
+                  const autoPlaceholders = unknownPlaceholders(finalState, deps.appearance);
+                  const visibleAuto = projectConversationEvents(batch, actorId, members, deps.registry);
+                  for (const ev of visibleAuto) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, autoPlaceholders));
+                }
+              } finally {
+                releaseAuto();
+              }
             }
-            } finally { releaseAuto(); }
           }
         }
       } catch (e) {

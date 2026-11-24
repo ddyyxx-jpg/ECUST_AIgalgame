@@ -129,6 +129,10 @@ describe("SimClock（D22 自动推进）", () => {
     expect(holds).toBe(1);
     expect(warnings.join("\n")).toContain("保持房间锁定");
     expect(clock.stuckRooms()).toEqual([{ roomId: "r1", lockedMs: expect.any(Number) }]);
+    // 卡死只计数一次、只告警一次；telemetry() 供 /health 之类的外部探针读取。
+    expect(clock.telemetry().stuckTicks).toBe(1);
+    const stuckWarns = warnings.filter((w) => w.includes("保持房间锁定"));
+    expect(stuckWarns).toHaveLength(1);
     clock.stop();
     expect(clock.stuckRooms()).toEqual([]);
   });
