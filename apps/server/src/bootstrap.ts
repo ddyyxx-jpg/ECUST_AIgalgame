@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { DialogueDirector, Entity, Envelope, Proposal, Registry } from "../../../packages/shared/src/index.ts";
+import type { ActorId, DialogueDirector, Entity, Envelope, Proposal, Registry, WorldState } from "../../../packages/shared/src/index.ts";
 import { CONTRACT_VERSION } from "../../../packages/shared/src/index.ts";
 import {
   AuditGate,
@@ -373,25 +373,25 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   if (auth.required && !cfg.publicOrigin) {
     console.warn("[auth] GALGAME_AUTH_REQUIRED=1 但未配置 GALGAME_PUBLIC_ORIGIN：Cookie 写请求的 CSRF Origin 校验将拒绝缺失 Origin 的请求");
   }
+  // 世界观钩子：v1 回合与 v2 NPC 共用同一份选择逻辑（匹配文本由调用方拼好）
+  const worldInfoFor = lorebook
+    ? (state: Readonly<WorldState>, _actorId: ActorId, input: string) => {
+        const loc = state.entities[state.room.scene.locId]?.name ?? "";
+        const present = state.room.scene.presentIds
+          .map((id) => state.entities[id]?.name)
+          .filter((name): name is string => typeof name === "string");
+        return {
+          ...(lorebook.authorNote ? { authorNote: lorebook.authorNote } : {}),
+          entries: selectWorldInfo(lorebook, [input, loc, ...present].join("\n")),
+        };
+      }
+    : undefined;
   const rawTurn = new DefaultTurn({
     store, arbiter, registry, modules, memory, llm, audit, auditPolicy, reality, impressions,
     ...(simPolicy && simPolicy.actionCostPerTurn > 0
       ? { actionPolicy: { attrKey: simPolicy.actionAttr, costPerTurn: simPolicy.actionCostPerTurn } }
       : {}),
-    ...(lorebook
-      ? {
-          worldInfo: (state, _actorId, input) => {
-            const loc = state.entities[state.room.scene.locId]?.name ?? "";
-            const present = state.room.scene.presentIds
-              .map((id) => state.entities[id]?.name)
-              .filter((name): name is string => typeof name === "string");
-            return {
-              ...(lorebook.authorNote ? { authorNote: lorebook.authorNote } : {}),
-              entries: selectWorldInfo(lorebook, [input, loc, ...present].join("\n")),
-            };
-          },
-        }
-      : {}),
+    ...(worldInfoFor ? { worldInfo: worldInfoFor } : {}),
   });
   const turn = withTurnRecording(rawTurn, { history, saves, store, now });
 
@@ -522,9 +522,13 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     modes: conversationModes,
     policy: conversationPolicy,
     scene: new SceneManager(conversationScene, now),
-    npc: new NpcAgent({ llm, modes: conversationModes, policy: conversationPolicy }),
+    npc: new NpcAgent({ llm, modes: conversationModes, policy: conversationPolicy, ...(worldInfoFor ? { worldInfo: worldInfoFor } : {}) }),
     audit: new ConversationAudit(audit, auditPolicy, new AuditGate({ arbiter, store, registry, audit, policy: auditPolicy })),
     budget: talkBudget,
+    // #153 复审 P1：行动点必须在默认路径（v2 会话）上也生效
+    ...(simPolicy && simPolicy.actionCostPerTurn > 0
+      ? { actionPolicy: { attrKey: simPolicy.actionAttr, costPerTurn: simPolicy.actionCostPerTurn } }
+      : {}),
     now,
   });
 

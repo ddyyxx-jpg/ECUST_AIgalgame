@@ -243,7 +243,11 @@ export class NpcDecisionService {
   private async ask(roomId: string, perception: NpcPerception): Promise<{ choice: number; reason?: string } | null> {
     try {
       const result = await this.deps.llm.chat({
-        messages: [{ role: "system", content: perception.text }],
+        messages: [
+          { role: "system", content: perception.text },
+          // 部分 OpenAI 兼容网关对「只有 system 没有 user」很敏感（只会续写协议文本）
+          { role: "user", content: "请从上面的选项里选一个，只输出 JSON。" },
+        ],
         json: true,
         purpose: "decision",
         temperature: 0.8,

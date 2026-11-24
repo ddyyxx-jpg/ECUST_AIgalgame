@@ -76,16 +76,22 @@ describe("NpcDecisionService", () => {
   it("开启后调用一次模型并把选择写成 move 租约", async () => {
     const applied: unknown[] = [];
     let expected: number | undefined;
+    let messages: { role: string; content: string }[] = [];
     const service = new NpcDecisionService({
       store: { snapshot: async () => state(), load: async () => 7 },
       arbiter: { apply: async (_room, ops, _cause, opts) => { applied.push(ops); expected = opts?.expectedSeq; return { ok: true }; } },
       llm: {
-        chat: async () => ({ raw: '{"choice":2}', json: { choice: 2 }, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "fake", latencyMs: 1 }),
+        chat: async (req) => {
+          messages = req.messages as { role: string; content: string }[];
+          return { raw: '{"choice":2}', json: { choice: 2 }, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "fake", latencyMs: 1 };
+        },
       },
       policy: { enabled: true, maxPerBeat: 1, intervalTicks: 1, hourlyCalls: 10, maxOptions: 4 },
     });
     await service.run("room_a", state());
     expect(applied).toHaveLength(1);
+    // 部分兼容网关只给 system 会续写协议；必须补一条 user
+    expect(messages.map((m) => m.role)).toEqual(["system", "user"]);
     const ops = applied[0] as { args: { entityId: string; key: string; value: string } }[];
     expect(ops[0].args.entityId).toBe("npc_1");
     expect(ops[0].args.key).toBe("sim_lease");

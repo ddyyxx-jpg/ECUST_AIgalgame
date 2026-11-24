@@ -6,6 +6,17 @@
 
 
 
+## 未发布 — v2 会话行动点 + 内容层世界观进 v2（CONTRACT 3.11.0）
+
+> 收 #153 复审里「未真正闭环」的四项；不改 op 语义、不改世界状态结构。
+
+- **行动点在默认路径（v2 `/conversation`）生效**：`ConversationHostV2` 接 `actionPolicy`（与 v1 `TurnActionPolicy` 同源，键名来自 `content/sim/policy.json`）。玩家每回合先扣点、余额不足整批拒绝（`E_PRECONDITION` + `conversation.error`），不调模型、不落库；旧存档没有 `action_points` 时不扣也不拦。文案由 `ConversationPolicy.messages.actionPointsInsufficient` 提供（`{now}`/`{cost}`），前端 HUD 在 v2 也显示行动点。
+- **内容层世界观（`content/lorebook.json`）进 v2 提示词**：`NpcAgent` 新增 `worldInfo` 钩子，与 v1 `DefaultTurn` 共用同一份选择逻辑（作者注进静态段首、关键词条目追加在静态段末尾，前缀仍可被 KV 缓存）；匹配文本 = 本轮听到的话 + 地点名 + 在场者名字。
+- **`npc-decision` 补 user 消息**：部分 OpenAI 兼容网关在只有 system 时会续写协议文本；现在补一条「请从上面的选项里选一个，只输出 JSON」。
+- **`time.advance` 的 `ticks` 口径统一为 1..8**：`packages/engine/src/arbiter.ops.ts` 与 zod（`TimeAdvanceArgsSchema`）对齐；「跳到指定 phase」的内部 0 不受影响；`docs/05` 不再与实现漂移。
+
+验证：`typecheck` 0；`npm test` 见 CI/本地；`check:contract` 9/9（CONTRACT_VERSION=3.11.0）。
+
 ## 未发布 — 按用途的模型路由（CONTRACT 3.10.0）
 
 > 网关按 `LlmRequest.purpose` 选模型与预算；新增 `content/llm/routes.json`。不改 op、不改世界状态。

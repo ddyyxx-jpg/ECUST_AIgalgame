@@ -149,6 +149,23 @@ async function playerStep(ctx: StepCtx): Promise<PlayerResult> {
     out.push({ type: "conversation.error", sessionId: s.id, code: "E_CONTENT_BLOCKED", message: deps.policy.messages.auditUnavailable });
     return { aborted: true };
   }
+  // 行动点：与 v1 同源（`TurnActionPolicy`）。旧存档没有该属性 → 不扣也不拦。
+  const cost = deps.actionPolicy?.costPerTurn ?? 0;
+  const actionKey = deps.actionPolicy?.attrKey;
+  if (cost > 0 && actionKey && ctx.kindOf(utterance.speaker) === "plr") {
+    const points = ctx.state.entities[utterance.speaker]?.attrs?.[actionKey];
+    if (typeof points === "number") {
+      if (points < cost) {
+        out.push({
+          type: "conversation.error", sessionId: s.id, code: "E_PRECONDITION",
+          message: deps.policy.messages.actionPointsInsufficient.replace("{now}", String(points)).replace("{cost}", String(cost)),
+        });
+        return { aborted: true };
+      }
+      // 排在最前：与 v1 一致，扣点在整批里先于其它提案；mustKeep 保证余额不足时整批回滚
+      ctx.proposals.push({ op: "attr.delta", args: { entityId: utterance.speaker, key: actionKey, delta: -cost, mustKeep: true }, reason: "行动消耗" });
+    }
+  }
   const deliveries: ConversationEvent[] = deliver(utterance, { recipients: present, modes: deps.modes, noticeFor: nameOf, nameOf })
     .map((d) => ({ type: "conversation.utterance" as const, delivery: d }));
   return { aborted: false, utterance, deliveries };

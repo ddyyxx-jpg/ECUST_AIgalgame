@@ -33,7 +33,8 @@
     "storeUnavailable": "落盘仍不可用，可安全重试",
     "memoryRejected": "本轮记忆写入被拒，发言未落库",
     "storeFlushFailed": "落盘失败，稍后可安全重试",
-    "autoLimit": "自主推进已达上限，等玩家说话"
+    "autoLimit": "自主推进已达上限，等玩家说话",
+    "actionPointsInsufficient": "行动点不足（{now}/{cost}），请先休息推进时段。"
   },
   "autonomy": {
     "minReplyIntervalMs": 30000,

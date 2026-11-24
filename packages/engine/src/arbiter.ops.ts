@@ -259,8 +259,11 @@ export function validateOp(
         clock.phase = a.phase as Phase;
         clock.tick = 0;
       }
+      // 显式 ticks 与 zod（1..8）一致；只有「跳到指定 phase」这条路径内部会用 0
+      if (a.ticks !== undefined && (!isNum(a.ticks) || !Number.isInteger(a.ticks) || a.ticks < 1 || a.ticks > 8)) {
+        return { fail: fail("E_SCHEMA_INVALID", "ticks 必须是 1~8 的整数") };
+      }
       const ticks = a.ticks === undefined ? (a.phase === undefined ? 1 : 0) : a.ticks;
-      if (!isNum(ticks) || !Number.isInteger(ticks) || ticks < 0 || ticks > 24) return { fail: fail("E_SCHEMA_INVALID", "ticks 必须是 0~24 的整数") };
       clock.tick += ticks;
       return { event: { type: "clock.advanced", payload: { clock } } };
     }

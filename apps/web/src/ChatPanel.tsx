@@ -299,7 +299,7 @@ const PHASE_META: Record<string, { name: string; icon: string; color: string }> 
   const v2Active = Boolean(v2Modes && v2Modes.length > 0 && onSendUtterance);
   const panelRows = Object.values(panels ?? {})[0] ?? [];
   // 行动点目前只覆盖 v1 /turns；v2 群聊模式显示 6/6 会骗人，直接隐藏。
-  const stats = hudStats(v2Active ? panelRows.filter((r) => !isActionPointRow(r)) : panelRows);
+  const stats = hudStats(panelRows); // v2 也扣行动点（#153 复审 P1），必须显示
   const currentMode = v2Modes?.find((m) => m.id === mode);
   const draft = {
     mode,
