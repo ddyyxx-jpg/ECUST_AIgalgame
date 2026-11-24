@@ -20,5 +20,10 @@
     "intervalTicks": 2,
     "hourlyCalls": 12,
     "maxOptions": 4
+  },
+  "chat": {
+    "enabled": true,
+    "autoTurns": 1,
+    "minPresentNpcs": 2
   }
 }

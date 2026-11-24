@@ -250,7 +250,11 @@ function planCalls(ctx: StepCtx, utterance?: Utterance): { npcId: ActorId; allow
       ctx.outcomes.push({ npcId, kind: "silent", reason: call });
       continue;
     }
-    const speak = deps.budget.canSpeak(s.roomId, npcId, CHANNEL, ctx.now, { ignoreMinInterval: named.has(npcId) });
+    // auto 回合是玩家主动/系统显式驱动的"继续聊"，不按"距离上次发言"节流；
+    // 真正的防线是 maxAutoRounds（默认 3 轮）与每小时的条数/调用上限。
+    const speak = deps.budget.canSpeak(s.roomId, npcId, CHANNEL, ctx.now, {
+      ignoreMinInterval: named.has(npcId) || ctx.input.auto === true,
+    });
     if (speak !== "ok") {
       ctx.outcomes.push({ npcId, kind: "silent", reason: speak });
       continue;

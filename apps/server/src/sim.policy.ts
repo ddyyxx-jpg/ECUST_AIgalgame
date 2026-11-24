@@ -33,6 +33,12 @@ const PolicySchema = z.object({
     hourlyCalls: z.number().int().min(1).max(120).optional(),
     maxOptions: z.number().int().min(2).max(6).optional(),
   }).strict().optional(),
+  /** NPC 自由对话：玩家回合结束后，在同一条会话流里让在场 NPC 自己再聊几轮（0 = 关闭） */
+  chat: z.object({
+    enabled: z.boolean().optional(),
+    autoTurns: z.number().int().min(0).max(5).optional(),
+    minPresentNpcs: z.number().int().min(1).max(6).optional(),
+  }).strict().optional(),
 }).strict();
 
 export interface SimClockPolicy {
@@ -57,6 +63,8 @@ export interface SimPolicy {
   talkLeaseTicks?: number;
   /** NPC 自由活动决策；未配置/关闭 = 不跑 */
   decision?: NpcDecisionPolicy;
+  /** NPC 自由对话：autoTurns 轮，且在场 NPC 至少 minPresentNpcs 个 */
+  autoChat?: { turns: number; minPresentNpcs: number };
 }
 
 /**
@@ -73,6 +81,10 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
     }
     const ap = parsed.data.actionPoints;
     const clock = parsed.data.clock;
+    const chat = parsed.data.chat;
+    const autoChat = chat?.enabled !== false && (chat?.autoTurns ?? 0) > 0
+      ? { turns: chat?.autoTurns ?? 1, minPresentNpcs: chat?.minPresentNpcs ?? 2 }
+      : undefined;
     const decision = parsed.data.decision?.enabled
       ? {
           enabled: true,
@@ -83,7 +95,7 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
         }
       : undefined;
     // 行动点/时钟/决策是三份独立能力：只配其一时也必须能启动对应功能。
-    if ((!ap || ap.enabled === false) && !clock?.enabled && !decision) return undefined;
+    if ((!ap || ap.enabled === false) && !clock?.enabled && !decision && !autoChat) return undefined;
     const clockPolicy = clock
       ? { enabled: clock.enabled ?? false, intervalMs: clock.intervalMs, ticksPerBeat: clock.ticksPerBeat, maxTick: clock.maxTick }
       : undefined;
@@ -96,6 +108,7 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
         talkLeaseTicks: parsed.data.talkLeaseTicks ?? 12,
         ...(clockPolicy ? { clock: clockPolicy } : {}),
         ...(decision ? { decision } : {}),
+        ...(autoChat ? { autoChat } : {}),
       };
     }
     return {
@@ -106,6 +119,7 @@ export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | und
       talkLeaseTicks: parsed.data.talkLeaseTicks ?? 12,
       ...(clockPolicy ? { clock: clockPolicy } : {}),
       ...(decision ? { decision } : {}),
+      ...(autoChat ? { autoChat } : {}),
     };
   } catch (e) {
     // 文件不存在是"功能未配置"，静默关闭；坏 JSON / 读失败要留一条日志，避免配置写错后无线索。

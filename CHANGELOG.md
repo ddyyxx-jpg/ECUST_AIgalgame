@@ -6,6 +6,10 @@
 
 
 
+### 试玩反馈修复（NPC 自主对话）
+- v2 会话：`content/sim/policy.json` 新增 `chat{enabled,autoTurns,minPresentNpcs}`；玩家回合写完后，同一条 SSE 里让在场 NPC 自动再聊 `autoTurns` 轮（写完之后才跑，不额外增加玩家等待）。
+- 引擎：`auto` 回合豁免 `minReplyIntervalMs`（真正的上限仍是 `maxAutoRounds` 与每小时条数/调用上限）；提示词在「玩家没接话」时允许 NPC 主动开口，并要求用 broadcast 让在场者（含玩家）都能听见。
+- `CONVERSATION_PROMPT_VERSION` `2026-11-21.1` → `2026-11-24.1`（提示词静态段与动态段都有改动）。
 ## 未发布 — v2 会话行动点 + 内容层世界观进 v2（CONTRACT 3.11.0）
 
 ### 修复（试玩反馈：NPC 之间的名字）

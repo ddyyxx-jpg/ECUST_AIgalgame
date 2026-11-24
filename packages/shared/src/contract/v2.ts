@@ -377,5 +377,5 @@ export type GossipEvent =
   | { type: "gossip.error"; code: string; message: string; retryable?: boolean };
 
 /** dev/v2 两条独立提示词版本线：会话群聊 / 微信八卦，互不覆盖 */
-export const CONVERSATION_PROMPT_VERSION = "2026-11-21.1" as const;
+export const CONVERSATION_PROMPT_VERSION = "2026-11-24.1" as const;
 export const GOSSIP_PROMPT_VERSION = "2026-11-19.1" as const;

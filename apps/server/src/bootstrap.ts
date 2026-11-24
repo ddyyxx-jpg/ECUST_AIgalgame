@@ -674,6 +674,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
       subscribe: (roomId, viewer, cb) => gossip.subscribe(roomId, viewer, cb),
     },
     /** dev/v2 群聊回合宿主（HTTP 接线见 routes.ts；#90 快照保存需要 dataDir 定位房间文件） */
+    ...(simPolicy?.autoChat ? { autoChat: simPolicy.autoChat } : {}),
     conversation: { host: conversation, modes: conversationModes, dataDir: dataRoot },
     turn,
     map,

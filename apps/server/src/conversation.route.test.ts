@@ -127,8 +127,9 @@ function fakeConversationHost(opts: {
   events: ConversationEvent[];
   openDelayMs?: number;
   runDelayMs?: number;
-}): { host: ConversationHostV2; openCalls: () => number; closeCalls: () => string[] } {
+}): { host: ConversationHostV2; openCalls: () => number; closeCalls: () => string[]; runCalls: () => number } {
   let opens = 0;
+  let runs = 0;
   const closed: string[] = [];
   const sessions = new Map<string, ConversationSessionV2>();
   const host = {
@@ -158,19 +159,24 @@ function fakeConversationHost(opts: {
       return sessions.has(id);
     },
     async *run(_sessionId: string): AsyncIterable<ConversationEvent> {
+      runs += 1;
       if (opts.runDelayMs) await new Promise<void>((resolve) => setTimeout(resolve, opts.runDelayMs));
       for (const ev of opts.events) yield ev;
     },
   } as unknown as ConversationHostV2;
-  return { host, openCalls: () => opens, closeCalls: () => closed };
+  return { host, openCalls: () => opens, closeCalls: () => closed, runCalls: () => runs };
 }
 
 /** 换掉 host 但不换房间/账号：房间仍由 createApp 真建，guardRoom/roomGate 照常生效 */
+const fakeHostRef: { current?: { runCalls: () => number } } = {};
+
 async function appWithHost(makeHost: (roomId: string, actorId: string) => ConversationHostV2) {
   process.env.GALGAME_GOSSIP_SCAN_MS = "0";
   const deps = await createApp(testConfig());
   const { roomId, actorId } = await deps.createRoom("solo", "u_owner");
   deps.conversation = { host: makeHost(roomId, actorId) };
+  // 自动续聊默认关闭：绝大多数用例只断言"一次 host.run"的事件投影。
+  deps.autoChat = undefined;
   const app = Fastify();
   registerRoutes(app, deps);
   return { app, deps, roomId, actorId };
@@ -465,6 +471,29 @@ describe("dev/v2 群聊 HTTP 端点（issue #89）", () => {
     expect(typeof data.turn).toBe("number");
     expect(data.state.room.id).toBe(roomId);
     await app.close();
+  });
+
+  it("chat.autoTurns：玩家回合后同一条 SSE 里再跑一轮 auto 回合（内容仍然脱敏）", async () => {
+    const { app, deps, roomId, actorId } = await appWithHost((rid: string, viewer: string) => {
+      const events: ConversationEvent[] = [
+        { type: "conversation.utterance", delivery: { to: viewer, speaker: "npc_a", utteranceId: "u1", mode: "broadcast", channels: ["content"], content: "我先说" } },
+        { type: "conversation.committed", sessionId: "conv_1", turn: 1, proposals: [], state: viewState(rid, "npc_a", "npc_b") },
+      ];
+      const fakeHost = fakeConversationHost({ events });
+      fakeHostRef.current = fakeHost;
+      return fakeHost.host;
+    });
+    deps.autoChat = { turns: 1, minPresentNpcs: 1 };
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/rooms/${roomId}/conversation`,
+      headers: { "x-user-id": "u_owner" },
+      payload: payload(actorId, "auto-chat-1"),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(fakeHostRef.current?.runCalls()).toBe(2); // 玩家回合 + 1 轮 auto
+    const events = sse(res.body);
+    expect(events.filter((e) => e.type === "conversation.utterance")).toHaveLength(2);
   });
 
   it("BLOCKER-1：玩家 SSE 按观察者投影——无他人 mental/私聊，committed 私忆与 GM 字段裁掉，已认识名不回归", async () => {

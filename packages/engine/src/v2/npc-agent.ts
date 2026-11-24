@@ -219,6 +219,7 @@ export function buildNpcPrompt(args: NpcPromptArgs, modes: Map<string, Utterance
   if (args.playerPresent) {
     dynamic.push(`玩家在场；纯 NPC 连续发言 ${args.streak} 轮（上限 ${policy.npcHardCap}）。`);
     if (args.hardCapReached) dynamic.push("已达上限：本轮禁止说话，只能思考或沉默。除非有必须立刻说的紧急信息，否则 silent。");
+    else if (args.deliveries.length === 0) dynamic.push("玩家这会儿没接话：你可以主动开口，用 broadcast 说给在场所有人（包括玩家）听——继续刚才的话题、或对气氛补一句；也可以沉默。不要替玩家做决定或行动。");
     else if (args.streak > 0) dynamic.push("玩家在旁且你已聊了一会儿：除非有重要信息，否则保持简短或沉默。");
   } else {
     dynamic.push("玩家不在场：你可以与其他 NPC 自主续聊，只要有话说就 speak。");

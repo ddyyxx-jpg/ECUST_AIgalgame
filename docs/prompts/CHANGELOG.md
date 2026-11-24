@@ -14,3 +14,6 @@
 - 内容来自 `content/lorebook.json`（`apps/server/src/lorebook.ts` 读取与匹配）；缺文件时两段都不出现，提示词与旧版逐字节一致（除版本号）。
 - 只影响“给 LLM 看什么”，不新增 op、不让 LLM 直接写状态；所有结果仍走 Proposal → Arbiter。
 - 改动提示词前缀，按规则 bump `PROMPT_VERSION` 到 `2026-11-22.1`。
+
+## 2026-11-24.1
+- 群聊 NPC 提示词：玩家没接话的 auto 回合允许主动开口，并要求 broadcast；随 PR #153 试玩反馈一起改。

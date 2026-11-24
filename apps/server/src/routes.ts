@@ -68,6 +68,8 @@ export interface AppDeps {
     stats(): { worldId: string; version: number; writtenToday: number; writtenTotal: number; circuitOpen: boolean; consecutiveJudgeFailures: number };
     sample(limit: number): MemoryRecord[];
   };
+  /** NPC 自由对话：玩家回合写完后，同一条流里让在场 NPC 自己再聊 autoTurns 轮 */
+  autoChat?: { turns: number; minPresentNpcs: number };
   /** 管理员令牌；canonize 端点用它鉴权（地图端点由 MapService 自己校验） */
   adminToken?: string;
   /** 令牌校验 + 失败限流（registerRoutes 未提供时按 adminToken 新建；测试可注入独立实例） */
@@ -868,6 +870,29 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
             : ev,
         );
         for (const ev of visible) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, placeholders));
+        // NPC 自由对话：玩家这批事件已经写出去，再让在场 NPC 自己接着聊几轮（auto 回合）。
+        // 放在写完之后，是为了不让玩家多等一轮 LLM；每轮用当前状态重算占位名再脱敏。
+        const autoTurns = committed && !body.auto ? deps.autoChat?.turns ?? 0 : 0;
+        if (autoTurns > 0) {
+          const presentNpcs = finalState.room.scene.presentIds.filter((id) => finalState.entities[id]?.kind === "npc");
+          if (presentNpcs.length >= (deps.autoChat?.minPresentNpcs ?? 2)) {
+            // 抢一把房间锁：auto 回合会写世界状态，不能和 tick/travel 交错；拿不到就这轮不聊。
+            const releaseAuto = deps.roomActivity ? deps.roomActivity.tryAcquire(roomId) : () => {};
+            if (releaseAuto) try {
+            for (let i = 0; i < autoTurns; i += 1) {
+              const batch: ConversationEvent[] = [];
+              for await (const ev of host.run(sessionId, { clientTurnId: `${body.clientTurnId}#auto${i}`, auto: true })) batch.push(ev);
+              // 本批连一句都没说（全 silent）就停，不空转烧模型
+              if (!batch.some((e) => e.type === "conversation.utterance")) break;
+              const autoCommitted = batch.find((e) => e.type === "conversation.committed");
+              if (autoCommitted?.type === "conversation.committed") finalState = autoCommitted.state;
+              const autoPlaceholders = unknownPlaceholders(finalState, deps.appearance);
+              const visibleAuto = projectConversationEvents(batch, actorId, members, deps.registry);
+              for (const ev of visibleAuto) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, autoPlaceholders));
+            }
+            } finally { releaseAuto(); }
+          }
+        }
       } catch (e) {
         const roomSyncFault = isRoomSyncFault(e);
         // #104：异常路径按失败回收额度（未 committed），与 v1 /turns 的 catch 同口径；重放命中不结算
