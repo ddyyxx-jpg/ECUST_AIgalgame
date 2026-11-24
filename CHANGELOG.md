@@ -8,6 +8,12 @@
 
 ## 未发布 — v2 会话行动点 + 内容层世界观进 v2（CONTRACT 3.11.0）
 
+### 修复（试玩反馈：NPC 之间的名字）
+
+- 出站遮罩：`叫<真名>` 改写为判断句「是<外貌/序号占位名>」，不再出现「叫抱着一摞校刊的女生」这类病句（`apps/server/src/view-names.ts`）。
+- 姓名解锁新增第三条来源：玩家问「另外一个叫什么 / 旁边那位是谁」时，NPC 台词里说出的其他未认识 NPC 名字也算听到（不要求在场、不要求自报），下一回合起用真名（`apps/server/src/name-unlock.ts` + v1/v2 两条路由接线）。
+- 验证：tsc 0；vitest 137 文件/1111 例；contract 9/9（3.11.0）。
+
 > 收 #153 复审里「未真正闭环」的四项；不改 op 语义、不改世界状态结构。
 
 - **行动点在默认路径（v2 `/conversation`）生效**：`ConversationHostV2` 接 `actionPolicy`（与 v1 `TurnActionPolicy` 同源，键名来自 `content/sim/policy.json`）。玩家每回合先扣点、余额不足整批拒绝（`E_PRECONDITION` + `conversation.error`），不调模型、不落库；旧存档没有 `action_points` 时不扣也不拦。文案由 `ConversationPolicy.messages.actionPointsInsufficient` 提供（`{now}`/`{cost}`），前端 HUD 在 v2 也显示行动点。

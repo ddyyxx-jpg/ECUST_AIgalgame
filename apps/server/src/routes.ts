@@ -12,7 +12,7 @@ import { DialogueBodySchema, TickBodySchema, TravelBodySchema, zodMessage } from
 import type { MapService } from "./map.ts";
 import type { LlmSettings } from "./settings.ts";
 import { maskNamesDeep, unmaskTargetPlaceholder, unknownPlaceholders } from "./view-names.ts";
-import { askedNameTargetId, introducedPresentIds, viewerSpeech } from "./name-unlock.ts";
+import { askedNameTargetId, introducedPresentIds, isAskOtherNameInput, mentionedNpcIds, viewerSpeech } from "./name-unlock.ts";
 import type { SaveIndex } from "./saves.ts";
 import type { TurnHistory } from "./turn-history.ts";
 import { registerResumeRoutes } from "./resume.routes.ts";
@@ -843,7 +843,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
             if (asked) learnedIds.add(asked);
             // 台词判定：交付里没有说话人标签，按「真名：内容」还原后复用 v1 的自报姓名规则；
             // 只统计玩家实际收到的 delivery（viewerSpeech 内含可见性过滤）。
-            for (const id of introducedPresentIds(snapshot, viewerSpeech(snapshot, actorId, out))) learnedIds.add(id);
+            const heard = viewerSpeech(snapshot, actorId, out);
+            for (const id of introducedPresentIds(snapshot, heard)) learnedIds.add(id);
+            // 玩家在问"另一个人"是谁：对方把名字说出来了，玩家就听见了（不必在场、不必自报）
+            if (isAskOtherNameInput(utterance?.content ?? "")) {
+              for (const id of mentionedNpcIds(snapshot, heard)) learnedIds.add(id);
+            }
             if (learnedIds.size > 0) {
               await deps.learnNpcNames(roomId, [...learnedIds]);
               finalState = await deps.store.snapshot(roomId);
@@ -1150,6 +1155,10 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
             })
             .join("\n");
           for (const id of introducedPresentIds(snapshot, speech)) learnedIds.add(id);
+          // 玩家在问"另一个人"是谁：对方把名字说出来了，玩家就听见了（不必在场、不必自报）
+          if (isAskOtherNameInput(body.input)) {
+            for (const id of mentionedNpcIds(snapshot, speech)) learnedIds.add(id);
+          }
           if (learnedIds.size > 0) {
             await deps.learnNpcNames(roomId, [...learnedIds]);
             finalState = await deps.store.snapshot(roomId);

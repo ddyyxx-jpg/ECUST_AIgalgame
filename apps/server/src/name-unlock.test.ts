@@ -4,7 +4,14 @@
 import { describe, expect, it } from "vitest";
 import type { Delivery, ConversationEvent } from "../../../packages/shared/src/contract/v2.ts";
 import type { Entity, WorldState } from "../../../packages/shared/src/contract/types.ts";
-import { askedNameTargetId, introducedPresentIds, namesIntroducedIn, viewerSpeech } from "./name-unlock.ts";
+import {
+  askedNameTargetId,
+  introducedPresentIds,
+  isAskOtherNameInput,
+  mentionedNpcIds,
+  namesIntroducedIn,
+  viewerSpeech,
+} from "./name-unlock.ts";
 
 function npc(name: string, known = false): Entity {
   return {
@@ -144,5 +151,32 @@ describe("viewerSpeech（只还原玩家实际收到的 delivery）", () => {
         utterance({ to: "plr_1", speaker: "npc_林静", channels: ["action"], content: "林静，安静的静。", action: "凑近耳语" }),
       ]),
     ).toBe("林静：凑近耳语");
+  });
+});
+
+describe("第三人称问名（试玩反馈：问「另外一个叫什么」却永远学不到名字）", () => {
+  it("玩家问另一个人 → 台词里说出的名字解锁（不必在场、不必自报）", () => {
+    const entities = [npc("白晓通"), npc("林静")];
+    const state = world(entities, []);
+    const speech = "金满堂：另一个在三楼过刊那边的，叫白晓通。林静在流通台盖章呢。";
+    expect(mentionedNpcIds(state, speech)).toEqual(["npc_白晓通", "npc_林静"]);
+  });
+
+  it("「名字：台词」的说话人标签不算提到", () => {
+    const state = world([npc("白晓通")], []);
+    expect(mentionedNpcIds(state, "白晓通：早上好啊。")).toEqual([]);
+  });
+
+  it("已认识的人不重复解锁", () => {
+    const state = world([npc("白晓通", true)], []);
+    expect(mentionedNpcIds(state, "叫白晓通。")).toEqual([]);
+  });
+
+  it("识别「另外一个人」的问法，普通闲聊不触发", () => {
+    expect(isAskOtherNameInput("额另外一个叫什么？")).toBe(true);
+    expect(isAskOtherNameInput("旁边那位是谁")).toBe(true);
+    expect(isAskOtherNameInput("你叫什么名字")).toBe(true);
+    expect(isAskOtherNameInput("今天天气不错")).toBe(false);
+    expect(isAskOtherNameInput("去图书馆")).toBe(false);
   });
 });

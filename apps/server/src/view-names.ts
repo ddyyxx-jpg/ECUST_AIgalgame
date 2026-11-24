@@ -47,11 +47,35 @@ export function displayNameOf(entity: Entity, placeholders?: Map<string, string>
   return placeholders?.get(entity.name) ?? UNKNOWN_NPC_NAME;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 「叫<真名>」不能直接换成外貌描述：占位名是名词短语（"抱着一摞校刊、脖子上挂着相机的女生"），
+ * 塞进"叫"后面会变成"叫抱着一摞校刊的女生"，读起来像在报外貌而不是认人。
+ * 这里把介绍句改成判断句（"是…"），其余位置仍按名词短语替换。
+ * 「都/就/让/请/别… + 他/她/它 + 叫」是"称呼某人"的用法（"大家都叫他X"），
+ * 只换名字、保留"叫"，否则会变成"大家都叫他是…"。
+ */
+function nicknamePattern(name: string): RegExp {
+  return new RegExp(`(?:都|就|让|请|别|只|偏|好|该)[他她它]叫\\s*${escapeRegExp(name)}`, "g");
+}
+
+function introducePattern(name: string): RegExp {
+  return new RegExp(`(名字叫|名叫|叫做|叫作|叫)\\s*${escapeRegExp(name)}`, "g");
+}
+
 /** 把一句文本里出现的未认识 NPC 真名替换成占位名（模型会把名字写进台词/叙事） */
 export function maskNamesInText(text: string, placeholders: Map<string, string>): string {
   let out = text;
   // 按名字长度降序替换：否则"白晓"与"白晓通"这类前缀相同的名字会互相污染
   const entries = [...placeholders.entries()].sort((a, b) => b[0].length - a[0].length);
+  for (const [name, placeholder] of entries) {
+    // 先处理"称呼某人"（只换名字），再处理介绍句（换整段）
+    out = out.replace(nicknamePattern(name), (m) => m.split(name).join(placeholder));
+    out = out.replace(introducePattern(name), `是${placeholder}`);
+  }
   for (const [name, placeholder] of entries) out = out.split(name).join(placeholder);
   return out;
 }
