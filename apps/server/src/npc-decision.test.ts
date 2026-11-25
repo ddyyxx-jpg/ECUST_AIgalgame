@@ -230,4 +230,13 @@ describe("NpcDecisionService 真实落盘", () => {
     const lease = JSON.parse(String(snap.entities.npc_1.attrs.sim_lease));
     expect(lease).toMatchObject({ action: "move", target: "loc_b", remaining: 1, phase: "morning" });
   });
+
+  it("去掉「留下」选项后，模型回 stay 不会被误映射成 1 号移动选项", () => {
+    const moves = [
+      { index: 1, locId: "loc_canteen", label: "去食堂" },
+      { index: 2, locId: "loc_library", label: "去图书馆" },
+    ];
+    expect(parseDecision({ action: "stay in canteen" }, moves)).toBeNull();
+    expect(parseDecision({ action: "留在原地" }, moves)).toBeNull();
+  });
 });

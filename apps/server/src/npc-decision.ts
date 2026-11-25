@@ -201,7 +201,13 @@ function extractChoice(value: unknown, options: readonly DecisionOption[]): { ch
   if (typeof value === "string") {
     const t = value.trim();
     if (/^\d+$/.test(t)) return fromNumber(Number(t));
-    if (/留|呆|待|原地|stay|remain/i.test(t)) return { choice: 1, reason: t.slice(0, 40) };
+    if (/留|呆|待|原地|stay|remain/i.test(t)) {
+      // 只有第一个选项真的是"留下"时才映射成 1：去掉 stay 选项后，1 号是"去某地"，
+      // 把 "stay" 硬映射成 1 会把想留下的 NPC 送去别处。
+      const first = options[0];
+      const isStay = first ? /留|呆|待|原地|stay|remain/i.test(first.label) : false;
+      return isStay ? { choice: 1, reason: t.slice(0, 40) } : null;
+    }
     const hit = options.find((o) => o.locId === t || t.includes(o.label) || o.label.includes(t));
     return hit ? { choice: hit.index, reason: t.slice(0, 40) } : null;
   }
