@@ -15,7 +15,7 @@ const dbg = (...args: unknown[]) => {
   if (process.env.GALGAME_DEBUG_SIM === "1") console.log("[sim-dbg]", ...args);
 };
 import type { Envelope, Id, LlmPort, Phase, Proposal, WorldState } from "../../../packages/shared/src/contract/types.ts";
-import { parseLease } from "../../../content/modules/map/lease.ts";
+import { clockIndex, parseLease } from "../../../content/modules/map/lease.ts";
 
 const LEASE = "sim_lease";
 const PHASE_LABEL: Record<Phase, string> = {
@@ -291,7 +291,7 @@ export class NpcDecisionService {
     const used = this.calls.get(roomId);
     if (used && used.hour === hour && used.count >= policy.hourlyCalls) return;
 
-    const candidates = this.candidates(snapshot, policy.maxPerBeat);
+    const candidates = this.candidates(snapshot, roomId, policy.maxPerBeat);
     for (const npcId of candidates) {
       const options = buildDecisionOptions(snapshot, npcId, policy.maxOptions, {
         allowStay: snapshot.clock.tick % 3 !== 0,
@@ -308,23 +308,24 @@ export class NpcDecisionService {
       const option = options[Math.max(0, Math.min(options.length - 1, open.choice - 1))];
       if (!option) continue;
       dbg(`pick ${npcId} choice=${open.choice}/${options.length} → ${option.locId} 「${option.label}」(${open.reason ?? "-"})`);
-      this.lastDecided.set(npcId, snapshot.clock.day * 10000 + snapshot.clock.tick);
       await this.applyLease(roomId, snapshot, npcId, option, open.reason);
+      // 写租约成功后才记冷却：失败不该白吃 3 拍
+      this.lastDecided.set(`${roomId}:${npcId}`, clockIndex(snapshot.clock));
       dbg(`lease ${npcId} → ${option.locId} 「${option.label}」`);
     }
   }
 
-  private candidates(state: WorldState, limit: number): string[] {
-    const clockIndex = state.clock.day * 10000 + state.clock.tick;
+  private candidates(state: WorldState, roomId: string, limit: number): string[] {
+    const at = clockIndex(state.clock);
     const all = Object.values(state.entities)
       .filter((e) => e.kind === "npc" && e.status === "active")
       .filter((e) => idleLease(e.attrs[LEASE]))
-      .filter((e) => clockIndex - (this.lastDecided.get(e.id) ?? -999) >= NpcDecisionService.DECIDE_COOLDOWN_TICKS)
+      .filter((e) => at - (this.lastDecided.get(`${roomId}:${e.id}`) ?? -999) >= NpcDecisionService.DECIDE_COOLDOWN_TICKS)
       .map((e) => e.id)
       .sort();
     if (all.length === 0) return [];
     // 轮转起点随 tick 走：固定取前 N 个会让排在前面的 NPC 永远被决策、后面的永远不动。
-    const offset = (state.clock.day * 10000 + state.clock.tick) % all.length;
+    const offset = at % all.length;
     const picked: string[] = [];
     for (let i = 0; i < Math.min(limit, all.length); i += 1) picked.push(all[(offset + i) % all.length]!);
     return picked;

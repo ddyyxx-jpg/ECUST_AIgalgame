@@ -149,7 +149,7 @@ describe("AmbientChat（气泡闲聊）", () => {
     expect(chat.recent("room_a", "loc_library")).toHaveLength(0);
   });
 
-  it("审核 blocked 的那条直接丢，其余照发", async () => {
+  it("审核 blocked 时整轮不发布（一轮只审一次）", async () => {
     const chat = new AmbientChat(
       {
         store: { listRooms: async () => ["room_a"], snapshot: async () => state() },
@@ -168,7 +168,8 @@ describe("AmbientChat（气泡闲聊）", () => {
       { enabled: true, intervalMs: 30_000, ttlMs: 10_000 },
     );
     await chat.beat();
-    expect(chat.recent("room_a").map((l) => l.text)).toEqual(["这句可以"]);
+    // 一轮只审一次：合并文本里只要有一句不合格，整轮丢弃（宁可少说，也不放未审内容出站）。
+    expect(chat.recent("room_a")).toHaveLength(0);
   });
 
   it("审核 unavailable 时整轮不发布（fail-closed）", async () => {

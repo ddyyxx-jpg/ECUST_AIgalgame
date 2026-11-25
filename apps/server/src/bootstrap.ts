@@ -622,6 +622,9 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     skipRoom: (roomId) => roomActivity.idleSince(roomId, 30 * 60_000),
     ...(npcDecision ? { beforeTick: (roomId: string) => npcDecision.run(roomId) } : {}),
   });
+  if (process.env.GALGAME_DEBUG_SIM === "1") {
+    console.warn("[sim] GALGAME_DEBUG_SIM=1：会打印模型原文（含真名/剧情），只应在本地调试时使用");
+  }
   simClock.start();
 
   // NPC 之间的环境闲聊：只产气泡（内存 TTL），不写世界状态、不进事件日志。
@@ -632,7 +635,8 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
           llm,
           isIdle: (roomId: string) =>
             roomActivity.idleSince(roomId, simPolicy?.ambientChat?.activeWithinMs ?? 30 * 60_000),
-          isBusy: (roomId: string) => roomActivity.isBusy(roomId),
+          // 和 SimClock 同口径：后台 canonize/gossip 在跑时也算忙，避免并发抢模型
+          isBusy: (roomId: string) => roomActivity.isBusy(roomId) || background.isBusy(roomId),
           lastActiveAt: (roomId: string) => roomActivity.lastTouchedAt(roomId),
           review: async ({ roomId, actorId, text }) => {
             const outcome = await conversationAudit.review({

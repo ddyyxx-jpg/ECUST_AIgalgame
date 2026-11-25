@@ -83,7 +83,7 @@ export interface SimPolicy {
 }
 
 /**
- * 读 `<contentDir>/sim/policy.json`。缺文件、坏 JSON、缺 actionPoints 都返回 undefined
+ * 读 `<contentDir>/sim/policy.json`。缺文件、坏 JSON、三块能力全关时返回 undefined
  * （= 不启用），避免一个手滑的配置文件把整个服务卡死。
  */
 export async function loadSimPolicy(contentDir: string): Promise<SimPolicy | undefined> {

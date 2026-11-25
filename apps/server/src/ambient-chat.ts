@@ -190,19 +190,18 @@ export class AmbientChat {
     }
     if (lines.length === 0) return;
     if (this.deps.review) {
-      const passed: AmbientLine[] = [];
-      for (const line of lines) {
-        const verdict = await this.deps.review({ roomId, actorId: line.speakerId, text: line.text });
-        if (verdict === "unavailable") {
-          // 审核器故障：整轮不发布（和会话层 fail-closed 一致），也不惩罚任何人
-          this.warn(`[ambient] 房间 ${roomId} 审核不可用，本轮流产气泡`);
-          return;
-        }
-        if (verdict === "blocked") continue;
-        passed.push(line);
+      // 一轮只审一次：1~2 句合并成一段，省一次审核调用；任一句不合格就整轮不发布。
+      const joined = lines.map((l) => `${l.speaker}：${l.text}`).join("\n");
+      const verdict = await this.deps.review({ roomId, actorId: lines[0]!.speakerId, text: joined });
+      if (verdict === "unavailable") {
+        // 审核器故障：整轮不发布（和会话层 fail-closed 一致），也不惩罚任何人
+        this.warn(`[ambient] 房间 ${roomId} 审核不可用，本轮不发布气泡`);
+        return;
       }
-      lines.length = 0;
-      lines.push(...passed);
+      if (verdict === "blocked") {
+        this.warn(`[ambient] 房间 ${roomId} 本轮气泡未过审，已丢弃`);
+        return;
+      }
     }
     if (lines.length === 0) return;
     const kept = [...(this.byRoom.get(roomId) ?? []), ...lines].slice(-24);
