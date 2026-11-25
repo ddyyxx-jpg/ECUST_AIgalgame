@@ -54,6 +54,7 @@ import { loadSimPolicy } from "./sim.policy.ts";
 import { loadLlmRoutes } from "./llm-routes.ts";
 import { RoomActivity } from "./room-activity.ts";
 import { SimClock } from "./sim-clock.ts";
+import { AmbientChat } from "./ambient-chat.ts";
 import { NpcDecisionService } from "./npc-decision.ts";
 import { AuthStore } from "./auth-store.ts";
 import { SessionStore } from "./sessions.ts";
@@ -613,9 +614,19 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     policy: simPolicy?.clock ?? { enabled: false, intervalMs: 60_000, ticksPerBeat: 1, maxTick: 24 },
     isBusy: (roomId) => background.isBusy(roomId) || roomActivity.isBusy(roomId),
     acquire: (roomId) => roomActivity.tryAcquire(roomId),
+    skipRoom: (roomId) => roomActivity.idleSince(roomId, 30 * 60_000),
     ...(npcDecision ? { beforeTick: (roomId: string) => npcDecision.run(roomId) } : {}),
   });
   simClock.start();
+
+  // NPC 之间的环境闲聊：只产气泡（内存 TTL），不写世界状态、不进事件日志。
+  const ambientChat = simPolicy?.ambientChat
+    ? new AmbientChat(
+        { store, llm, isIdle: (roomId: string) => roomActivity.idleSince(roomId, 30 * 60_000) },
+        { enabled: true, intervalMs: simPolicy.ambientChat.intervalMs, ttlMs: simPolicy.ambientChat.ttlMs, ...(simPolicy.ambientChat.maxBubbles === undefined ? {} : { maxBubbles: simPolicy.ambientChat.maxBubbles }), ...(simPolicy.ambientChat.activeWithinMs === undefined ? {} : { activeWithinMs: simPolicy.ambientChat.activeWithinMs }), ...(simPolicy.ambientChat.maxRoomsPerBeat === undefined ? {} : { maxRoomsPerBeat: simPolicy.ambientChat.maxRoomsPerBeat }) },
+      )
+    : undefined;
+  ambientChat?.start();
 
   if (simPolicy && simPolicy.actionCostPerTurn > 0) {
     const actionDef = registry.attr(simPolicy.actionAttr);
@@ -655,6 +666,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     jobLedger,
     background,
     jobReconcile,
+    ...(ambientChat ? { ambient: ambientChat } : {}),
     // getter 而不是 createApp 时的快照：遥测随任务运行增长，运维/测试要能读到实时值
     backgroundTelemetry: {
       get terminalPersistFailures() {

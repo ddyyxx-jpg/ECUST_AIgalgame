@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { MapScene, MapView } from "./api.ts";
+import type { MapChatter, MapNpc, MapScene, MapView } from "./api.ts";
 import MapLegend from "./MapLegend.tsx";
 import {
   DRAG_THRESHOLD_PX,
@@ -223,6 +223,20 @@ export default function MapViewport({ map, selectedId, busy, onSceneClick }: Pro
             title={npc.name}
           />
         ))}
+
+        {(map.chatter ?? [])
+          .map((line) => ({ line, npc: map.npcs.find((n) => n.id === line.speakerId) }))
+          .filter((x): x is { line: MapChatter; npc: MapNpc } => Boolean(x.npc))
+          .slice(-3)
+          .map(({ line, npc }) => (
+            <span
+              key={line.id}
+              className="map-bubble"
+              style={{ left: npc.x, top: npc.y, transform: `translate(-50%,-100%) scale(${markerScale})` }}
+            >
+              {line.text}
+            </span>
+          ))}
 
         {map.scenes.map((scene) => {
           const status = sceneStatus(scene);

@@ -12,18 +12,27 @@
     "enabled": true,
     "intervalMs": 45000,
     "ticksPerBeat": 1,
-    "maxTick": 24
+    "maxTick": 24,
+    "autoAdvancePhase": true
   },
   "decision": {
     "enabled": true,
     "maxPerBeat": 2,
     "intervalTicks": 2,
-    "hourlyCalls": 12,
+    "hourlyCalls": 60,
     "maxOptions": 4
   },
   "chat": {
     "enabled": true,
     "autoTurns": 1,
-    "minPresentNpcs": 2
+    "minPresentNpcs": 2,
+    "ambient": {
+      "enabled": true,
+      "intervalMs": 30000,
+      "ttlMs": 45000,
+      "maxBubbles": 3,
+      "activeWithinMs": 3600000,
+      "maxRoomsPerBeat": 3
+    }
   }
 }

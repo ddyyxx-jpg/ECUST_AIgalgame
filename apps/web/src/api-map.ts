@@ -44,6 +44,17 @@ export interface MapNpc {
   y: number;
 }
 
+/** NPC 环境闲聊气泡（服务端内存缓冲，进 /map 响应；不进存档） */
+export interface MapChatter {
+  id: string;
+  roomId: string;
+  locId: string;
+  speakerId: string;
+  speaker: string;
+  text: string;
+  at: number;
+}
+
 export interface MapView {
   worldId: string;
   /** 底图 URL（public 下静态资源，如 "/map/ecust-campus.jpg"）；null = 无底图 */
@@ -56,6 +67,8 @@ export interface MapView {
   scenes: MapScene[];
   npcs: MapNpc[];
   published: string[];
+  /** 近期 NPC 之间的对话（按说话人各留最后一句） */
+  chatter?: MapChatter[];
 }
 
 export interface TravelResult {

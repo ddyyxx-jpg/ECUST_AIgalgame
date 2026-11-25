@@ -68,6 +68,8 @@ export interface AppDeps {
     stats(): { worldId: string; version: number; writtenToday: number; writtenTotal: number; circuitOpen: boolean; consecutiveJudgeFailures: number };
     sample(limit: number): MemoryRecord[];
   };
+  /** NPC 环境闲聊气泡（只读内存缓冲，不写存档） */
+  ambient?: { recent(roomId: string): unknown[] };
   /** NPC 自由对话：玩家回合写完后，同一条流里让在场 NPC 自己再聊 autoTurns 轮 */
   autoChat?: { turns: number; minPresentNpcs: number };
   /** 管理员令牌；canonize 端点用它鉴权（地图端点由 MapService 自己校验） */
@@ -976,6 +978,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
   app.get("/api/v1/rooms/:roomId/state", async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
     if (!(await roomGate(roomId, reply))) return reply;
+    deps.roomActivity?.touch(roomId);
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
     // 原始快照里带着实体真名：未认识的人必须在这里也脱敏，否则"服务端不下发真名"
@@ -1362,7 +1365,13 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
     const q = req.query as { actorId?: string };
-    return safe(reply, () => deps.map.getMap(roomId, q.actorId));
+    deps.roomActivity?.touch(roomId);
+    return safe(reply, async () => {
+      const result = await deps.map.getMap(roomId, q.actorId);
+      if (!result.ok) return result;
+      // 气泡是纯氛围层：单独挂在 map 响应上，前端按 NPC 坐标贴到头顶。
+      return { ...result, map: { ...result.map, chatter: deps.ambient?.recent(roomId) ?? [] } };
+    });
   });
 
   app.post("/api/v1/rooms/:roomId/map/travel", async (req, reply) => {

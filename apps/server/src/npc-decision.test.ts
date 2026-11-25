@@ -99,6 +99,31 @@ describe("NpcDecisionService", () => {
     expect(expected).toBe(7);
   });
 
+  it("NPC 只是原地停留（stay 租约）时仍可被自由活动接管", async () => {
+    const applied: unknown[] = [];
+    const stay = JSON.stringify({ action: "stay", target: "loc_a", remaining: 2, phase: "morning" });
+    const base = state();
+    const withStay = {
+      ...base,
+      entities: { ...base.entities, npc_1: { ...base.entities.npc_1!, attrs: { sim_lease: stay } } },
+    } as WorldState;
+    const service = new NpcDecisionService({
+      store: { snapshot: async () => withStay, load: async () => 3 },
+      arbiter: { apply: async (_room, ops) => { applied.push(ops); return { ok: true }; } },
+      llm: {
+        chat: async () => ({ raw: '{"choice":2}', json: { choice: 2 }, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "fake", latencyMs: 1 }),
+      },
+      policy: { enabled: true, maxPerBeat: 1, intervalTicks: 1, hourlyCalls: 10, maxOptions: 4 },
+    });
+    await service.run("room_a", withStay);
+    expect(applied).toHaveLength(1);
+  });
+
+  it("思考型模型把 JSON 夹在推理后面时也能解析", () => {
+    const raw = '先想想：他应该去食堂。\n{"choice": 2, "reason": "去吃饭"}';
+    expect(parseDecision(raw, 4)).toEqual({ choice: 2, reason: "去吃饭" });
+  });
+
   it("慢决策期间玩家写了 talk 租约：放弃写入，不覆盖冻结", async () => {
     let reads = 0;
     let writes = 0;
@@ -108,7 +133,7 @@ describe("NpcDecisionService", () => {
         snapshot: async () => {
           reads += 1;
           const s = state();
-          if (reads > 1) s.entities.npc_1!.attrs.sim_lease = JSON.stringify({ action: "talk", target: "loc_a", remaining: 2, phase: "morning" });
+          if (reads > 1) s.entities.npc_1!.attrs.sim_lease = JSON.stringify({ action: "talk", target: "loc_a", remaining: 1, phase: "morning" });
           return s;
         },
       },
@@ -190,6 +215,6 @@ describe("NpcDecisionService 真实落盘", () => {
     await service.run(room);
     const snap = await store.snapshot(room);
     const lease = JSON.parse(String(snap.entities.npc_1.attrs.sim_lease));
-    expect(lease).toMatchObject({ action: "move", target: "loc_b", remaining: 2, phase: "morning" });
+    expect(lease).toMatchObject({ action: "move", target: "loc_b", remaining: 1, phase: "morning" });
   });
 });

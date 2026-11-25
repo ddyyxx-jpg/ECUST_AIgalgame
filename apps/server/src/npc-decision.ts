@@ -144,6 +144,34 @@ export function buildPerception(state: WorldState, npcId: string, options: Decis
 }
 
 /** 解析模型 JSON；兼容 ```json 包裹与多余的说明文字。失败返回 null，由确定性 fallback 接手。 */
+/** 从自由文本里抠最后一个 {…}（含 choice 的才认），用于思考型模型把 JSON 夹在推理后面的情况。 */
+function lastJsonObject(text: string): unknown {
+  let start = -1;
+  let depth = 0;
+  let found: unknown = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        const slice = text.slice(start, i + 1);
+        start = -1;
+        try {
+          const parsed = JSON.parse(slice) as unknown;
+          if (parsed !== null && typeof parsed === "object" && "choice" in (parsed as Record<string, unknown>)) found = parsed;
+        } catch {
+          /* 半截 JSON：忽略，继续找下一个 */
+        }
+      }
+      if (depth < 0) depth = 0;
+    }
+  }
+  return found;
+}
+
 export function parseDecision(raw: unknown, optionCount: number): { choice: number; reason?: string } | null {
   let value = raw;
   if (typeof raw === "string") {
@@ -152,7 +180,8 @@ export function parseDecision(raw: unknown, optionCount: number): { choice: numb
     try {
       value = JSON.parse(text.trim());
     } catch {
-      return null;
+      value = lastJsonObject(text);
+      if (value === null) return null;
     }
   }
   const parsed = ChoiceSchema.safeParse(value);
@@ -171,8 +200,10 @@ export function fallbackChoice(roomId: string, npcId: string, state: WorldState,
   return (hash >>> 0) % Math.max(1, optionCount);
 }
 
-function emptyLease(raw: unknown): boolean {
-  return raw === undefined || raw === "";
+/** 空闲 = 没租约，或只是「原地停留」：停留不算忙，自由活动可以接管。 */
+function idleLease(raw: unknown): boolean {
+  if (raw === undefined || raw === "") return true;
+  return typeof raw === "string" && raw.includes('"action":"stay"');
 }
 
 function hourKey(ms: number): string {
@@ -219,14 +250,14 @@ export class NpcDecisionService {
   }
 
   private candidates(state: WorldState, limit: number): string[] {
-    const playerLoc = state.room.scene.locId;
     return Object.values(state.entities)
       .filter((e) => e.kind === "npc" && e.status === "active")
-      .filter((e) => emptyLease(e.attrs[LEASE]))
-      .filter((e) => locatedAt(state, e.id) !== playerLoc)
+      .filter((e) => idleLease(e.attrs[LEASE]))
       .map((e) => e.id)
       .sort()
       .slice(0, limit);
+    // 不再排除“与玩家同地点”的 NPC：玩家在场时也需要看到别人起身走动/离开，
+    // 否则固定地点（食堂/图书馆）里的人永远不动。
   }
 
   private takeCallBudget(roomId: string, hour: string): boolean {
@@ -275,12 +306,12 @@ export class NpcDecisionService {
     }
     const target = latest.entities[npcId];
     if (target?.kind !== "npc" || target.status !== "active") return;
-    if (!emptyLease(target.attrs[LEASE])) return;
+    if (!idleLease(target.attrs[LEASE])) return;
     // 目标不是当前地点时先写 move，下一次 map tick 会沿最短路移动并把租约改成 stay。
     const lease = {
       action: option.locId === this.currentLoc(latest, npcId) ? "stay" : "move",
       target: option.locId,
-      remaining: 2,
+      remaining: option.locId === this.currentLoc(latest, npcId) ? 2 : 1,
       phase: latest.clock.phase,
     } satisfies { action: "stay" | "move"; target: string; remaining: number; phase: Phase };
     const cause: Envelope = {
