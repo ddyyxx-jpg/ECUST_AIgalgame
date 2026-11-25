@@ -17,14 +17,14 @@
   },
   "decision": {
     "enabled": true,
-    "maxPerBeat": 2,
-    "intervalTicks": 2,
+    "maxPerBeat": 3,
+    "intervalTicks": 1,
     "hourlyCalls": 60,
     "maxOptions": 4
   },
   "chat": {
     "enabled": true,
-    "autoTurns": 1,
+    "autoTurns": 2,
     "minPresentNpcs": 2,
     "ambient": {
       "enabled": true,

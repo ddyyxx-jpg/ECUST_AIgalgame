@@ -1370,7 +1370,12 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       const result = await deps.map.getMap(roomId, q.actorId);
       if (!result.ok) return result;
       // 气泡是纯氛围层：单独挂在 map 响应上，前端按 NPC 坐标贴到头顶。
-      return { ...result, map: { ...result.map, chatter: deps.ambient?.recent(roomId) ?? [] } };
+      // 气泡文本/说话人同样过遮罩：未认识的 NPC 只能显示外貌占位名（与 /state、/events 同口径）。
+      const chatter = maskNamesDeep(
+        deps.ambient?.recent(roomId) ?? [],
+        unknownPlaceholders(access.state, deps.appearance),
+      );
+      return { ...result, map: { ...result.map, chatter } };
     });
   });
 

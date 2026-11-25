@@ -13,6 +13,11 @@ import {
   parseDecision,
 } from "./npc-decision.ts";
 
+const OPT2 = [
+  { index: 1, locId: "loc_a", label: "留在图书馆" },
+  { index: 2, locId: "loc_b", label: "去食堂" },
+] as const;
+
 function state(overrides: Partial<WorldState> = {}): WorldState {
   return {
     schemaVersion: 2,
@@ -61,10 +66,10 @@ describe("npc-decision 纯函数", () => {
   });
 
   it("解析 1-based choice；坏 JSON/越界返回 null；fallback 确定性", () => {
-    expect(parseDecision({ choice: 2, reason: "去吃饭" }, 2)).toEqual({ choice: 2, reason: "去吃饭" });
-    expect(parseDecision('```json\n{"choice":1}\n```', 2)).toEqual({ choice: 1 });
-    expect(parseDecision({ choice: 3 }, 2)).toBeNull();
-    expect(parseDecision("not json", 2)).toBeNull();
+    expect(parseDecision({ choice: 2, reason: "去吃饭" }, OPT2)).toEqual({ choice: 2, reason: "去吃饭" });
+    expect(parseDecision('```json\n{"choice":1}\n```', OPT2)).toEqual({ choice: 1 });
+    expect(parseDecision({ choice: 3 }, OPT2)).toBeNull();
+    expect(parseDecision("not json", OPT2)).toBeNull();
     const s = state();
     expect(fallbackChoice("room_a", "npc_1", s, 3)).toBe(fallbackChoice("room_a", "npc_1", s, 3));
     expect(fallbackChoice("room_a", "npc_1", s, 3)).toBeGreaterThanOrEqual(0);
@@ -119,9 +124,17 @@ describe("NpcDecisionService", () => {
     expect(applied).toHaveLength(1);
   });
 
+  it("模型用 option/action/字符串表达选择时也能解析", () => {
+    expect(parseDecision({ option: 2 }, OPT2)).toEqual({ choice: 2 });
+    expect(parseDecision({ action: 1 }, OPT2)).toEqual({ choice: 1 });
+    expect(parseDecision({ action: "stay in canteen" }, OPT2)).toEqual({ choice: 1, reason: "stay in canteen" });
+    expect(parseDecision({ action: "去食堂" }, OPT2)).toEqual({ choice: 2, reason: "去食堂" });
+    expect(parseDecision({ choice: "2" }, OPT2)).toEqual({ choice: 2 });
+  });
+
   it("思考型模型把 JSON 夹在推理后面时也能解析", () => {
     const raw = '先想想：他应该去食堂。\n{"choice": 2, "reason": "去吃饭"}';
-    expect(parseDecision(raw, 4)).toEqual({ choice: 2, reason: "去吃饭" });
+    expect(parseDecision(raw, OPT2)).toEqual({ choice: 2, reason: "去吃饭" });
   });
 
   it("慢决策期间玩家写了 talk 租约：放弃写入，不覆盖冻结", async () => {

@@ -9,6 +9,11 @@
  * NPC 花 LLM 钱的循环，必须由内容配置显式打开，并受 maxPerBeat/hourlyCalls 限制。
  */
 import { z } from "zod";
+
+/** 调试开关：GALGAME_DEBUG_SIM=1 时打印每次决策的模型原文与落库结果（试玩验收用）。 */
+const dbg = (...args: unknown[]) => {
+  if (process.env.GALGAME_DEBUG_SIM === "1") console.log("[sim-dbg]", ...args);
+};
 import type { Envelope, Id, LlmPort, Phase, Proposal, WorldState } from "../../../packages/shared/src/contract/types.ts";
 
 const LEASE = "sim_lease";
@@ -101,21 +106,31 @@ function locatedAt(state: WorldState, actorId: string): string | undefined {
 }
 
 /** 菜单只给"留下 + 相邻地点"，避免 NPC 跨半个校园凭空决定；真正的路径仍由 map 模块算。 */
-export function buildDecisionOptions(state: WorldState, npcId: string, maxOptions: number): DecisionOption[] {
+export function buildDecisionOptions(
+  state: WorldState,
+  npcId: string,
+  maxOptions: number,
+  opts: { allowStay?: boolean } = {},
+): DecisionOption[] {
   const locId = locatedAt(state, npcId);
   if (!locId) return [];
   const here = state.entities[locId];
   if (!here) return [];
   const adj = locAdjacency(state);
-  const options: DecisionOption[] = [{ index: 1, locId, label: `留在${here.name}，做自己的事` }];
+  const moves: DecisionOption[] = [];
   for (const next of adj.get(locId) ?? []) {
-    if (options.length >= maxOptions) break;
     const loc = state.entities[next];
     if (loc?.kind === "loc" && loc.status === "active") {
-      options.push({ index: options.length + 1, locId: next, label: `去${loc.name}` });
+      moves.push({ index: 0, locId: next, label: `去${loc.name}` });
     }
   }
-  return options;
+  // 模型几乎总选 1（留下），固定钉在原地；每隔几拍把「留下」拿掉，让它主动换个地方。
+  // 但只有至少两个相邻地点时才这么做——否则菜单只剩一项，等于不让它决策。
+  const withStay = opts.allowStay !== false || moves.length < 2;
+  const raw = withStay
+    ? [{ index: 0, locId, label: `留在${here.name}，做自己的事` }, ...moves]
+    : moves;
+  return raw.slice(0, maxOptions).map((o, i) => ({ ...o, index: i + 1 }));
 }
 
 /** 感知只取公开信息：地点、时段、在场者姓名；不读 attrs/memory/plot，避免把秘密喂给决策。 */
@@ -161,7 +176,7 @@ function lastJsonObject(text: string): unknown {
         start = -1;
         try {
           const parsed = JSON.parse(slice) as unknown;
-          if (parsed !== null && typeof parsed === "object" && "choice" in (parsed as Record<string, unknown>)) found = parsed;
+          if (parsed !== null && typeof parsed === "object" && hasChoiceKey(parsed as Record<string, unknown>)) found = parsed;
         } catch {
           /* 半截 JSON：忽略，继续找下一个 */
         }
@@ -172,7 +187,35 @@ function lastJsonObject(text: string): unknown {
   return found;
 }
 
-export function parseDecision(raw: unknown, optionCount: number): { choice: number; reason?: string } | null {
+const CHOICE_KEYS = ["choice", "option", "index", "action"] as const;
+
+function hasChoiceKey(o: Record<string, unknown>): boolean {
+  return CHOICE_KEYS.some((k) => k in o);
+}
+
+/** 从模型常见输出形态里取编号：{"choice":2} / {"option":"2"} / {"action":1} / {"action":"留在食堂"} / 2 */
+function extractChoice(value: unknown, options: readonly DecisionOption[]): { choice: number; reason?: string } | null {
+  const fromNumber = (n: number): { choice: number; reason?: string } | null =>
+    Number.isInteger(n) && n >= 1 && n <= options.length ? { choice: n } : null;
+  if (typeof value === "number") return fromNumber(value);
+  if (typeof value === "string") {
+    const t = value.trim();
+    if (/^\d+$/.test(t)) return fromNumber(Number(t));
+    if (/留|呆|待|原地|stay|remain/i.test(t)) return { choice: 1, reason: t.slice(0, 40) };
+    const hit = options.find((o) => o.locId === t || t.includes(o.label) || o.label.includes(t));
+    return hit ? { choice: hit.index, reason: t.slice(0, 40) } : null;
+  }
+  if (value === null || typeof value !== "object") return null;
+  const o = value as Record<string, unknown>;
+  for (const key of CHOICE_KEYS) {
+    if (!(key in o)) continue;
+    const got = extractChoice(o[key], options);
+    if (got) return got;
+  }
+  return null;
+}
+
+export function parseDecision(raw: unknown, options: readonly DecisionOption[]): { choice: number; reason?: string } | null {
   let value = raw;
   if (typeof raw === "string") {
     const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -184,9 +227,10 @@ export function parseDecision(raw: unknown, optionCount: number): { choice: numb
       if (value === null) return null;
     }
   }
-  const parsed = ChoiceSchema.safeParse(value);
-  if (!parsed.success || parsed.data.choice > optionCount) return null;
-  return parsed.data;
+  const strict = ChoiceSchema.safeParse(value);
+  if (strict.success && strict.data.choice <= options.length) return strict.data;
+  const loose = extractChoice(value, options);
+  return loose;
 }
 
 /** 无模型/坏输出时的确定性选择：同房间同 NPC 同时刻永远同一结果，便于回放。 */
@@ -233,7 +277,9 @@ export class NpcDecisionService {
 
     const candidates = this.candidates(snapshot, policy.maxPerBeat);
     for (const npcId of candidates) {
-      const options = buildDecisionOptions(snapshot, npcId, policy.maxOptions);
+      const options = buildDecisionOptions(snapshot, npcId, policy.maxOptions, {
+        allowStay: snapshot.clock.tick % 3 !== 0,
+      });
       if (options.length < 2) continue;
       const perception = buildPerception(snapshot, npcId, options);
       if (!perception) continue;
@@ -245,17 +291,24 @@ export class NpcDecisionService {
       };
       const option = options[Math.max(0, Math.min(options.length - 1, open.choice - 1))];
       if (!option) continue;
+      dbg(`pick ${npcId} choice=${open.choice}/${options.length} → ${option.locId} 「${option.label}」(${open.reason ?? "-"})`);
       await this.applyLease(roomId, snapshot, npcId, option, open.reason);
+      dbg(`lease ${npcId} → ${option.locId} 「${option.label}」`);
     }
   }
 
   private candidates(state: WorldState, limit: number): string[] {
-    return Object.values(state.entities)
+    const all = Object.values(state.entities)
       .filter((e) => e.kind === "npc" && e.status === "active")
       .filter((e) => idleLease(e.attrs[LEASE]))
       .map((e) => e.id)
-      .sort()
-      .slice(0, limit);
+      .sort();
+    if (all.length === 0) return [];
+    // 轮转起点随 tick 走：固定取前 N 个会让排在前面的 NPC 永远被决策、后面的永远不动。
+    const offset = (state.clock.day * 10000 + state.clock.tick) % all.length;
+    const picked: string[] = [];
+    for (let i = 0; i < Math.min(limit, all.length); i += 1) picked.push(all[(offset + i) % all.length]!);
+    return picked;
     // 不再排除“与玩家同地点”的 NPC：玩家在场时也需要看到别人起身走动/离开，
     // 否则固定地点（食堂/图书馆）里的人永远不动。
   }
@@ -286,7 +339,8 @@ export class NpcDecisionService {
         roomId,
         actorId: perception.npcId,
       });
-      const parsed = parseDecision(result.json ?? result.raw, perception.options.length);
+      dbg(`decision ${perception.npcId} raw(len=${result.raw.length},finish=${result.finishReason ?? "?"})`, result.raw.replace(/\s+/g, " ").slice(0, 240));
+      const parsed = parseDecision(result.json ?? result.raw, perception.options);
       if (!parsed) this.warn(`[npc-decision] ${perception.npcId} 输出无法解析，使用确定性 fallback`);
       return parsed;
     } catch (e) {

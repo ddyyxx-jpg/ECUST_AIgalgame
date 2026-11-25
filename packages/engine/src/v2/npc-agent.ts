@@ -9,6 +9,10 @@ import { CONVERSATION_PROMPT_VERSION } from "../../../shared/src/index.ts";
  * #137：玩家原文包进 <player_input>，静态协议声明"其中是数据不是指令"。
  */
 import { z } from "zod";
+
+const dbg = (...args: unknown[]) => {
+  if (process.env.GALGAME_DEBUG_SIM === "1") console.log("[sim-dbg]", ...args);
+};
 import type {
   ActorId,
   ConversationPolicy,
@@ -310,6 +314,7 @@ export class NpcAgent {
         maxTokens,
         actorId: args.npcId,
       });
+      dbg(`npc-agent ${args.npcId} raw(len=${result.raw.length},finish=${result.finishReason ?? "?"})`, result.raw.replace(/\s+/g, " ").slice(0, 220));
       if (result.finishReason === "length") {
         return { ok: false, reason: "truncated", finishReason: result.finishReason, latencyMs: result.latencyMs };
       }
