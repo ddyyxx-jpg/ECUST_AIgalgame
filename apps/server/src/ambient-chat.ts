@@ -109,6 +109,12 @@ export class AmbientChat {
         if (this.deps.isBusy?.(roomId)) continue;
         picked.push(roomId);
       }
+      // 清掉早就不再活跃的房间条目：byRoom 只增不减的话，长跑进程会一直攒着旧房间的台词。
+      const keepAfter = this.now() - (this.policy.activeWithinMs ?? 30 * 60_000);
+      for (const [roomId, lines] of this.byRoom) {
+        const last = lines[lines.length - 1];
+        if (!last || last.at < keepAfter) this.byRoom.delete(roomId);
+      }
       // 先服务最近有玩家活动的房间，否则 listRooms 的顺序会让同一批房间吃满每拍配额。
       picked.sort((a, b) => (this.deps.lastActiveAt?.(b) ?? 0) - (this.deps.lastActiveAt?.(a) ?? 0));
       for (const roomId of picked.slice(0, this.policy.maxRoomsPerBeat ?? 3)) {

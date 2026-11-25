@@ -69,7 +69,7 @@ export interface AppDeps {
     sample(limit: number): MemoryRecord[];
   };
   /** NPC 环境闲聊气泡（只读内存缓冲，不写存档） */
-  ambient?: { recent(roomId: string, locId?: string): unknown[] };
+  ambient?: { recent(roomId: string, locId?: string): unknown[]; stop?: () => void };
   /** NPC 自由对话：玩家回合写完后，同一条流里让在场 NPC 自己再聊 autoTurns 轮 */
   autoChat?: { turns: number; minPresentNpcs: number };
   /** 管理员令牌；canonize 端点用它鉴权（地图端点由 MapService 自己校验） */
