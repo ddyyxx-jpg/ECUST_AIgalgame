@@ -25,7 +25,7 @@
   "chat": {
     "enabled": true,
     "autoTurns": 2,
-    "minPresentNpcs": 2,
+    "minPresentNpcs": 1,
     "ambient": {
       "enabled": true,
       "intervalMs": 30000,
