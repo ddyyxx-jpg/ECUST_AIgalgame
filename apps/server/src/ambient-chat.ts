@@ -148,8 +148,8 @@ export class AmbientChat {
     const locName = state.entities[locId]?.name ?? locId;
     const names = chosen.map((n) => n.name);
     const result = await this.deps.llm.chat({
-      // 用 turn 档预算：思考型模型会先写推理，conversation 档（2000）不够会截断。
-      purpose: "turn",
+      // 独立 ambient 档：气泡可以单独换便宜/快的模型，不必跟着叙事档走。
+      purpose: "ambient",
       json: true,
       temperature: 0.9,
       maxTokens: 200,

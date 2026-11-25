@@ -24,6 +24,11 @@
 - v2 会话：`content/sim/policy.json` 新增 `chat{enabled,autoTurns,minPresentNpcs}`；玩家回合写完后，同一条 SSE 里让在场 NPC 自动再聊 `autoTurns` 轮（写完之后才跑，不额外增加玩家等待）。
 - 引擎：`auto` 回合豁免 `minReplyIntervalMs`（真正的上限仍是 `maxAutoRounds` 与每小时条数/调用上限）；提示词在「玩家没接话」时允许 NPC 主动开口，并要求用 broadcast 让在场者（含玩家）都能听见。
 - `CONVERSATION_PROMPT_VERSION` `2026-11-21.1` → `2026-11-24.1`（提示词静态段与动态段都有改动）。
+## 未发布 — NPC 气泡独立模型档（CONTRACT 3.12.0）
+
+- `LlmPurpose` 增加 `"ambient"`；`content/llm/routes.json` 可给气泡单独配模型 / `max_tokens` / 温度 / 超时。默认 `{ "maxTokens": 200 }`，不配也沿用默认模型。
+- `apps/server/src/ambient-chat.ts` 的气泡调用从 `purpose:"turn"` 改为 `"ambient"`。
+
 ## 未发布 — v2 会话行动点 + 内容层世界观进 v2（CONTRACT 3.11.0）
 
 ### 修复（试玩反馈：NPC 之间的名字）
