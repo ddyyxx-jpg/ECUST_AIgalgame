@@ -69,7 +69,7 @@ export interface AppDeps {
     sample(limit: number): MemoryRecord[];
   };
   /** NPC 环境闲聊气泡（只读内存缓冲，不写存档） */
-  ambient?: { recent(roomId: string): unknown[] };
+  ambient?: { recent(roomId: string, locId?: string): unknown[] };
   /** NPC 自由对话：玩家回合写完后，同一条流里让在场 NPC 自己再聊 autoTurns 轮 */
   autoChat?: { turns: number; minPresentNpcs: number };
   /** 管理员令牌；canonize 端点用它鉴权（地图端点由 MapService 自己校验） */
@@ -1372,7 +1372,7 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       // 气泡是纯氛围层：单独挂在 map 响应上，前端按 NPC 坐标贴到头顶。
       // 气泡文本/说话人同样过遮罩：未认识的 NPC 只能显示外貌占位名（与 /state、/events 同口径）。
       const chatter = maskNamesDeep(
-        deps.ambient?.recent(roomId) ?? [],
+        deps.ambient?.recent(roomId, access.state.room.scene.locId) ?? [],
         unknownPlaceholders(access.state, deps.appearance),
       );
       return { ...result, map: { ...result.map, chatter } };

@@ -90,4 +90,62 @@ describe("AmbientChat（气泡闲聊）", () => {
     expect(calls).toBe(0);
     expect(chat.recent("room_a")).toEqual([]);
   });
+
+  it("正在跑回合的房间本拍跳过（不和玩家抢 LLM，也不读半截状态）", async () => {
+    let calls = 0;
+    const chat = new AmbientChat(
+      {
+        store: { listRooms: async () => ["room_a"], snapshot: async () => state() },
+        llm: { chat: async () => { calls += 1; return { raw: "[]", usage: { promptTokens: 0, completionTokens: 0, calls: 1 }, model: "fake", latencyMs: 1 }; } },
+        isBusy: () => true,
+        now: () => 1,
+      },
+      { enabled: true, intervalMs: 30_000, ttlMs: 10_000 },
+    );
+    await chat.beat();
+    expect(calls).toBe(0);
+  });
+
+  it("玩家所在地点不足 2 人时不去别处凑数（别处气泡玩家看不到，还会泄漏别处动静）", async () => {
+    let calls = 0;
+    const alone = state();
+    alone.room.scene.locId = "loc_library";
+    const withLib = {
+      ...alone,
+      entities: { ...alone.entities, loc_library: { ...alone.entities.loc_canteen!, id: "loc_library", name: "图书馆" } },
+      links: [...alone.links, { id: "l4", kind: "located_in", from: "plr", to: "loc_library" }],
+    } as WorldState;
+    const chat = new AmbientChat(
+      {
+        store: { listRooms: async () => ["room_a"], snapshot: async () => withLib },
+        llm: { chat: async () => { calls += 1; return { raw: "[]", usage: { promptTokens: 0, completionTokens: 0, calls: 1 }, model: "fake", latencyMs: 1 }; } },
+        now: () => 1,
+      },
+      { enabled: true, intervalMs: 30_000, ttlMs: 10_000 },
+    );
+    await chat.beat();
+    expect(calls).toBe(0);
+  });
+
+  it("recent 按地点过滤：别处产生的气泡不返回", async () => {
+    const chat = new AmbientChat(
+      {
+        store: { listRooms: async () => ["room_a"], snapshot: async () => state() },
+        llm: {
+          chat: async () => ({
+            raw: '[{"speaker":"林静","line":"食堂这边人挺多"}]',
+            json: [{ speaker: "林静", line: "食堂这边人挺多" }],
+            usage: { promptTokens: 1, completionTokens: 1, calls: 1 },
+            model: "fake",
+            latencyMs: 1,
+          }),
+        },
+        now: () => 100,
+      },
+      { enabled: true, intervalMs: 30_000, ttlMs: 10_000 },
+    );
+    await chat.beat();
+    expect(chat.recent("room_a", "loc_canteen")).toHaveLength(1);
+    expect(chat.recent("room_a", "loc_library")).toHaveLength(0);
+  });
 });

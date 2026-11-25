@@ -33,6 +33,10 @@ export interface AmbientChatDeps {
   warn?: (message: string) => void;
   /** 死房间判断：为 true 则本拍跳过（由 RoomActivity 提供） */
   isIdle?: (roomId: string) => boolean;
+  /** 正在跑回合的房间跳过：不和玩家的 LLM 抢并发，也不读半截状态 */
+  isBusy?: (roomId: string) => boolean;
+  /** 最近一次玩家活动时间，用于"先服务活人多的房间" */
+  lastActiveAt?: (roomId: string) => number | undefined;
 }
 
 export interface AmbientChatPolicy {
@@ -82,10 +86,12 @@ export class AmbientChat {
     this.byRoom.clear();
   }
 
-  /** 给 /map 读的气泡：只返回未过期的、每个说话人只留最后一句。 */
-  recent(roomId: string): AmbientLine[] {
+  /** 给 /map 读的气泡：只返回当前地点的、未过期的；每个说话人只留最后一句。 */
+  recent(roomId: string, locId?: string): AmbientLine[] {
     const now = this.now();
-    const fresh = (this.byRoom.get(roomId) ?? []).filter((l) => now - l.at <= this.policy.ttlMs);
+    const fresh = (this.byRoom.get(roomId) ?? []).filter(
+      (l) => now - l.at <= this.policy.ttlMs && (locId === undefined || l.locId === locId),
+    );
     const latest = new Map<string, AmbientLine>();
     for (const line of fresh) latest.set(line.speakerId, line);
     return [...latest.values()].slice(-(this.policy.maxBubbles ?? 3));
@@ -98,8 +104,11 @@ export class AmbientChat {
       const picked: string[] = [];
       for (const roomId of await this.deps.store.listRooms()) {
         if (this.deps.isIdle?.(roomId)) continue;
+        if (this.deps.isBusy?.(roomId)) continue;
         picked.push(roomId);
       }
+      // 先服务最近有玩家活动的房间，否则 listRooms 的顺序会让同一批房间吃满每拍配额。
+      picked.sort((a, b) => (this.deps.lastActiveAt?.(b) ?? 0) - (this.deps.lastActiveAt?.(a) ?? 0));
       for (const roomId of picked.slice(0, this.policy.maxRoomsPerBeat ?? 3)) {
         try {
           await this.burst(roomId);
@@ -124,9 +133,9 @@ export class AmbientChat {
       byLoc.set(loc, list);
     }
     const playerLoc = state.room.scene.locId;
-    const atPlayer = byLoc.get(playerLoc) ?? [];
-    const chosen = atPlayer.length >= 2 ? atPlayer : [...byLoc.values()].sort((a, b) => b.length - a.length)[0];
-    if (!chosen || chosen.length < 2) return;
+    const chosen = byLoc.get(playerLoc) ?? [];
+    // 只给"玩家当前所在地点"产气泡：别处产生的气泡玩家看不到，纯浪费 token；返回给客户端也会泄漏别处动静。
+    if (chosen.length < 2) return;
     const locId = locatedAt(state, chosen[0]!.id) ?? playerLoc;
     const locName = state.entities[locId]?.name ?? locId;
     const names = chosen.map((n) => n.name);
@@ -162,7 +171,7 @@ export class AmbientChat {
       const who = chosen.find((n) => n.name === item.speaker);
       if (!who) continue;
       lines.push({
-        id: `amb_${at}_${who.id}`,
+        id: `amb_${at}_${who.id}_${lines.length}`,
         roomId,
         locId,
         speakerId: who.id,
@@ -239,17 +248,4 @@ function extractBurst(text: string): unknown {
     }
   }
   return null;
-}
-
-function parseLoose(text: string): unknown {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const body = fenced?.[1] ?? text;
-  const start = body.indexOf("[");
-  const end = body.lastIndexOf("]");
-  if (start < 0 || end <= start) return null;
-  try {
-    return JSON.parse(body.slice(start, end + 1));
-  } catch {
-    return null;
-  }
 }
