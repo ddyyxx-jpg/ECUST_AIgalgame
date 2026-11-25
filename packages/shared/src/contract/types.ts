@@ -530,7 +530,7 @@ export interface LlmMessage {
 }
 
 /** LLM 调用用途：网关按用途套用 `content/llm/routes.json` 的模型/预算（部署细节，引擎只声明"这是什么调用"） */
-export type LlmPurpose = "turn" | "conversation" | "decision" | "canonize";
+export type LlmPurpose = "turn" | "conversation" | "decision" | "canonize" | "ambient";
 
 export interface LlmRequest {
   messages: LlmMessage[];

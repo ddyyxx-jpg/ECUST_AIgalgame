@@ -24,6 +24,11 @@
 - v2 会话：`content/sim/policy.json` 新增 `chat{enabled,autoTurns,minPresentNpcs}`；玩家回合写完后，同一条 SSE 里让在场 NPC 自动再聊 `autoTurns` 轮（写完之后才跑，不额外增加玩家等待）。
 - 引擎：`auto` 回合豁免 `minReplyIntervalMs`（真正的上限仍是 `maxAutoRounds` 与每小时条数/调用上限）；提示词在「玩家没接话」时允许 NPC 主动开口，并要求用 broadcast 让在场者（含玩家）都能听见。
 - `CONVERSATION_PROMPT_VERSION` `2026-11-21.1` → `2026-11-24.1`（提示词静态段与动态段都有改动）。
+## 未发布 — NPC 气泡独立模型档（CONTRACT 3.12.0）
+
+- `LlmPurpose` 增加 `"ambient"`；`content/llm/routes.json` 可给气泡单独配模型 / `max_tokens` / 温度 / 超时。默认 `{ "maxTokens": 200 }`，不配也沿用默认模型。
+- `apps/server/src/ambient-chat.ts` 的气泡调用从 `purpose:"turn"` 改为 `"ambient"`。
+
 ## 未发布 — v2 会话行动点 + 内容层世界观进 v2（CONTRACT 3.11.0）
 
 ### 修复（试玩反馈：NPC 之间的名字）
@@ -621,3 +626,18 @@
 - `Turn` 流水线（play → apply → tick）、模块宿主、LLM 网关、HTTP + SSE 服务端、React Web。
 - 示例模块 `trade` / `core` 与 `packages/testkit` 测试工具。
 - 六份规范文档与 v2 JSON Schema。
+
+## 未发布 — NPC 环境闲聊气泡 + 任务型后台节流
+
+### 新功能
+- 新增 `apps/server/src/ambient-chat.ts`：每 30s 为「有人活跃的房间」产 1~2 句 NPC 之间的闲聊；只保留在每个房间的内存环形缓冲里（45s TTL、每人最后一句、最多 3 条），不写 EventLog、不写记忆。
+- `GET /map` 额外返回 `chatter[]`；前端 `MapViewport` 按 `speakerId` 把气泡贴在 NPC 头顶（随地图缩放、不挡点击），地图轮询 12s → 6s。
+- `content/sim/policy.json` 新增 `chat.ambient{enabled, intervalMs, ttlMs, maxBubbles, activeWithinMs, maxRoomsPerBeat}`。
+
+### 修复（试玩反馈：NPC 自己的移动）
+- 自动时钟到 `maxTick` 后默认继续停住；新增 `clock.autoAdvancePhase`（代码默认 false，本分支 `content/sim/policy.json` 设为 true），开启后到顶自动换段，房间不再永久停摆；这是对 D22「时钟不切 phase」的显式例外，docs/06 与 content/sim/README 已同步。
+- `NpcDecisionService`：`stay` 租约也算空闲（此前只认「完全没租约」，日程写好 stay 后候选永远为空）；不再排除与玩家同地点的 NPC（talk 冻结仍由租约保护）；`parseDecision` 支持推理文字后的 JSON（`lastJsonObject`）；move 租约 `remaining` 2 → 1，下一拍就走。
+- `RoomActivity`：新增 `touch()`/`idleSince()`；`/map`、`/state` 读接口记活跃。`SimClock.skipRoom` 与 `AmbientChat.isIdle` 据此跳过 30 分钟没人进过的房间，避免给几十个历史档逐个调模型把上游打满。
+
+### 验证
+- `typecheck` 0 错；`vitest` 138 文件 / 1123 例全过；`check:contract` 9/9（CONTRACT_VERSION 3.11.0）。

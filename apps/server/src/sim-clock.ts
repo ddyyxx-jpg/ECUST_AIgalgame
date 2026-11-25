@@ -2,7 +2,8 @@
  * 自动时钟（D22）：只按 `ticks` 推进当前 phase 内的时间刻度，**绝不切 phase**。
  * - 默认关闭（content/sim/policy.json 的 clock.enabled=false），不启动定时器；
  * - 每拍对每个房间串行调用 MapService.tick({ticks})；单房间失败/超时只跳过本房间；
- * - 到达 maxTick 就停，等玩家主动 advance（自动推进不替玩家做跨阶段决定）；
+ * - 到达 maxTick 默认停住、等玩家主动 advance；`clock.autoAdvancePhase=true` 时由时钟换段
+ *   （否则房间 tick 用满后永久停摆，NPC 再也不动——试玩反馈 bug）；
  * - 后台任务（八卦/密谋等）占用房间时跳过，避免两套时间同时写同一房间。
  */
 import type { SimClockPolicy } from "./sim.policy.ts";
@@ -19,7 +20,7 @@ export interface SimClockTickResult {
 }
 
 export interface SimClockMap {
-  tick(roomId: string, opts: { ticks: number }): Promise<SimClockTickResult>;
+  tick(roomId: string, opts: { ticks?: number; advance?: boolean }): Promise<SimClockTickResult>;
 }
 
 export interface SimClockDeps {
@@ -34,6 +35,8 @@ export interface SimClockDeps {
   warn?: (message: string) => void;
   /** 单房间推进超时；防止一个卡死的房间拖住整条时钟 */
   roomTimeoutMs?: number;
+  /** 死房间判断：为 true 则本拍跳过（由 RoomActivity 提供，避免给几十个死档烧 LLM） */
+  skipRoom?: (roomId: string) => boolean;
 }
 
 const BEFORE_TICK_TIMEOUT = Symbol("beforeTick-timeout");
@@ -104,6 +107,8 @@ export class SimClock {
         // 单房间失败只跳过本房间：一个坏档不能拖住其他房间的时钟。
         try {
           if (this.running.has(roomId)) continue;
+          // 死房间（长时间没人进）不推时间：试玩环境有几十个历史房，逐个跑决策会把上游打满。
+          if (this.deps.skipRoom?.(roomId)) continue;
           if (this.deps.isBusy?.(roomId)) continue;
           // 先抢房间锁：玩家回合正在执行时直接跳过，绝不与回合交错；拿到锁后
           // beforeTick 与 map.tick 都在锁内，玩家回合会在 acquire 处等本拍结束。
@@ -112,8 +117,21 @@ export class SimClock {
           let handedToTick = false;
           try {
             const state = await this.deps.store.snapshot(roomId);
+
             const roomLeft = this.policy.maxTick > 0 ? this.policy.maxTick - state.clock.tick : Number.POSITIVE_INFINITY;
-            if (roomLeft <= 0) continue;
+            if (roomLeft <= 0) {
+              // 当前 phase 的 tick 用满：不换 phase 的话房间会永久停摆（NPC 再也不动）。
+              // 默认不自动换段（时间由玩家推），只有显式打开 autoAdvancePhase 才让时钟接管。
+              if (!this.policy.autoAdvancePhase) continue;
+              const advanced = await this.tickRoom(roomId, { advance: true }, release ?? undefined);
+              handedToTick = release !== undefined;
+              if (advanced === undefined) {
+                this.warn(`[sim-clock] 房间 ${roomId} 自动换段超时，本拍跳过`);
+              } else if (!advanced.ok) {
+                this.warn(`[sim-clock] 房间 ${roomId} 自动换段被拒：${advanced.code ?? "E_UNKNOWN"} ${advanced.message ?? ""}`.trim());
+              }
+              continue;
+            }
             if (this.deps.beforeTick) {
               // 决策本身可能调 LLM：必须有上限，否则它一挂，beating 永远不复位，整个时钟停摆。
               const budget = this.deps.roomTimeoutMs ?? 30_000;
@@ -132,7 +150,7 @@ export class SimClock {
               }
             }
             const ticks = Math.min(this.policy.ticksPerBeat, roomLeft);
-            const result = await this.tickRoom(roomId, ticks, release ?? undefined);
+            const result = await this.tickRoom(roomId, { ticks }, release ?? undefined);
             handedToTick = release !== undefined;
             if (result === undefined) {
               this.warn(`[sim-clock] 房间 ${roomId} 推进超时（${this.deps.roomTimeoutMs ?? 30_000}ms），本拍跳过`);
@@ -157,10 +175,10 @@ export class SimClock {
 
   private async tickRoom(
     roomId: string,
-    ticks: number,
+    request: { ticks?: number; advance?: boolean },
     releaseLock?: () => void,
   ): Promise<SimClockTickResult | undefined> {
-    const underlying = this.deps.map.tick(roomId, { ticks });
+    const underlying = this.deps.map.tick(roomId, request);
     this.running.set(roomId, underlying);
     const timeoutMs = this.deps.roomTimeoutMs ?? 30_000;
     let released = false;

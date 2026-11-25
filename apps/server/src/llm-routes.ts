@@ -32,6 +32,7 @@ const FileSchema = z
         conversation: RouteSchema.optional(),
         decision: RouteSchema.optional(),
         canonize: RouteSchema.optional(),
+        ambient: RouteSchema.optional(),
       })
       .strict()
       .default({}),

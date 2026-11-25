@@ -68,6 +68,8 @@ export interface AppDeps {
     stats(): { worldId: string; version: number; writtenToday: number; writtenTotal: number; circuitOpen: boolean; consecutiveJudgeFailures: number };
     sample(limit: number): MemoryRecord[];
   };
+  /** NPC 环境闲聊气泡（只读内存缓冲，不写存档） */
+  ambient?: { recent(roomId: string, locId?: string): unknown[]; stop?: () => void };
   /** NPC 自由对话：玩家回合写完后，同一条流里让在场 NPC 自己再聊 autoTurns 轮 */
   autoChat?: { turns: number; minPresentNpcs: number };
   /** 管理员令牌；canonize 端点用它鉴权（地图端点由 MapService 自己校验） */
@@ -824,11 +826,13 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
       // 前端无需额外超时检测：SSE 的 onUnconfirmed（正常 EOF 未收到 committed/error）已覆盖断流。
       const heartbeat = setInterval(() => reply.raw.write(": ping\n\n"), 15_000);
       heartbeat.unref?.();
+      let playerCommitted = false;
       try {
         if (caught !== undefined) throw caught;
         if (opened) sseWrite(reply.raw, opened.type, opened);
         // 与 /turns 同一口径：收齐后按最终状态脱敏再一次性写出（模型可能把真名写进台词）
         const committed = out.find((e) => e.type === "conversation.committed");
+        playerCommitted = Boolean(committed);
         let finalState = committed?.type === "conversation.committed" ? committed.state : access.state;
         // 与 v1 /turns 同一口径：先按回合结束后的状态解锁「玩家知道了谁的名字」，再算脱敏名单。
         // 否则玩家问「你叫什么」、对方答出真名的那一回合，答复仍会被遮成外貌占位名——表现上
@@ -890,9 +894,16 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
                   const autoCommitted = batch.find((e) => e.type === "conversation.committed");
                   if (autoCommitted?.type === "conversation.committed") finalState = autoCommitted.state;
                   const autoPlaceholders = unknownPlaceholders(finalState, deps.appearance);
-                  const visibleAuto = projectConversationEvents(batch, actorId, members, deps.registry);
+                  const visibleAuto = projectConversationEvents(batch, actorId, members, deps.registry).map((ev) =>
+                    ev.type === "conversation.committed"
+                      ? { ...ev, proposals: projectProposalsForPlayer(ev.proposals) }
+                      : ev,
+                  );
                   for (const ev of visibleAuto) sseWrite(reply.raw, ev.type, maskNamesDeep(ev, autoPlaceholders));
                 }
+              } catch (e) {
+                // auto 回合是"加映"：它失败不能把已经 committed 的玩家回合改写成 failed
+                console.warn(`[conversation] auto 回合失败，忽略：${roomId}`, e);
               } finally {
                 releaseAuto();
               }
@@ -904,7 +915,9 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
         // #104：异常路径按失败回收额度（未 committed），与 v1 /turns 的 catch 同口径；重放命中不结算
         // #117：日志可能已替换（StoreCommitUnknownError）时记 unconfirmed；房间只是被冻结则按 failed 释放
         const uncertain = e instanceof StoreCommitUnknownError;
-        if (charged && turnScope && ledger) ledger.transition(turnScope, uncertain ? "unconfirmed" : "failed");
+        if (charged && turnScope && ledger && !playerCommitted) {
+          ledger.transition(turnScope, uncertain ? "unconfirmed" : "failed");
+        }
         const err: ConversationEvent = {
           type: "conversation.error", sessionId, code: roomSyncFault ? "E_STORE_FAULT" : "E_MODULE_FAULT",
           message: e instanceof Error ? e.message : String(e),
@@ -978,6 +991,8 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!(await roomGate(roomId, reply))) return reply;
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
+    // 鉴权通过才记活跃：403 请求不应该让自动时钟/决策/气泡继续为这个房间烧 LLM。
+    deps.roomActivity?.touch(roomId);
     // 原始快照里带着实体真名：未认识的人必须在这里也脱敏，否则"服务端不下发真名"
     // 只是口号——新建房间就能从 /state 看光所有 NPC（审阅 P0-1）。
     // plot 的 GM 字段（forbidReveal/leakPoints/goal…）不能随 /state 下发（PR #147 审阅 P0）
@@ -1362,7 +1377,19 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps): void {
     const access = await guardRoom(req, reply, deps, roomId, userIdOf);
     if (!access) return reply;
     const q = req.query as { actorId?: string };
-    return safe(reply, () => deps.map.getMap(roomId, q.actorId));
+    deps.roomActivity?.touch(roomId);
+    return safe(reply, async () => {
+      const result = await deps.map.getMap(roomId, q.actorId);
+      if (!result.ok) return result;
+      // 气泡是纯氛围层：单独挂在 map 响应上，前端按 NPC 坐标贴到头顶。
+      // 气泡文本/说话人同样过遮罩：未认识的 NPC 只能显示外貌占位名（与 /state、/events 同口径）。
+      const fresh = await deps.store.snapshot(roomId);
+      const chatter = maskNamesDeep(
+        deps.ambient?.recent(roomId, fresh.room.scene.locId) ?? [],
+        unknownPlaceholders(fresh, deps.appearance),
+      );
+      return { ...result, map: { ...result.map, chatter } };
+    });
   });
 
   app.post("/api/v1/rooms/:roomId/map/travel", async (req, reply) => {

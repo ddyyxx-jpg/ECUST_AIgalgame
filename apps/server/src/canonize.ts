@@ -45,7 +45,7 @@ export class LlmCanonizeJudge implements CanonizeJudge {
   constructor(private readonly llm: LlmPort) {}
 
   async review(c: PermanentCandidate): Promise<{ allow: boolean; reason?: string }> {
-    const res = await this.llm.chat({ json: true, temperature: 0, maxTokens: 128, messages: buildMessages(c) });
+    const res = await this.llm.chat({ purpose: "canonize", json: true, temperature: 0, maxTokens: 128, messages: buildMessages(c) });
     const verdict = parseVerdict(res.json ?? res.raw);
     if (!verdict) throw new Error(`canonize 审核输出无法解析：${res.raw.slice(0, 120)}`);
     return verdict;

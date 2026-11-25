@@ -15,7 +15,7 @@ function storeOf(ticks: Record<string, number>, rooms = Object.keys(ticks)): Sim
 describe("SimClock（D22 自动推进）", () => {
   it("每个房间只推 ticks，不切 phase；到 maxTick 的房间跳过", async () => {
     const calls: { roomId: string; ticks: number }[] = [];
-    const map: SimClockMap = { tick: async (roomId, opts) => { calls.push({ roomId, ticks: opts.ticks }); return { ok: true }; } };
+    const map: SimClockMap = { tick: async (roomId, opts) => { if (opts.ticks !== undefined) calls.push({ roomId, ticks: opts.ticks }); return { ok: true }; } };
     const clock = new SimClock({
       store: storeOf({ r1: 0, r2: 24 }),
       map,
@@ -29,11 +29,27 @@ describe("SimClock（D22 自动推进）", () => {
     const calls: number[] = [];
     const clock = new SimClock({
       store: storeOf({ r1: 23 }),
-      map: { tick: async (_roomId, opts) => { calls.push(opts.ticks); return { ok: true }; } },
+      map: { tick: async (_roomId, opts) => { if (opts.ticks !== undefined) calls.push(opts.ticks); return { ok: true }; } },
       policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 3, maxTick: 24 },
     });
     await clock.beat();
     expect(calls).toEqual([1]);
+  });
+
+  it("tick 用满 maxTick：默认停住；开 autoAdvancePhase 才自动换段", async () => {
+    const advanced: boolean[] = [];
+    const store = storeOf({ r1: 24 });
+    const base = {
+      store,
+      map: { tick: async (_roomId: string, opts: { ticks?: number; advance?: boolean }) => { if (opts.advance) advanced.push(true); return { ok: true }; } },
+      warn: () => undefined,
+    };
+    const frozen = new SimClock({ ...base, policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 } });
+    await frozen.beat();
+    expect(advanced).toEqual([]);
+    const auto = new SimClock({ ...base, policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24, autoAdvancePhase: true } });
+    await auto.beat();
+    expect(advanced).toEqual([true]);
   });
 
   it("beforeTick 永挂时本拍不卡死：超时后仍推进时间，下一拍还能跑", async () => {
@@ -42,7 +58,7 @@ describe("SimClock（D22 自动推进）", () => {
     let hanging = true;
     const clock = new SimClock({
       store: storeOf({ r1: 0 }),
-      map: { tick: async (_roomId, opts) => { ticks.push(opts.ticks); return { ok: true }; } },
+      map: { tick: async (_roomId, opts) => { if (opts.ticks !== undefined) ticks.push(opts.ticks); return { ok: true }; } },
       policy: { enabled: true, intervalMs: 60000, ticksPerBeat: 1, maxTick: 24 },
       roomTimeoutMs: 20,
       warn: (m) => warnings.push(m),

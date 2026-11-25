@@ -18,9 +18,28 @@ export class RoomActivity {
   private readonly active = new Map<string, number>();
   /** 房间空闲时要唤醒的等待者；释放到 0 时一次性唤醒。 */
   private readonly waiters = new Map<string, Array<() => void>>();
+  /** 最近一次有玩家请求进入该房间的时间（墙钟）；给后台任务判断"死房间"用。 */
+  private readonly lastTouch = new Map<string, number>();
+
+  /** 只记活跃、不占忙标记（读接口用：玩家在地图上看着，后台就该继续跑）。 */
+  touch(roomId: string): void {
+    this.lastTouch.set(roomId, Date.now());
+  }
+
+  /** 最近一次玩家进入该房间的时间；从未进入过返回 undefined。 */
+  lastTouchedAt(roomId: string): number | undefined {
+    return this.lastTouch.get(roomId);
+  }
+
+  /** 很久没有玩家进入过的房间：后台时钟/闲聊不该继续为它花钱。 */
+  idleSince(roomId: string, ms: number): boolean {
+    const at = this.lastTouch.get(roomId);
+    return at === undefined || Date.now() - at > ms;
+  }
 
   /** 标记房间进入活动；返回幂等的释放函数。 */
   enter(roomId: string): () => void {
+    this.lastTouch.set(roomId, Date.now());
     this.active.set(roomId, (this.active.get(roomId) ?? 0) + 1);
     let released = false;
     return () => {

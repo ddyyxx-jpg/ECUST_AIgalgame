@@ -13,6 +13,11 @@ import {
   parseDecision,
 } from "./npc-decision.ts";
 
+const OPT2 = [
+  { index: 1, locId: "loc_a", label: "留在图书馆" },
+  { index: 2, locId: "loc_b", label: "去食堂" },
+] as const;
+
 function state(overrides: Partial<WorldState> = {}): WorldState {
   return {
     schemaVersion: 2,
@@ -61,10 +66,10 @@ describe("npc-decision 纯函数", () => {
   });
 
   it("解析 1-based choice；坏 JSON/越界返回 null；fallback 确定性", () => {
-    expect(parseDecision({ choice: 2, reason: "去吃饭" }, 2)).toEqual({ choice: 2, reason: "去吃饭" });
-    expect(parseDecision('```json\n{"choice":1}\n```', 2)).toEqual({ choice: 1 });
-    expect(parseDecision({ choice: 3 }, 2)).toBeNull();
-    expect(parseDecision("not json", 2)).toBeNull();
+    expect(parseDecision({ choice: 2, reason: "去吃饭" }, OPT2)).toEqual({ choice: 2, reason: "去吃饭" });
+    expect(parseDecision('```json\n{"choice":1}\n```', OPT2)).toEqual({ choice: 1 });
+    expect(parseDecision({ choice: 3 }, OPT2)).toBeNull();
+    expect(parseDecision("not json", OPT2)).toBeNull();
     const s = state();
     expect(fallbackChoice("room_a", "npc_1", s, 3)).toBe(fallbackChoice("room_a", "npc_1", s, 3));
     expect(fallbackChoice("room_a", "npc_1", s, 3)).toBeGreaterThanOrEqual(0);
@@ -99,6 +104,39 @@ describe("NpcDecisionService", () => {
     expect(expected).toBe(7);
   });
 
+  it("NPC 只是原地停留（stay 租约）时仍可被自由活动接管", async () => {
+    const applied: unknown[] = [];
+    const stay = JSON.stringify({ action: "stay", target: "loc_a", remaining: 2, phase: "morning" });
+    const base = state();
+    const withStay = {
+      ...base,
+      entities: { ...base.entities, npc_1: { ...base.entities.npc_1!, attrs: { sim_lease: stay } } },
+    } as WorldState;
+    const service = new NpcDecisionService({
+      store: { snapshot: async () => withStay, load: async () => 3 },
+      arbiter: { apply: async (_room, ops) => { applied.push(ops); return { ok: true }; } },
+      llm: {
+        chat: async () => ({ raw: '{"choice":2}', json: { choice: 2 }, usage: { promptTokens: 1, completionTokens: 1, calls: 1 }, model: "fake", latencyMs: 1 }),
+      },
+      policy: { enabled: true, maxPerBeat: 1, intervalTicks: 1, hourlyCalls: 10, maxOptions: 4 },
+    });
+    await service.run("room_a", withStay);
+    expect(applied).toHaveLength(1);
+  });
+
+  it("模型用 option/action/字符串表达选择时也能解析", () => {
+    expect(parseDecision({ option: 2 }, OPT2)).toEqual({ choice: 2 });
+    expect(parseDecision({ action: 1 }, OPT2)).toEqual({ choice: 1 });
+    expect(parseDecision({ action: "stay in canteen" }, OPT2)).toEqual({ choice: 1, reason: "stay in canteen" });
+    expect(parseDecision({ action: "去食堂" }, OPT2)).toEqual({ choice: 2, reason: "去食堂" });
+    expect(parseDecision({ choice: "2" }, OPT2)).toEqual({ choice: 2 });
+  });
+
+  it("思考型模型把 JSON 夹在推理后面时也能解析", () => {
+    const raw = '先想想：他应该去食堂。\n{"choice": 2, "reason": "去吃饭"}';
+    expect(parseDecision(raw, OPT2)).toEqual({ choice: 2, reason: "去吃饭" });
+  });
+
   it("慢决策期间玩家写了 talk 租约：放弃写入，不覆盖冻结", async () => {
     let reads = 0;
     let writes = 0;
@@ -108,7 +146,7 @@ describe("NpcDecisionService", () => {
         snapshot: async () => {
           reads += 1;
           const s = state();
-          if (reads > 1) s.entities.npc_1!.attrs.sim_lease = JSON.stringify({ action: "talk", target: "loc_a", remaining: 2, phase: "morning" });
+          if (reads > 1) s.entities.npc_1!.attrs.sim_lease = JSON.stringify({ action: "talk", target: "loc_a", remaining: 1, phase: "morning" });
           return s;
         },
       },
@@ -190,6 +228,15 @@ describe("NpcDecisionService 真实落盘", () => {
     await service.run(room);
     const snap = await store.snapshot(room);
     const lease = JSON.parse(String(snap.entities.npc_1.attrs.sim_lease));
-    expect(lease).toMatchObject({ action: "move", target: "loc_b", remaining: 2, phase: "morning" });
+    expect(lease).toMatchObject({ action: "move", target: "loc_b", remaining: 1, phase: "morning" });
+  });
+
+  it("去掉「留下」选项后，模型回 stay 不会被误映射成 1 号移动选项", () => {
+    const moves = [
+      { index: 1, locId: "loc_canteen", label: "去食堂" },
+      { index: 2, locId: "loc_library", label: "去图书馆" },
+    ];
+    expect(parseDecision({ action: "stay in canteen" }, moves)).toBeNull();
+    expect(parseDecision({ action: "留在原地" }, moves)).toBeNull();
   });
 });

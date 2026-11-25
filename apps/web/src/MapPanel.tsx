@@ -90,9 +90,31 @@ export default function MapPanel({ roomId, actorId, push, onRefreshState, onStor
     }
   }, [applyMap, roomId]);
 
+  /** 静默重拉：后台时钟每 45s 推进一拍，NPC 会走动；面板开着时不重拉会一直停在打开那一刻。 */
+  const silentReload = useCallback(async () => {
+    const seq = ++reloadSeq.current;
+    try {
+      const next = await getMap(roomId);
+      if (seq !== reloadSeq.current) return;
+      applyMap(next);
+      setErr("");
+    } catch {
+      /* 轮询失败不打断玩家：保留上一版地图，下次再试 */
+    }
+  }, [applyMap, roomId]);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (busy) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void silentReload();
+    }, 6_000);
+    return () => window.clearInterval(timer);
+  }, [busy, silentReload]);
 
   // 认识/改名后地图标注必须立刻更新：状态版本真正变化时才静默重拉（不显示加载态）。
   // 版本没变不发请求；用序号丢弃过期响应，避免覆盖 travel/tick 刚写入的地图。
