@@ -48,19 +48,19 @@
 
 | 字段 | 含义 |
 |---|---|
-| `enabled` | 默认 `false`；开启后服务端每 `intervalMs` 对每个房间调一次 `MapService.tick({ticks: ticksPerBeat})` |
+| `enabled` | 默认 `false`；本试玩分支设为 `true`。开启后服务端每 `intervalMs` 对每个房间调一次 `MapService.tick({ticks: ticksPerBeat})` |
 | `intervalMs` | 真实时间间隔；太短会让 NPC 租约消耗过快，建议 ≥ 30000 |
 | `ticksPerBeat` | 每拍推进几个游戏 tick；必须是 1..8（与 `time.advance.ticks` 的 zod 上限一致） |
-| `maxTick` | 当前 phase 内最多推到第几 tick，到顶就停，等玩家 `advance`；`0` = 不设上限 |
+| `maxTick` | 当前 phase 内最多推到第几 tick；到顶时看 `autoAdvancePhase`：`true` 由时钟换段（本分支），`false` 停住等玩家 `advance`；`0` = 不设上限 |
 
 `talkLeaseTicks` 是**顶层字段**（与 `clock` / `actionPoints` / `decision` 同级，默认 12），不是 `clock` 内部字段；它控制 talk 租约最多冻结多少 tick，进程崩溃/恢复失败时到点自动作废，防 NPC 永久冻结。
 
-自动时钟**只推 tick，不切 phase**（D22）；`advance:true` 仍由玩家/前端显式触发，并回满行动点。`clock` 与 `actionPoints` 相互独立：只想跑时钟时，`actionPoints` 可以整段省略（行动点代价按 0 处理）。
+自动时钟只推 tick；`autoAdvancePhase:true`（本分支）时到顶会换段，是对 D22 的显式例外（否则 NPC 在 tick 用满后永久停摆）。`advance:true` 仍由玩家/前端显式触发，并回满行动点。`clock` 与 `actionPoints` 相互独立：只想跑时钟时，`actionPoints` 可以整段省略（行动点代价按 0 处理）。
 
 ## `decision`（NPC 自由活动：感知投影 + 编号菜单 + 单选决策）
 
 ```json
-"decision": { "enabled": false, "maxPerBeat": 2, "intervalTicks": 6, "hourlyCalls": 12, "maxOptions": 4 }
+"decision": { "enabled": true, "maxPerBeat": 3, "intervalTicks": 1, "hourlyCalls": 60, "maxOptions": 4 }
 ```
 
 | 字段 | 含义 |

@@ -15,6 +15,7 @@ const dbg = (...args: unknown[]) => {
   if (process.env.GALGAME_DEBUG_SIM === "1") console.log("[sim-dbg]", ...args);
 };
 import type { Envelope, Id, LlmPort, Phase, Proposal, WorldState } from "../../../packages/shared/src/contract/types.ts";
+import { parseLease } from "../../../content/modules/map/lease.ts";
 
 const LEASE = "sim_lease";
 const PHASE_LABEL: Record<Phase, string> = {
@@ -250,10 +251,16 @@ export function fallbackChoice(roomId: string, npcId: string, state: WorldState,
   return (hash >>> 0) % Math.max(1, optionCount);
 }
 
-/** 空闲 = 没租约，或只是「原地停留」：停留不算忙，自由活动可以接管。 */
+/**
+ * 空闲 = 没租约，或只是「原地停留」。
+ *
+ * 为什么 stay 算空闲：日程每拍都会给每个 NPC 写 `stay remaining:2`，如果 stay 也算占用，
+ * 候选集永远是空、NPC 再也不动（试玩反馈的根因之一）。为了不让"停留"被每拍反复改主意，
+ * 决策侧另有每 NPC 3 拍的冷却（见 candidates），占用时间由冷却而不是租约表达。
+ */
 function idleLease(raw: unknown): boolean {
-  if (raw === undefined || raw === "") return true;
-  return typeof raw === "string" && raw.includes('"action":"stay"');
+  const lease = parseLease(raw);
+  return lease === null || lease.action === "stay";
 }
 
 function hourKey(ms: number): string {
@@ -262,6 +269,9 @@ function hourKey(ms: number): string {
 
 export class NpcDecisionService {
   private readonly calls = new Map<string, { hour: string; count: number }>();
+  /** 每个 NPC 上次被决策的绝对刻度；只在这里做冷却，避免「留一下又走」的来回抽动 */
+  private readonly lastDecided = new Map<string, number>();
+  private static readonly DECIDE_COOLDOWN_TICKS = 3;
   private readonly warn: (message: string) => void;
   private readonly now: () => number;
 
@@ -298,15 +308,18 @@ export class NpcDecisionService {
       const option = options[Math.max(0, Math.min(options.length - 1, open.choice - 1))];
       if (!option) continue;
       dbg(`pick ${npcId} choice=${open.choice}/${options.length} → ${option.locId} 「${option.label}」(${open.reason ?? "-"})`);
+      this.lastDecided.set(npcId, snapshot.clock.day * 10000 + snapshot.clock.tick);
       await this.applyLease(roomId, snapshot, npcId, option, open.reason);
       dbg(`lease ${npcId} → ${option.locId} 「${option.label}」`);
     }
   }
 
   private candidates(state: WorldState, limit: number): string[] {
+    const clockIndex = state.clock.day * 10000 + state.clock.tick;
     const all = Object.values(state.entities)
       .filter((e) => e.kind === "npc" && e.status === "active")
       .filter((e) => idleLease(e.attrs[LEASE]))
+      .filter((e) => clockIndex - (this.lastDecided.get(e.id) ?? -999) >= NpcDecisionService.DECIDE_COOLDOWN_TICKS)
       .map((e) => e.id)
       .sort();
     if (all.length === 0) return [];

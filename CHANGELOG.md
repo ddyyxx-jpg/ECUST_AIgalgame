@@ -630,7 +630,7 @@
 - `content/sim/policy.json` 新增 `chat.ambient{enabled, intervalMs, ttlMs, maxBubbles, activeWithinMs, maxRoomsPerBeat}`。
 
 ### 修复（试玩反馈：NPC 自己的移动）
-- 自动时钟到 `maxTick` 后默认继续停住；新增 `clock.autoAdvancePhase`（默认 false），开启后到顶自动换段，房间不再永久停摆。
+- 自动时钟到 `maxTick` 后默认继续停住；新增 `clock.autoAdvancePhase`（代码默认 false，本分支 `content/sim/policy.json` 设为 true），开启后到顶自动换段，房间不再永久停摆；这是对 D22「时钟不切 phase」的显式例外，docs/06 与 content/sim/README 已同步。
 - `NpcDecisionService`：`stay` 租约也算空闲（此前只认「完全没租约」，日程写好 stay 后候选永远为空）；不再排除与玩家同地点的 NPC（talk 冻结仍由租约保护）；`parseDecision` 支持推理文字后的 JSON（`lastJsonObject`）；move 租约 `remaining` 2 → 1，下一拍就走。
 - `RoomActivity`：新增 `touch()`/`idleSince()`；`/map`、`/state` 读接口记活跃。`SimClock.skipRoom` 与 `AmbientChat.isIdle` 据此跳过 30 分钟没人进过的房间，避免给几十个历史档逐个调模型把上游打满。
 

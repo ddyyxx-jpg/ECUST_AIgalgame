@@ -37,6 +37,8 @@ export interface AmbientChatDeps {
   isBusy?: (roomId: string) => boolean;
   /** 最近一次玩家活动时间，用于"先服务活人多的房间" */
   lastActiveAt?: (roomId: string) => number | undefined;
+  /** 审核：和 /turns、/conversation 同一条链路；unavailable 时不发布本轮气泡（fail-closed） */
+  review?: (args: { roomId: string; actorId: string; text: string }) => Promise<"ok" | "blocked" | "unavailable">;
 }
 
 export interface AmbientChatPolicy {
@@ -179,6 +181,22 @@ export class AmbientChat {
         text: item.line,
         at,
       });
+    }
+    if (lines.length === 0) return;
+    if (this.deps.review) {
+      const passed: AmbientLine[] = [];
+      for (const line of lines) {
+        const verdict = await this.deps.review({ roomId, actorId: line.speakerId, text: line.text });
+        if (verdict === "unavailable") {
+          // 审核器故障：整轮不发布（和会话层 fail-closed 一致），也不惩罚任何人
+          this.warn(`[ambient] 房间 ${roomId} 审核不可用，本轮流产气泡`);
+          return;
+        }
+        if (verdict === "blocked") continue;
+        passed.push(line);
+      }
+      lines.length = 0;
+      lines.push(...passed);
     }
     if (lines.length === 0) return;
     const kept = [...(this.byRoom.get(roomId) ?? []), ...lines].slice(-24);

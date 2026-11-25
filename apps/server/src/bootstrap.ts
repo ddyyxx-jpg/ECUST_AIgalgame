@@ -515,6 +515,11 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
       return recent.slice(-3).join(" / ");
     },
   };
+  const conversationAudit = new ConversationAudit(
+    audit,
+    auditPolicy,
+    new AuditGate({ arbiter, store, registry, audit, policy: auditPolicy }),
+  );
   const conversation = new ConversationHostV2({
     store,
     arbiter,
@@ -524,7 +529,7 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
     policy: conversationPolicy,
     scene: new SceneManager(conversationScene, now),
     npc: new NpcAgent({ llm, modes: conversationModes, policy: conversationPolicy, ...(worldInfoFor ? { worldInfo: worldInfoFor } : {}) }),
-    audit: new ConversationAudit(audit, auditPolicy, new AuditGate({ arbiter, store, registry, audit, policy: auditPolicy })),
+    audit: conversationAudit,
     budget: talkBudget,
     // #153 复审 P1：行动点必须在默认路径（v2 会话）上也生效
     ...(simPolicy && simPolicy.actionCostPerTurn > 0
@@ -622,7 +627,23 @@ export async function createApp(cfg: ServerConfig): Promise<App> {
   // NPC 之间的环境闲聊：只产气泡（内存 TTL），不写世界状态、不进事件日志。
   const ambientChat = simPolicy?.ambientChat
     ? new AmbientChat(
-        { store, llm, isIdle: (roomId: string) => roomActivity.idleSince(roomId, 30 * 60_000) },
+        {
+          store,
+          llm,
+          isIdle: (roomId: string) =>
+            roomActivity.idleSince(roomId, simPolicy?.ambientChat?.activeWithinMs ?? 30 * 60_000),
+          isBusy: (roomId: string) => roomActivity.isBusy(roomId),
+          lastActiveAt: (roomId: string) => roomActivity.lastTouchedAt(roomId),
+          review: async ({ roomId, actorId, text }) => {
+            const outcome = await conversationAudit.review({
+              roomId,
+              actorId,
+              playerInput: "",
+              fields: [{ label: "NPC闲聊", text }],
+            });
+            return outcome.kind;
+          },
+        },
         { enabled: true, intervalMs: simPolicy.ambientChat.intervalMs, ttlMs: simPolicy.ambientChat.ttlMs, ...(simPolicy.ambientChat.maxBubbles === undefined ? {} : { maxBubbles: simPolicy.ambientChat.maxBubbles }), ...(simPolicy.ambientChat.activeWithinMs === undefined ? {} : { activeWithinMs: simPolicy.ambientChat.activeWithinMs }), ...(simPolicy.ambientChat.maxRoomsPerBeat === undefined ? {} : { maxRoomsPerBeat: simPolicy.ambientChat.maxRoomsPerBeat }) },
       )
     : undefined;

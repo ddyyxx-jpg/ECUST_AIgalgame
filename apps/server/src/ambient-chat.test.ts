@@ -148,4 +148,48 @@ describe("AmbientChat（气泡闲聊）", () => {
     expect(chat.recent("room_a", "loc_canteen")).toHaveLength(1);
     expect(chat.recent("room_a", "loc_library")).toHaveLength(0);
   });
+
+  it("审核 blocked 的那条直接丢，其余照发", async () => {
+    const chat = new AmbientChat(
+      {
+        store: { listRooms: async () => ["room_a"], snapshot: async () => state() },
+        llm: {
+          chat: async () => ({
+            raw: '[{"speaker":"林静","line":"这句不该出现"},{"speaker":"马骁","line":"这句可以"}]',
+            json: [{ speaker: "林静", line: "这句不该出现" }, { speaker: "马骁", line: "这句可以" }],
+            usage: { promptTokens: 1, completionTokens: 1, calls: 1 },
+            model: "fake",
+            latencyMs: 1,
+          }),
+        },
+        review: async ({ text }) => (text.includes("不该") ? "blocked" : "ok"),
+        now: () => 10,
+      },
+      { enabled: true, intervalMs: 30_000, ttlMs: 10_000 },
+    );
+    await chat.beat();
+    expect(chat.recent("room_a").map((l) => l.text)).toEqual(["这句可以"]);
+  });
+
+  it("审核 unavailable 时整轮不发布（fail-closed）", async () => {
+    const chat = new AmbientChat(
+      {
+        store: { listRooms: async () => ["room_a"], snapshot: async () => state() },
+        llm: {
+          chat: async () => ({
+            raw: '[{"speaker":"林静","line":"随便说说"}]',
+            json: [{ speaker: "林静", line: "随便说说" }],
+            usage: { promptTokens: 1, completionTokens: 1, calls: 1 },
+            model: "fake",
+            latencyMs: 1,
+          }),
+        },
+        review: async () => "unavailable",
+        now: () => 10,
+      },
+      { enabled: true, intervalMs: 30_000, ttlMs: 10_000 },
+    );
+    await chat.beat();
+    expect(chat.recent("room_a")).toEqual([]);
+  });
 });

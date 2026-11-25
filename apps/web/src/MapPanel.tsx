@@ -110,6 +110,7 @@ export default function MapPanel({ roomId, actorId, push, onRefreshState, onStor
   useEffect(() => {
     if (busy) return;
     const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       void silentReload();
     }, 6_000);
     return () => window.clearInterval(timer);
